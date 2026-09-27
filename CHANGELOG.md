@@ -6,7 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
-## [Unreleased]
+## [0.2.0] — 2026-09-28
+
+Packaging release: every release now ships ready-made Linux packages —
+`.deb` for Ubuntu/Debian, `.rpm` for Fedora/RHEL, and a per-release
+`PKGBUILD` for Arch — next to the binary tarballs. No engine changes; the
+download code is identical to v0.1.1.
 
 ### Added
 - **Linux packages in every release** (fast installation) — the release

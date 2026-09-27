@@ -32,6 +32,27 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-28] Release v0.2.0 — Super Z sandbox
+- **Commit(s):** (this commit) `chore(release): v0.2.0` + tag `v0.2.0`
+- **Did:** workspace version 0.1.1 → 0.2.0 (all 4 member crates via
+  `version.workspace`, Cargo.lock refreshed with `cargo update -w`),
+  CHANGELOG `[Unreleased]` finalized as `[0.2.0] — 2026-09-28`. Tag `v0.2.0`
+  pushed to trigger the release workflow on the tag-push path.
+- **Why:** ship the packaging feature as a real release so the GitHub release
+  page carries the new `.deb` / `.rpm` / `PKGBUILD` artifacts.
+- **Result / state:** expected v0.2.0 release artifacts:
+  `hyprfetch-0.2.0-{x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
+  x86_64-unknown-linux-musl}.tar.gz` + `.sha256`,
+  `hyprfetch_0.2.0-1_amd64.deb`, `hyprfetch-0.2.0-1.x86_64.rpm`, and
+  `PKGBUILD` (Arch, pinned to 0.2.0 + tarball sha256). Verified locally
+  before tagging: build + all 93 tests pass, binary reports `hyprfetch 0.2.0`.
+- **Notes for next sandbox:** if the release run fails, check the two new
+  x86_64 job steps first ("Build .deb" needs cargo-deb; "Build .rpm" needs
+  the apt `rpm` package) and the release job's PKGBUILD generation step —
+  all validated locally, but CI runners are the real test. Tag and workspace
+  version must always move together (rule now documented in
+  docs/development.md).
+
 ### [2026-09-28] Docs: install guide + design rationale, drift fixes, dependabot — Super Z sandbox
 - **Commit(s):** (this commit) `docs: add install + design docs, fix UI-path drift, add dependabot`
 - **Did:**
