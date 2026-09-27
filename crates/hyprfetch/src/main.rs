@@ -100,11 +100,20 @@ async fn main() -> Result<()> {
             let policy = hyprfetch_core::SsrfPolicy {
                 block_private: !allow_private,
             };
-            let engine = hyprfetch_core::Engine::with_ssrf_policy(Arc::clone(&db), policy);
-            let state = hyprfetch_api::AppState {
-                db,
-                engine: Arc::new(engine),
-            };
+            let engine = Arc::new(hyprfetch_core::Engine::with_ssrf_policy(
+                Arc::clone(&db),
+                policy,
+            ));
+
+            // Startup resume pass: reload incomplete tasks, validate the
+            // remote (ETag / Last-Modified / size), restart from offsets.
+            match engine.resume_all().await {
+                Ok(n) if n > 0 => tracing::info!(tasks = n, "resumed incomplete tasks"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "startup resume pass failed"),
+            }
+
+            let state = hyprfetch_api::AppState { db, engine };
             hyprfetch_api::serve(state, addr).await?;
             Ok(())
         }

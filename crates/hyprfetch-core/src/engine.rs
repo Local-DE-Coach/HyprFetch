@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hyprfetch_db::schema::{QosOverride, TaskState};
-use hyprfetch_db::{SegmentRow, SegmentsRepo, SettingsRepo, TasksRepo};
+use hyprfetch_db::{SegmentRow, SegmentsRepo, SettingsRepo, TaskRow, TasksRepo};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -239,6 +239,173 @@ impl Engine {
     /// Returns true if a task is currently being downloaded.
     pub async fn is_running(&self, task_id: &str) -> bool {
         self.tasks.read().await.contains_key(task_id)
+    }
+
+    /// Startup resume pass: reload every incomplete task (queued /
+    /// downloading / paused), validate the remote against the stored
+    /// ETag / Last-Modified / size, and restart workers from the persisted
+    /// segment offsets.
+    ///
+    /// Validation rules per task:
+    /// - `downloading` rows are crash leftovers and normalized to `paused`
+    ///   first (a fresh process can't have live workers).
+    /// - HEAD probe fails → task is marked `error` with the reason
+    ///   (user can retry later); it is NOT auto-retried.
+    /// - Remote changed (stored ETag or Last-Modified no longer matches, or
+    ///   Content-Length differs from the stored total) → persisted offsets
+    ///   are discarded and the download restarts from byte 0.
+    /// - Segment rows exist but the local file is missing/truncated →
+    ///   offsets are discarded too (they'd corrupt the file).
+    /// - Otherwise workers resume from the persisted offsets.
+    ///
+    /// Failed validations never abort the pass — every incomplete task is
+    /// examined. Returns the number of tasks successfully restarted.
+    pub async fn resume_all(&self) -> Result<usize, EngineError> {
+        let mut tasks: Vec<TaskRow> = Vec::new();
+        {
+            let repo = TasksRepo::new(&self.db);
+            for state in [TaskState::Queued, TaskState::Downloading, TaskState::Paused] {
+                tasks.extend(repo.list_by_state(Some(state))?);
+            }
+        }
+        // Oldest first for deterministic startup order.
+        tasks.sort_by_key(|t| t.created_at);
+
+        let mut resumed = 0usize;
+        for mut row in tasks {
+            if self.resume_task(&mut row).await {
+                resumed += 1;
+            }
+        }
+        if resumed > 0 {
+            info!(resumed, "startup resume pass complete");
+        }
+        Ok(resumed)
+    }
+
+    /// Validate + restart one task. Returns `true` if workers were started.
+    async fn resume_task(&self, row: &mut TaskRow) -> bool {
+        let task_id = row.id.clone();
+
+        // Crash leftover: normalize before anything else so `start()`'s
+        // state gate accepts the task.
+        if row.state == TaskState::Downloading {
+            let _ = TasksRepo::new(&self.db).touch(
+                &task_id,
+                TaskState::Paused,
+                row.downloaded_bytes,
+                None,
+            );
+            row.state = TaskState::Paused;
+        }
+
+        // Parse extra headers for the probe.
+        let extra: Option<ExtraHeaders> = row
+            .extra_headers
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
+        // HEAD the URL.
+        let probe = match Url::parse(&row.url) {
+            Ok(url) => match self.http.probe(&url, extra.as_ref()).await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    let msg = format!("resume probe failed: {e}");
+                    warn!(task = %task_id, error = %e, "resume: probe failed");
+                    let _ = TasksRepo::new(&self.db).touch(
+                        &task_id,
+                        TaskState::Error,
+                        row.downloaded_bytes,
+                        Some(&msg),
+                    );
+                    return false;
+                }
+            },
+            Err(e) => {
+                let msg = format!("resume: bad url: {e}");
+                warn!(task = %task_id, error = %e, "resume: bad url");
+                let _ = TasksRepo::new(&self.db).touch(
+                    &task_id,
+                    TaskState::Error,
+                    row.downloaded_bytes,
+                    Some(&msg),
+                );
+                return false;
+            }
+        };
+        let probe = probe.expect("probe present on success path");
+
+        // Compare remote validators against what we stored when this task
+        // last (partially) downloaded.
+        if remote_changed(row, &probe) {
+            info!(
+                task = %task_id,
+                "resume: remote file changed since last download; resetting progress"
+            );
+            let _ = SegmentsRepo::new(&self.db).delete_for_task(&task_id);
+            let _ = TasksRepo::new(&self.db).touch(&task_id, TaskState::Paused, 0, None);
+            row.downloaded_bytes = 0;
+        } else {
+            // Offsets are only as good as the local file they point into.
+            let has_segments = !SegmentsRepo::new(&self.db)
+                .list_for_task(&task_id)
+                .unwrap_or_default()
+                .is_empty();
+            if has_segments && !local_file_fits(&row.save_path, row.total_bytes) {
+                info!(
+                    task = %task_id,
+                    "resume: local file missing or truncated; resetting progress"
+                );
+                let _ = SegmentsRepo::new(&self.db).delete_for_task(&task_id);
+                let _ = TasksRepo::new(&self.db).touch(&task_id, TaskState::Paused, 0, None);
+                row.downloaded_bytes = 0;
+            }
+        }
+
+        match self.start(&task_id).await {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(task = %task_id, error = %e, "resume: could not start task");
+                false
+            }
+        }
+    }
+}
+
+/// Decisive staleness check: compare stored validators with a fresh probe.
+///
+/// Only validators we actually stored are compared — a server *starting* to
+/// send an ETag is new information, not evidence of change. A size mismatch
+/// is always decisive.
+fn remote_changed(row: &TaskRow, probe: &crate::http_client::ProbeResult) -> bool {
+    if let (Some(total), Some(len)) = (row.total_bytes, probe.content_length) {
+        if total != len {
+            return true;
+        }
+    }
+    if let Some(stored) = &row.etag {
+        if probe.etag.as_deref() != Some(stored.as_str()) {
+            return true;
+        }
+    }
+    if let Some(stored) = &row.last_modified {
+        if probe.last_modified.as_deref() != Some(stored.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A local file is usable for offset resume when it exists and is at least
+/// as large as the expected total (it was pre-allocated with ftruncate by a
+/// previous run; smaller means it was truncated/replaced underneath us).
+fn local_file_fits(path: &str, total_bytes: Option<i64>) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) => match total_bytes {
+            Some(total) if total > 0 => meta.len() as i64 >= total,
+            _ => true,
+        },
+        Err(_) => false,
     }
 }
 
@@ -741,6 +908,310 @@ mod tests {
                 break;
             }
         }
+    }
+
+    // -- resume persistence ---------------------------------------------
+
+    /// Seed a task that claims to have partially downloaded before, with
+    /// matching persisted segment rows and validators. Each task gets a
+    /// unique save path so parallel tests can't interfere.
+    fn seed_resumable_task(
+        db: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+        url: &str,
+        state: TaskState,
+        etag: Option<&str>,
+        total: i64,
+    ) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = now_ms();
+        let save_path = format!("/tmp/hyprfetch-resume-{id}.bin");
+        let row = TaskRow {
+            id: id.clone(),
+            url: url.into(),
+            filename: "resume.bin".into(),
+            save_path,
+            total_bytes: Some(total),
+            downloaded_bytes: 50,
+            state,
+            etag: etag.map(|s| s.to_string()),
+            last_modified: None,
+            accept_ranges: true,
+            segments_requested: 2,
+            qos_override: None,
+            extra_headers: None,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        TasksRepo::new(db).insert(&row).unwrap();
+
+        // Persisted segment plan: seg0 complete (0..half), seg1 halfway.
+        let half = total / 2;
+        let rows: Vec<_> = (0..2)
+            .map(|i| SegmentRow {
+                task_id: id.clone(),
+                segment_idx: i,
+                start_byte: i * half,
+                end_byte: if i == 1 { total } else { (i + 1) * half },
+                current_byte: if i == 0 { half } else { half + half / 2 },
+                state: hyprfetch_db::SegmentState::Downloading,
+                speed_bps: 0,
+                error_message: None,
+                updated_at: now,
+            })
+            .collect();
+        SegmentsRepo::new(db).insert_batch(&rows).unwrap();
+        id
+    }
+
+    async fn wait_terminal(db: &Arc<std::sync::Mutex<rusqlite::Connection>>, id: &str) -> TaskRow {
+        for _ in 0..120 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let row = TasksRepo::new(db).get(id).unwrap().unwrap();
+            if matches!(row.state, TaskState::Complete | TaskState::Error) {
+                return row;
+            }
+        }
+        panic!("task did not reach a terminal state in time");
+    }
+
+    fn resume_path(id: &str) -> String {
+        format!("/tmp/hyprfetch-resume-{id}.bin")
+    }
+
+    #[tokio::test]
+    async fn resume_all_restarts_from_persisted_offsets() {
+        let server = MockServer::start().await;
+        let body: Vec<u8> = (0..100u8).collect();
+        let total = body.len() as i64;
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", total.to_string())
+                    .insert_header("accept-ranges", "bytes")
+                    .insert_header("etag", "\"v1\""),
+            )
+            .mount(&server)
+            .await;
+        // Range GETs: seg0 0-49, seg1 resumes at its persisted offset 75.
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=0-49"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-49/100")
+                    .insert_header("content-length", "50")
+                    .set_body_bytes(body[..50].to_vec()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=75-99"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 75-99/100")
+                    .insert_header("content-length", "25")
+                    .set_body_bytes(body[75..].to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let engine = fresh_engine();
+        let id = seed_resumable_task(
+            &engine.db,
+            &server.uri(),
+            TaskState::Paused,
+            Some("\"v1\""),
+            total,
+        );
+
+        // Local file: first 75 bytes were written before the crash.
+        let path = resume_path(&id);
+        let mut local = vec![0u8; 100];
+        local[..75].copy_from_slice(&body[..75]);
+        std::fs::write(&path, &local).unwrap();
+
+        // The coordinator must resume seg1 from offset 75 → request
+        // bytes=75-99 (mocked above). Byte-exact file contents prove it.
+        let resumed = engine.resume_all().await.unwrap();
+        assert_eq!(resumed, 1);
+
+        let row = wait_terminal(&engine.db, &id).await;
+        assert_eq!(row.state, TaskState::Complete, "{:?}", row.error_message);
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, body, "resumed file must be byte-exact");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn resume_all_resets_when_etag_changed() {
+        let server = MockServer::start().await;
+        let body: Vec<u8> = vec![7u8; 100]; // NEW remote content
+        let total = 100i64;
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", total.to_string())
+                    .insert_header("accept-ranges", "bytes")
+                    .insert_header("etag", "\"v2\""), // changed!
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=0-49"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-49/100")
+                    .insert_header("content-length", "50")
+                    .set_body_bytes(body[..50].to_vec()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=50-99"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 50-99/100")
+                    .insert_header("content-length", "50")
+                    .set_body_bytes(body[50..].to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let engine = fresh_engine();
+        let id = seed_resumable_task(
+            &engine.db,
+            &server.uri(),
+            TaskState::Paused,
+            Some("\"old\""),
+            total,
+        );
+
+        // Corrupt local file: if the staleness check is broken, the
+        // coordinator sees all segments complete and "finishes" instantly,
+        // leaving the garbage file.
+        let path = resume_path(&id);
+        std::fs::write(&path, vec![0xEEu8; 100]).unwrap();
+
+        // Claim full progress: both segments complete.
+        {
+            let db = Arc::clone(&engine.db);
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE segments SET current_byte = end_byte",
+                rusqlite::params![],
+            )
+            .unwrap();
+        }
+
+        let resumed = engine.resume_all().await.unwrap();
+        assert_eq!(resumed, 1, "stale task must still be restarted (from 0)");
+
+        let row = wait_terminal(&engine.db, &id).await;
+        assert_eq!(row.state, TaskState::Complete, "{:?}", row.error_message);
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, body, "stale offsets must reset and redownload");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn resume_all_normalizes_downloading_crash_leftovers() {
+        let server = MockServer::start().await;
+        let body: Vec<u8> = vec![9u8; 100];
+        let total = 100i64;
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", total.to_string())
+                    .insert_header("accept-ranges", "bytes")
+                    .insert_header("etag", "\"v1\""),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=0-49"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-49/100")
+                    .insert_header("content-length", "50")
+                    .set_body_bytes(body[..50].to_vec()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=75-99"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 75-99/100")
+                    .insert_header("content-length", "25")
+                    .set_body_bytes(body[75..].to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let engine = fresh_engine();
+        // State = Downloading (crash leftover) — resume_all must normalize
+        // to paused and still restart it.
+        let id = seed_resumable_task(
+            &engine.db,
+            &server.uri(),
+            TaskState::Downloading,
+            Some("\"v1\""),
+            total,
+        );
+
+        let path = resume_path(&id);
+        let mut local = vec![0u8; 100];
+        local[..75].copy_from_slice(&body[..75]);
+        std::fs::write(&path, &local).unwrap();
+
+        let resumed = engine.resume_all().await.unwrap();
+        assert_eq!(resumed, 1);
+
+        let row = wait_terminal(&engine.db, &id).await;
+        assert_eq!(row.state, TaskState::Complete, "{:?}", row.error_message);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn resume_all_marks_error_when_probe_fails() {
+        // No mock mounted → wiremock returns 404 for HEAD.
+        let server = MockServer::start().await;
+        let engine = fresh_engine();
+        let id = seed_resumable_task(
+            &engine.db,
+            &server.uri(),
+            TaskState::Paused,
+            Some("\"v1\""),
+            100,
+        );
+
+        let resumed = engine.resume_all().await.unwrap();
+        assert_eq!(resumed, 0, "probe failure must not count as resumed");
+
+        let row = TasksRepo::new(&engine.db).get(&id).unwrap().unwrap();
+        assert_eq!(row.state, TaskState::Error);
+        assert!(
+            row.error_message
+                .unwrap_or_default()
+                .contains("resume probe failed"),
+            "error should explain the failed probe"
+        );
+        // Segment rows must be untouched (no fake reset).
+        assert_eq!(
+            SegmentsRepo::new(&engine.db)
+                .list_for_task(&id)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_all_with_nothing_incomplete_is_noop() {
+        let engine = fresh_engine();
+        let resumed = engine.resume_all().await.unwrap();
+        assert_eq!(resumed, 0);
     }
 
     #[tokio::test]

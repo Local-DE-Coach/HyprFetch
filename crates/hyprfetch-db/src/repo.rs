@@ -282,6 +282,16 @@ impl<'a> SegmentsRepo<'a> {
         })?;
         Ok(())
     }
+
+    /// Delete all segment rows for a task (used when persisted offsets are
+    /// stale — e.g. the remote file changed — and the download must restart
+    /// from byte 0).
+    pub fn delete_for_task(&self, task_id: &str) -> rusqlite::Result<()> {
+        with_conn(self.db, |c| {
+            c.execute("DELETE FROM segments WHERE task_id = ?1", params![task_id])
+        })?;
+        Ok(())
+    }
 }
 
 /// Repository for the `settings` table.
