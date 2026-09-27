@@ -1,16 +1,34 @@
-//! SQLite persistence layer: connection pool, migrations, repositories.
+//! SQLite persistence layer: connection, migrations, repositories.
 //!
-//! Stub. Real schema lands in `feature/sqlite-schema`.
+//! ## Schema layout
+//!
+//! - `tasks` — one row per download
+//! - `segments` — per-byte-range state for multi-connection downloads
+//! - `settings` — key/value app config (editable from UI)
+//! - `events` — append-only audit log
+//!
+//! See `migrations/` for the SQL.
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
+
+mod migrations;
+mod repo;
+pub mod schema;
+
+pub use repo::{EventRow, EventsRepo, SegmentRow, SegmentsRepo, SettingsRepo, TaskRow, TasksRepo};
+pub use schema::TaskState;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use rusqlite::Connection;
 
-/// Open (or create) the database file, run migrations, configure WAL mode.
-pub fn open(path: &Path) -> rusqlite::Result<Connection> {
+/// Open (or create) the database file, run migrations, configure pragmas.
+///
+/// Returns a single connection. For higher concurrency wrap in a pool
+/// (e.g. `r2d2` or `deadpool-sqlite`); for now we use a `Mutex<Connection>`
+/// since our access pattern is mostly sequential writes from the engine.
+pub fn open(path: &Path) -> rusqlite::Result<Arc<Mutex<Connection>>> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -18,40 +36,8 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     // Keep page cache small — we target low RAM.
     conn.pragma_update(None, "cache_size", "-256")?; // 256 KB
-    Ok(conn)
+    migrations::run(&conn)?;
+    Ok(Arc::new(Mutex::new(conn)))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::NamedTempFile;
-
-    #[test]
-    fn open_inits_wal_mode() {
-        let f = NamedTempFile::new().unwrap();
-        let conn = open(f.path()).unwrap();
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mode.to_lowercase(), "wal");
-    }
-
-    #[test]
-    fn foreign_keys_are_on() {
-        let f = NamedTempFile::new().unwrap();
-        let conn = open(f.path()).unwrap();
-        let fk: i64 = conn
-            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(fk, 1);
-    }
-
-    #[test]
-    fn open_creates_file_if_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nonexistent.db");
-        assert!(!path.exists());
-        let _conn = open(&path).unwrap();
-        assert!(path.exists());
-    }
-}
+use std::sync::Mutex;

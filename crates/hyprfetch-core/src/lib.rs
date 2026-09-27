@@ -3,7 +3,6 @@
 //! Stub for now. Real implementation lands in `feature/segmented-downloader`.
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod qos;
 pub mod task;

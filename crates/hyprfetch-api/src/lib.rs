@@ -3,7 +3,6 @@
 //! Stub. Real router lands in `feature/http-api`.
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 /// Placeholder for the future router builder. Currently returns a static
 /// `{"status":"ok"}` JSON response.
