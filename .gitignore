@@ -1,0 +1,46 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Per-crate target dirs (when using cargo-hack or local cargo config)
+crates/*/target/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+*~
+.DS_Store
+
+# Node / Svelte
+web/node_modules/
+web/.svelte-kit/
+web/build/
+web/dist/
+web/.env
+web/.env.*
+!web/.env.example
+
+# Local config / data (dev)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.hyprfetch/
+config.local.toml
+
+# Logs
+*.log
+logs/
+
+# OS
+Thumbs.db
+desktop.ini
