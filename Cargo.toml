@@ -50,7 +50,7 @@ bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 rust-embed = "8"
-governor = "0.6"
+governor = "0.10"
 mime_guess = "2"
 
 [profile.release]
