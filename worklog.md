@@ -32,6 +32,23 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-28] Release v0.1.1 — Super Z sandbox
+- **Commit(s):** (this commit) `chore(release): v0.1.1` + tag `v0.1.1`
+- **Did:** workspace version 0.1.0 → 0.1.1 (all 4 member crates via
+  `version.workspace`, Cargo.lock refreshed with `cargo update -w`), CHANGELOG
+  `[Unreleased]` finalized as `[0.1.1] — 2026-09-28`. Tag `v0.1.1` pushed to
+  trigger the release workflow from the tag path (v0.1.0 artifacts were
+  produced via `workflow_dispatch` from `main` while the tag itself pointed at
+  the pre-fix commit).
+- **Why:** ship the aarch64 CI fix + the two engine fixes as a proper tagged
+  release and prove the tag-push release path works end-to-end.
+- **Result / state:** see the v0.1.1 GitHub release — expected artifacts:
+  `hyprfetch-0.1.1-{x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
+  x86_64-unknown-linux-musl}.tar.gz` + `.sha256`.
+- **Notes for next sandbox:** release workflow requires
+  `contents: write` for the publish job and the PAT needs workflow scope to
+  push `.github/` changes; both verified working in this session.
+
 ### [2026-09-28] README: sandbox test data & analysis — Super Z sandbox
 - **Commit(s):** (this commit) `docs(readme): add sandbox test results and analysis`
 - **Did:** README gained a full "Sandbox test results" section: environment,

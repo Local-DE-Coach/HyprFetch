@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "hyprfetch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "hyprfetch-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "hyprfetch-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "futures",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "hyprfetch-db"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "include_dir",
  "rusqlite",

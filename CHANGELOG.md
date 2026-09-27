@@ -6,7 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
-## [Unreleased]
+## [0.1.1] — 2026-09-28
+
+CI and engine reliability release. No new features — fixes the release
+pipeline (aarch64 artifact was missing from v0.1.0) and two download
+bugs found by sandbox testing of the v0.1.0 binary.
 
 ### Fixed
 - **30-second total request timeout killed all long downloads** (sandbox test
