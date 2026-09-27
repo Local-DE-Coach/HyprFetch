@@ -25,17 +25,18 @@ Response:
       "total_bytes": 5368709120,
       "downloaded_bytes": 3650722204,
       "state": "downloading",
-      "segments_total": 8,
-      "segments_active": 8,
-      "speed_bps": 4423456,
-      "eta_sec": 387,
-      "created_at": "2026-09-27T10:23:00Z",
+      "segments_requested": 8,
+      "created_at": 1769000000,
+      "updated_at": 1769000300,
       "completed_at": null,
       "error": null
     }
   ]
 }
 ```
+
+Live speed and per-segment progress are available on the detail endpoint
+(`GET /api/tasks/:id`) and via the `task:progress` WebSocket event.
 
 ### Add task(s)
 
@@ -78,9 +79,11 @@ Returns the full task object including per-segment progress:
 - `POST /api/tasks/:id/pause`
 - `POST /api/tasks/:id/resume`
 - `POST /api/tasks/:id/cancel`
-- `POST /api/tasks/:id/retry`
 
 All return `200 OK` with the updated task object, or `409 Conflict` if the state transition is invalid (e.g. pausing an already-completed task).
+
+> **Note:** `POST /api/tasks/:id/retry` is documented as planned but **not
+> implemented yet**. To re-run a failed task, delete it and create a new one.
 
 ### Remove task
 

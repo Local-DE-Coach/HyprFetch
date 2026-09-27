@@ -8,12 +8,25 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
 use crate::http_client::HttpClient;
 use crate::qos::QosLimiter;
 use url::Url;
+
+/// How many times a segment worker retries a transient failure before
+/// giving up and failing the task.
+///
+/// Real-world servers and middleboxes drop long-lived connections (nginx
+/// per-connection limits, NAT idle expiry, TLS session re-keying). Without
+/// retry, ONE dropped connection failed the WHOLE task (observed on
+/// thinkbroadband: 4 of 8 segments dropped ~150 s into a 1 GB download →
+/// `only 4 of 8 segments completed`). Each retry resumes from the last
+/// written byte offset, so retried work is proportional to the bytes lost,
+/// not to the whole segment.
+pub const MAX_SEGMENT_ATTEMPTS: u32 = 6;
 
 /// In-memory representation of one segment of a download.
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +101,37 @@ pub enum SegmentWorkerError {
     AlreadyComplete,
 }
 
+impl SegmentWorkerError {
+    /// Whether the worker may reasonably retry this error from its current
+    /// offset. Transport hiccups (reset, timeout, EOF) and server-side
+    /// 5xx/429 are transient; disk I/O errors, SSRF violations, ignored
+    /// Range headers and client errors are not.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            SegmentWorkerError::Reqwest(_) => true,
+            SegmentWorkerError::Http(h) => match h {
+                crate::http_client::HttpError::Reqwest(_) => true,
+                crate::http_client::HttpError::BadStatus { status, .. } => {
+                    status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                }
+                _ => false,
+            },
+            SegmentWorkerError::Io(io_err) => io_err.kind() == io::ErrorKind::UnexpectedEof,
+            SegmentWorkerError::UnexpectedStatus(_) => false,
+            SegmentWorkerError::RangeIgnored => false,
+            SegmentWorkerError::AlreadyComplete => false,
+        }
+    }
+}
+
+/// Exponential backoff before retry `attempt` (1-based, i.e. the pause
+/// before the 2nd try is `backoff_delay(1)`): 1 s, 2 s, 4 s, 8 s, then
+/// capped at 15 s.
+pub fn backoff_delay(attempt: u32) -> Duration {
+    let secs = 1u64 << (attempt - 1).min(4);
+    Duration::from_secs(secs.min(15))
+}
+
 /// Configuration for a single segment worker.
 pub struct SegmentWorker {
     pub client: HttpClient,
@@ -104,11 +148,39 @@ pub struct SegmentWorker {
 
 impl SegmentWorker {
     /// Run the worker to completion (or failure). Sends events via `progress_tx`.
+    ///
+    /// Transient transport errors are retried up to [`MAX_SEGMENT_ATTEMPTS`]
+    /// times with [`backoff_delay`] backoff; every retry re-requests only the
+    /// remaining byte range (from the last written offset).
     pub async fn run(mut self) -> Result<(), SegmentWorkerError> {
         if self.segment.is_complete() {
             return Err(SegmentWorkerError::AlreadyComplete);
         }
 
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match self.run_once().await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < MAX_SEGMENT_ATTEMPTS && e.is_retryable() => {
+                    let delay = backoff_delay(attempt);
+                    tracing::warn!(
+                        seg = self.segment.idx,
+                        attempt,
+                        retry_in_s = delay.as_secs(),
+                        from_byte = self.segment.current_byte,
+                        error = %e,
+                        "segment attempt failed — retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// One attempt: fetch the remaining range and stream it to the file.
+    async fn run_once(&mut self) -> Result<(), SegmentWorkerError> {
         let start = self.segment.current_byte;
         let end_inclusive = self.segment.end_byte - 1;
 
@@ -310,5 +382,46 @@ mod tests {
         assert!(seg.is_complete());
         // If we tried to construct a SegmentWorker with this, run() would
         // immediately return AlreadyComplete.
+    }
+
+    #[test]
+    fn retryability_classification() {
+        use crate::http_client::HttpError;
+        use std::io::ErrorKind;
+
+        // EOF from a server that closed early is transient.
+        let eof = SegmentWorkerError::Io(io::Error::new(ErrorKind::UnexpectedEof, "short read"));
+        assert!(eof.is_retryable());
+
+        // Disk errors are not.
+        let disk = SegmentWorkerError::Io(io::Error::new(ErrorKind::StorageFull, "no space left"));
+        assert!(!disk.is_retryable());
+
+        let make_status = |status: reqwest::StatusCode| {
+            SegmentWorkerError::Http(HttpError::BadStatus {
+                status,
+                url: "http://example.invalid/f.bin".into(),
+            })
+        };
+        assert!(make_status(reqwest::StatusCode::BAD_GATEWAY).is_retryable());
+        assert!(make_status(reqwest::StatusCode::SERVICE_UNAVAILABLE).is_retryable());
+        assert!(make_status(reqwest::StatusCode::TOO_MANY_REQUESTS).is_retryable());
+        assert!(!make_status(reqwest::StatusCode::NOT_FOUND).is_retryable());
+        assert!(!make_status(reqwest::StatusCode::FORBIDDEN).is_retryable());
+
+        assert!(!SegmentWorkerError::RangeIgnored.is_retryable());
+        assert!(!SegmentWorkerError::AlreadyComplete.is_retryable());
+        assert!(!SegmentWorkerError::UnexpectedStatus(reqwest::StatusCode::OK).is_retryable());
+    }
+
+    #[test]
+    fn backoff_is_exponential_and_capped() {
+        assert_eq!(backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(backoff_delay(3), Duration::from_secs(4));
+        assert_eq!(backoff_delay(4), Duration::from_secs(8));
+        assert_eq!(backoff_delay(5), Duration::from_secs(15));
+        assert_eq!(backoff_delay(6), Duration::from_secs(15));
+        assert_eq!(backoff_delay(100), Duration::from_secs(15));
     }
 }

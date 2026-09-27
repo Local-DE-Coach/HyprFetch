@@ -64,8 +64,16 @@ impl HttpClient {
     pub fn new(ssrf_policy: SsrfPolicy) -> Self {
         let inner = Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
-            .timeout(Duration::from_secs(30))
+            // NOTE: deliberately NO total `.timeout()` on this client.
+            // reqwest's client-level timeout covers the ENTIRE request
+            // including streaming the body, so it aborted every segment
+            // worker ~30 s in ("only 0 of N segments completed" on any
+            // download whose segments take longer than 30 s — e.g. a 1 GB
+            // file at 16 MB/s died at ~455 MB). Long transfers must be
+            // allowed to run; stalls are bounded by `read_timeout` (idle
+            // read gap) and dead peers by `connect_timeout`.
             .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(30))
             .pool_idle_timeout(Duration::from_secs(60))
             .pool_max_idle_per_host(4)
             .redirect(reqwest::redirect::Policy::limited(5))

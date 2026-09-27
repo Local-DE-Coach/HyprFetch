@@ -9,21 +9,47 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 ## [Unreleased]
 
 ### Fixed
-- **CI: aarch64 release build** — the release workflow now sets
-  `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc` (plus
-  `CC_`/`AR_` for the C dependencies `ring` and `libsqlite3-sys`). Previously the
-  aarch64 job linked with the host `cc` and rustc's self-contained lld, which failed
-  with `rust-lld: error: --fix-cortex-a53-843419 is only supported on AArch64`.
-- **CI: release packaging on `workflow_dispatch`** — archive names and the published
-  release now derive from the `tag` input (`inputs.tag || github.ref_name`) instead of
-  `GITHUB_REF_NAME`, so dispatching from a branch no longer produces
-  `hyprfetch-main-*` archives / a `main` release.
+- **30-second total request timeout killed all long downloads** (sandbox test
+  finding). `HttpClient` set reqwest's client-level `.timeout(30s)`, which covers
+  the *entire* request including streaming the response body — so every segment
+  worker aborted exactly 30 s in. Reproduced on thinkbroadband: 1 GB at ~16 MB/s
+  died at ~455 MB (`only 0 of 8 segments completed`), the same task QoS-capped
+  to 4 MiB/s died at ~130 MB — both at exactly ~32 s. The client now uses
+  `connect_timeout(10s)` + `read_timeout(30s)` (idle-read gap) and no total
+  timeout, so multi-minute transfers run to completion.
+- **One dropped connection failed the whole task** — segment workers now retry
+  transient failures (up to `MAX_SEGMENT_ATTEMPTS = 6`, exponential backoff
+  1 s → 15 s) and resume from the last written byte offset. Retryable:
+  transport errors, mid-body EOF, HTTP 5xx / 429. Non-retryable: disk I/O
+  errors, SSRF violations, ignored Range headers, 4xx. Observed live: 4 of 8
+  segments were dropped ~150 s into a download; with retry the task completed
+  without user intervention.
+
+### Changed
+- `docs/api.md`: list-tasks example now matches the real `TaskDto`
+  (`segments_requested`, epoch timestamps; no `speed_bps`/`eta_sec`/`segments_active`),
+  and the not-implemented `POST /api/tasks/:id/retry` endpoint is marked as planned.
 
 ### Added
 - **Multi-sandbox coordination** — repo-root `worklog.md` records what each
   sandbox/agent did per commit; every commit is expected to update both
   `CHANGELOG.md` and `worklog.md` (protocol documented in the file and in
   `CONTRIBUTING.md`).
+
+### Tests
+- 91 → 93: retryability classification (`is_retryable`) and backoff sequencing
+  (`backoff_delay`), both pure unit tests.
+
+### Fixed (CI)
+- **aarch64 release build** — the release workflow now sets
+  `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc` (plus
+  `CC_`/`AR_` for the C dependencies `ring` and `libsqlite3-sys`). Previously the
+  aarch64 job linked with the host `cc` and rustc's self-contained lld, which failed
+  with `rust-lld: error: --fix-cortex-a53-843419 is only supported on AArch64`.
+- **release packaging on `workflow_dispatch`** — archive names and the published
+  release now derive from the `tag` input (`inputs.tag || github.ref_name`) instead of
+  `GITHUB_REF_NAME`, so dispatching from a branch no longer produces
+  `hyprfetch-main-*` archives / a `main` release.
 
 ## [0.1.0] — 2026-09-27
 

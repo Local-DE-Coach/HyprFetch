@@ -32,6 +32,31 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-28] Sandbox download tests → two engine bugs found & fixed — Super Z sandbox
+- **Commit(s):** (this commit) `fix(core): remove 30s total request timeout, add per-segment retry`
+- **Did:**
+  - `crates/hyprfetch-core/src/http_client.rs`: removed reqwest client-level
+    `.timeout(30s)` (covers the whole body stream → killed every segment at ~30 s);
+    now `connect_timeout(10s)` + `read_timeout(30s)`.
+  - `crates/hyprfetch-core/src/segment.rs`: `SegmentWorker::run()` retries transient
+    errors (max 6 attempts, backoff 1→15 s) from the last written byte offset;
+    added `is_retryable()` classification + `backoff_delay()` + 2 unit tests.
+  - `docs/api.md`: fixed list-tasks example drift, marked unimplemented `/retry`.
+- **Why:** sandbox tests against thinkbroadband test files exposed that ANY download
+  whose segments take > 30 s failed (`only 0 of 8 segments completed`); after the
+  timeout fix, real-world connection drops still failed whole tasks because a single
+  worker error was fatal. Full data in `README.md` → "Sandbox test results".
+- **Result / state:** 1 GB and 5 GB downloads complete end-to-end; byte-exact
+  verification vs independent curl range downloads (sha256 match); pause →
+  server restart → startup auto-resume from persisted offsets works
+  (`resumed=1` log line); QoS 4 MiB/s cap holds within ±2% over a full download.
+- **Notes for next sandbox:** test artifacts (time-series JSON, harness scripts)
+  live in the sandbox at `/home/z/my-project/testdata` and
+  `/home/z/my-project/scripts` (not committed). `DELETE /api/tasks/:id?delete_file=true`
+  returns an empty body (harness JSON parse "fails" — it's a 204, not an error).
+  Files at `ipv4.download.thinkbroadband.com` are raw random data named `.zip`
+  (not real zip archives) — verify integrity by size + range sha256, not `unzip -t`.
+
 ### [2026-09-28] Fix aarch64 release build (CI) — Super Z sandbox
 - **Commit(s):** (this commit) `fix(ci): wire aarch64 cross-linker into release build`
 - **Did:**
