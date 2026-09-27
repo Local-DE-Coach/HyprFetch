@@ -9,12 +9,14 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 ## [Unreleased]
 
 ### Added
-- Project repository initialized with README, LICENSE, .gitignore
-- `docs/architecture.md` — design overview, memory budget, threat model
-- `docs/api.md` — REST + WebSocket API contract
-- `docs/development.md` — build, test, and contributing workflow
-- `CONTRIBUTING.md` — contribution guidelines
-
-### Notes
-- Repository is in pre-alpha scaffolding state. No runnable binary yet.
-- First feature branches (CI pipeline, Rust workspace) will land in subsequent PRs.
+- SQLite persistence layer (`hyprfetch-db` crate):
+  - `migrations/001_init.sql` — schema for `tasks`, `segments`, `settings`, `events` tables
+  - `migrations/002_seed_settings.sql` — default app settings (bind, download_dir, segments_default, qos_*, etc.)
+  - Migration runner with `schema_migrations` tracking table; idempotent
+  - `TaskState`, `SegmentState`, `QosOverride` enums with serde + DB-string round-trip
+  - `TasksRepo` (insert, get, list_by_state, touch, update_cache_validators, delete)
+  - `SegmentsRepo` (insert_batch, list_for_task, touch)
+  - `SettingsRepo` (get, set, all)
+  - `EventsRepo` (append, tail, prune_before)
+  - 16 new unit tests covering migrations, repos, and state machine round-trips
+- `open()` configures WAL mode, foreign_keys=ON, 256 KB page cache (RAM target preserved)
