@@ -864,4 +864,84 @@ mod tests {
         assert!(body.contains("127.0.0.1:7780"));
         assert!(body.contains("segments_default"));
     }
+
+    // -- embedded SPA ---------------------------------------------------
+
+    #[tokio::test]
+    async fn ui_index_is_served() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(ct.starts_with("text/html"), "content-type: {ct}");
+        let body = body_str(res.into_body()).await;
+        assert!(body.contains("HyprFetch"), "index.html should name the app");
+    }
+
+    #[tokio::test]
+    async fn ui_assets_are_served_and_api_404s_are_not_spa() {
+        let app = router(test_state());
+
+        // A real hashed asset must be reachable at its embedded path.
+        let assets = crate::ui::asset_names();
+        let asset = assets
+            .iter()
+            .find(|p| p.starts_with("assets/"))
+            .expect("built SPA should contain hashed assets");
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{asset}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "asset {asset} should exist");
+        let cache = res
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(cache.contains("immutable"), "hashed assets cache forever");
+
+        // Unknown API namespace must 404 as JSON/plain — NOT the SPA.
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn ui_deep_links_fall_back_to_spa() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/downloads/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        assert!(body.contains("HyprFetch"));
+    }
 }
