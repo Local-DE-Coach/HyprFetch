@@ -51,11 +51,26 @@ jobs:
             musl-tools
 
       - name: Build release
+        env:
+          # Cross-compiling aarch64 on the x86_64 runner: force the GNU
+          # cross-toolchain for BOTH the final link and C dependencies
+          # (ring, libsqlite3-sys bundled). Without these, cargo/rustc fall
+          # back to the host `cc` plus rustc's self-contained lld wrappers
+          # ("-B .../x86_64-unknown-linux-gnu/bin/gcc-ld -fuse-ld=lld"),
+          # lld then picks the x86_64 emulation from host crt objects and
+          # aborts with:
+          #   rust-lld: error: --fix-cortex-a53-843419 is only supported on AArch64
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
         run: |
-          VERSION="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          # Prefer the workflow_dispatch `tag` input; on a tag push use the
+          # pushed tag. GITHUB_REF_NAME alone is wrong for workflow_dispatch
+          # (it is the branch name, e.g. "main").
+          VERSION="${{ inputs.tag || github.ref_name }}"
           VERSION="${VERSION#v}"
           ARCHIVE="hyprfetch-${VERSION}-${{ matrix.target }}"
           mkdir -p "$ARCHIVE"
@@ -93,6 +108,9 @@ jobs:
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:
+          # Attach artifacts to the tag the build was made for (inputs.tag on
+          # workflow_dispatch, the pushed tag otherwise) — never the branch name.
+          tag_name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |

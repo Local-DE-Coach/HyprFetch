@@ -31,9 +31,13 @@ If unsure, open a Discussion first.
 3. **Implement** — keep PRs focused (ideally < 500 lines). Split if growing
 4. **Test** — add tests for new behavior. Run `cargo fmt && cargo clippy -- -D warnings && cargo test`
 5. **Document** — update `docs/` if API or behavior changes
-6. **PR** — fill the template, link the issue, request review
-7. **CI** — must be green. Address review comments inline
-8. **Merge** — squash-merge to keep history linear
+6. **Log** — **every commit updates `CHANGELOG.md` and `worklog.md`.** `worklog.md`
+   is the multi-sandbox coordination file: append an entry at the top of its
+   *Sessions* section describing what you did and why, so any other sandbox
+   (or human) can pick up where you left off. Read it *before* you start.
+7. **PR** — fill the template, link the issue, request review
+8. **CI** — must be green. Address review comments inline
+9. **Merge** — squash-merge to keep history linear
 
 ## Code standards
 

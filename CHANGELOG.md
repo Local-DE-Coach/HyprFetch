@@ -8,6 +8,23 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+### Fixed
+- **CI: aarch64 release build** — the release workflow now sets
+  `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc` (plus
+  `CC_`/`AR_` for the C dependencies `ring` and `libsqlite3-sys`). Previously the
+  aarch64 job linked with the host `cc` and rustc's self-contained lld, which failed
+  with `rust-lld: error: --fix-cortex-a53-843419 is only supported on AArch64`.
+- **CI: release packaging on `workflow_dispatch`** — archive names and the published
+  release now derive from the `tag` input (`inputs.tag || github.ref_name`) instead of
+  `GITHUB_REF_NAME`, so dispatching from a branch no longer produces
+  `hyprfetch-main-*` archives / a `main` release.
+
+### Added
+- **Multi-sandbox coordination** — repo-root `worklog.md` records what each
+  sandbox/agent did per commit; every commit is expected to update both
+  `CHANGELOG.md` and `worklog.md` (protocol documented in the file and in
+  `CONTRIBUTING.md`).
+
 ## [0.1.0] — 2026-09-27
 
 First user-facing release: segmented downloads, one shared QoS bucket,
