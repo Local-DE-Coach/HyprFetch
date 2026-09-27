@@ -25,6 +25,7 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 toml.workspace = true
+uuid.workspace = true
 
 # Debian packaging (built in CI via `cargo deb`; see .github/workflows/release.yml)
 [package.metadata.deb]

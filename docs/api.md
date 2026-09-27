@@ -4,8 +4,21 @@ All endpoints are JSON. The server listens on `127.0.0.1:7780` by default.
 
 ## Auth
 
-- Loopback (`127.0.0.1` / `::1`): no auth required
-- Non-loopback: requires `Authorization: Bearer <token>` header. Token is generated on first run and stored at `~/.config/hyprfetch/token`. If you bind to `0.0.0.0` without setting a token, the server refuses to start.
+- Loopback (`127.0.0.1` / `::1`) binds: no auth required — the daemon is a
+  local desktop service.
+- Non-loopback binds (e.g. `0.0.0.0`): every `/api/*` and `/ws` request must
+  present the API token, either as `Authorization: Bearer <token>` or (for
+  browser WebSocket clients, which cannot set custom headers on the
+  handshake) as `?access_token=<token>`.
+- The token is generated automatically on the first `hyprfetch serve` run and
+  stored at `~/.config/hyprfetch/token` (mode 0600). Override it with the
+  `--api-token` flag / `HYPRFETCH_API_TOKEN` env var / `api_token` config key.
+  Log lines state whether a token was generated and whether it is enforced.
+- `/healthz` and the embedded SPA (`/`) stay open without a token so liveness
+  probes and the UI page work; the UI's API calls require the token when the
+  daemon is bound non-loopback.
+- Unauthorized responses are `401` with code `unauthorized` and a
+  `WWW-Authenticate: Bearer` header.
 
 ## REST endpoints
 
@@ -79,17 +92,22 @@ Returns the full task object including per-segment progress:
 - `POST /api/tasks/:id/pause`
 - `POST /api/tasks/:id/resume`
 - `POST /api/tasks/:id/cancel`
+- `POST /api/tasks/:id/retry` — re-run an **errored** task: clears the error,
+  moves it back to `queued`, and the queue pump starts it when a
+  `max_concurrent_tasks` slot is free. Persisted segment offsets are kept —
+  if the remote is unchanged the retry resumes from the last written byte;
+  if it changed, the coordinator's validator recheck discards the offsets
+  and restarts from byte 0. Invalid from non-errored states (`409`).
 
 All return `200 OK` with the updated task object, or `409 Conflict` if the state transition is invalid (e.g. pausing an already-completed task).
-
-> **Note:** `POST /api/tasks/:id/retry` is documented as planned but **not
-> implemented yet**. To re-run a failed task, delete it and create a new one.
 
 ### Remove task
 
 `DELETE /api/tasks/:id?delete_file=false`
 
-Query param `delete_file=true` also removes the partial file from disk.
+Query param `delete_file=true` also removes the (partial) downloaded file
+from disk. Best-effort: a missing file is not an error. Returns `204 No
+Content` either way.
 
 ### QoS control
 
@@ -107,6 +125,19 @@ If `target_bps` is omitted when enabling, defaults to 70% of measured max bandwi
 `GET /api/settings` → returns the full settings object.
 
 `PATCH /api/settings` → partial update. Some settings require a restart to take effect (noted in the response).
+
+Enforcement status of the seeded keys (be honest in the UI):
+
+| Key | Enforced |
+|---|---|
+| `qos_enabled`, `qos_target_bps` | yes — engine-wide limiter, restored at startup |
+| `download_dir`, `segments_default` | yes — used by `POST /api/tasks` defaults |
+| `max_concurrent_tasks` | yes — queue pump caps concurrently running tasks (0 = unlimited) |
+| `user_agent` | yes — applied to outgoing requests at startup |
+| `ssrf_block_private` | yes — combined with `--allow-private` at startup |
+| `bind` | informational — the actual bind comes from `--bind` / config / default |
+| `max_connections` | **not enforced yet** (planned global connection cap) |
+| `protocol_pref` | **not enforced yet** (planned HTTP/2/3 selection) |
 
 ## WebSocket
 

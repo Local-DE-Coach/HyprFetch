@@ -107,14 +107,17 @@ cd crates/hyprfetch-api/ui && npm install && npm run dev
 
 ## Configuration
 
-HyprFetch reads `~/.config/hyprfetch/config.toml` if present. CLI flags override config. Run `hyprfetch --help` for the full list.
+HyprFetch reads a config file if present — default location
+`~/.config/hyprfetch/config.toml` (override with `--config`). Keys: `bind`,
+`db_path`, `download_dir`, `segments`, `allow_private`, `api_token`. CLI
+flags and `HYPRFETCH_*` env vars override the file. Run `hyprfetch --help`
+for the full list.
 
 Key defaults:
-- Bind: `127.0.0.1:7780` (loopback only by default — never expose to LAN without auth)
+- Bind: `127.0.0.1:7780` (loopback only by default — non-loopback binds require the API token, see `docs/api.md`)
 - Default download dir: `~/Downloads`
 - Default segments per task: 8
-- Max concurrent tasks: 3
-- Max concurrent connections total: 24
+- Max concurrent tasks: 3 (queue pump; 0 = unlimited)
 - QoS: off by default
 
 ## Security
@@ -202,11 +205,28 @@ uses. Raw time-series and the harness scripts live in the test sandbox
 
 ### Known gaps found during testing
 
-- `POST /api/tasks/:id/retry` is documented in `docs/api.md` but not
-  implemented (marked as planned there now); re-running an errored task
-  currently means delete + re-create.
-- `DELETE /api/tasks/:id?delete_file=true` returns an empty body rather
-  than a JSON document.
+Fixed since the original test session (verified by tests + live re-test):
+
+- ~~`POST /api/tasks/:id/retry` not implemented~~ — implemented; errored
+  tasks re-queue and resume from persisted offsets (remote-change validated).
+- ~~`DELETE ?delete_file=true` ignored~~ — implemented; the (partial) file
+  is removed from disk.
+- **Downloads from servers without Range support failed entirely** — the
+  segment worker required `206 Partial Content` even in the single-connection
+  fallback. It now accepts a `200 OK` whole-file body when the segment starts
+  at byte 0 (regression test added).
+- **Finished tasks were never reaped** from the engine's active-task map —
+  fixed; the map now only holds genuinely running tasks.
+- **`max_concurrent_tasks` was never enforced** — now enforced by the queue
+  pump; tasks beyond the cap stay queued and start as slots free.
+
+Still open:
+
+- `max_connections` and `protocol_pref` settings are seeded but not enforced
+  (see `docs/api.md` enforcement table and `worktasks.md`).
+- Remote-change validation runs at startup and on every (re)start of a task
+  in-session; a task whose remote mutates *mid-download* still relies on
+  server-side validators (ETag/Last-Modified) to be honest.
 
 ## Status
 

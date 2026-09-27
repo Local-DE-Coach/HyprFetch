@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use hyprfetch_db::schema::{QosOverride, TaskState};
 use hyprfetch_db::{SegmentRow, SegmentsRepo, SettingsRepo, TaskRow, TasksRepo};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use url::Url;
@@ -55,8 +55,10 @@ pub enum EngineError {
 pub struct Engine {
     db: Arc<std::sync::Mutex<rusqlite::Connection>>,
     http: HttpClient,
-    /// Tasks currently running. One entry per active task.
-    tasks: RwLock<HashMap<String, ActiveTask>>,
+    /// Tasks currently running. One entry per active task. Shared with the
+    /// spawned coordinator wrappers so they can reap their own entry when
+    /// the task reaches a terminal state (complete / error / removed).
+    tasks: Arc<RwLock<HashMap<String, ActiveTask>>>,
     /// Engine-wide QoS governor shared by ALL active tasks — one token
     /// bucket caps the aggregate download rate of the whole daemon.
     qos: QosLimiter,
@@ -67,13 +69,16 @@ pub struct Engine {
     /// the first `start()`, which is guaranteed to run inside a tokio
     /// runtime — constructors may be called from sync contexts).
     aggregator_started: AtomicBool,
+    /// Queue-pump wake signal: kicked when a slot may have freed up or new
+    /// queued tasks may be startable. The pump loop enforces the
+    /// `max_concurrent_tasks` setting for queued tasks.
+    queue_notify: Arc<Notify>,
+    /// Guards the one-time spawn of the queue-pump loop.
+    pump_started: AtomicBool,
 }
 
-/// A running task: handle to the coordinator task + channel to send commands.
+/// A running task: channel to send commands to its coordinator.
 struct ActiveTask {
-    /// JoinHandle for the per-task coordinator task.
-    #[allow(dead_code)]
-    handle: JoinHandle<()>,
     /// Channel to send commands to the coordinator (pause, cancel).
     cmd_tx: mpsc::Sender<TaskCommand>,
 }
@@ -99,16 +104,12 @@ impl Engine {
         db: Arc<std::sync::Mutex<rusqlite::Connection>>,
         policy: SsrfPolicy,
     ) -> Self {
+        let settings = SettingsRepo::new(&db);
         let qos = QosLimiter::new();
         // Restore QoS state from settings (best-effort — a missing/broken
         // setting just means QoS stays off).
-        if let Ok(Some(target)) = SettingsRepo::new(&db).get("qos_target_bps") {
-            let enabled = SettingsRepo::new(&db)
-                .get("qos_enabled")
-                .ok()
-                .flatten()
-                .as_deref()
-                == Some("true");
+        if let Ok(Some(target)) = settings.get("qos_target_bps") {
+            let enabled = settings.get("qos_enabled").ok().flatten().as_deref() == Some("true");
             if enabled {
                 if let Ok(bps) = target.parse::<u64>() {
                     qos.enable(bps);
@@ -116,13 +117,23 @@ impl Engine {
             }
         }
 
+        // Honor the `user_agent` setting for outgoing requests (empty/missing
+        // keeps `HyprFetch/<version>`).
+        let user_agent = settings
+            .get("user_agent")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty());
+
         Self {
             db,
-            http: HttpClient::new(policy),
-            tasks: RwLock::new(HashMap::new()),
+            http: HttpClient::with_user_agent(policy, user_agent),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
             qos,
             events: EventBus::new(),
             aggregator_started: AtomicBool::new(false),
+            queue_notify: Arc::new(Notify::new()),
+            pump_started: AtomicBool::new(false),
         }
     }
 
@@ -160,9 +171,38 @@ impl Engine {
         }
     }
 
+    /// Spawn the queue-pump loop exactly once. Must be called from async
+    /// context (all callers are async).
+    fn ensure_pump(&self) {
+        if !self.pump_started.swap(true, Ordering::SeqCst) {
+            let db = Arc::clone(&self.db);
+            let tasks = Arc::clone(&self.tasks);
+            let http = self.http.clone();
+            let qos = self.qos.clone();
+            let events = self.events.clone();
+            let notify = Arc::clone(&self.queue_notify);
+            tokio::spawn(async move {
+                pump_loop(db, tasks, http, qos, events, notify).await;
+            });
+        }
+    }
+
+    /// Kick the queue pump: start queued tasks while the number of running
+    /// tasks is below `max_concurrent_tasks` (0 or missing = unlimited).
+    /// Called after creating tasks and whenever a running task reaches a
+    /// terminal state.
+    pub async fn pump(&self) {
+        self.ensure_pump();
+        self.queue_notify.notify_one();
+    }
+
     /// Start a queued task. Probes the URL, splits into segments, spawns workers.
+    /// Explicit starts (API create/resume, startup resume) bypass the
+    /// `max_concurrent_tasks` cap — the cap is enforced by the queue pump for
+    /// tasks waiting in the `queued` state.
     pub async fn start(&self, task_id: &str) -> Result<(), EngineError> {
         self.ensure_aggregator();
+        self.ensure_pump();
 
         // Fetch the task row.
         let row = {
@@ -185,31 +225,17 @@ impl Engine {
             }
         }
 
-        // Spawn the coordinator.
-        let (cmd_tx, cmd_rx) = mpsc::channel(8);
-        let engine_db = Arc::clone(&self.db);
-        let engine_http = self.http.clone();
-        let engine_qos = self.qos.clone();
-        let engine_events = self.events.clone();
-        let task_id_owned = task_id.to_string();
-        let handle = tokio::spawn(async move {
-            if let Err(e) = run_task_coordinator(
-                engine_db,
-                engine_http,
-                engine_qos,
-                engine_events,
-                task_id_owned,
-                cmd_rx,
-            )
-            .await
-            {
-                error!(error = %e, "task coordinator failed");
-            }
-        });
-
-        // Insert into the active table.
-        let active = ActiveTask { handle, cmd_tx };
-        self.tasks.write().await.insert(task_id.to_string(), active);
+        // Spawn the coordinator with a self-reaping wrapper.
+        spawn_coordinator(
+            Arc::clone(&self.db),
+            Arc::clone(&self.tasks),
+            self.http.clone(),
+            self.qos.clone(),
+            self.events.clone(),
+            Arc::clone(&self.queue_notify),
+            task_id.to_string(),
+        )
+        .await;
 
         Ok(())
     }
@@ -372,6 +398,145 @@ impl Engine {
     }
 }
 
+/// Spawn the per-task coordinator wrapped in a self-reaping task.
+///
+/// The wrapper removes the task's `ActiveTask` entry from the shared map as
+/// soon as the coordinator returns (complete / error / paused / cancelled),
+/// so the map only ever holds genuinely running tasks. On terminal states
+/// (complete / error / removed) it also kicks the queue pump — a slot may
+/// have freed up for queued tasks.
+///
+/// Must be awaited from async context (it inserts the map entry before
+/// spawning). The `queue_notify` is the engine's shared pump wake handle —
+/// every spawned wrapper re-kicks it on terminal states, no matter who
+/// spawned the coordinator (API `start()` or the queue pump itself).
+async fn spawn_coordinator(
+    db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    tasks: Arc<RwLock<HashMap<String, ActiveTask>>>,
+    http: HttpClient,
+    qos: QosLimiter,
+    events: EventBus,
+    queue_notify: Arc<Notify>,
+    task_id: String,
+) {
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    // Check-and-insert atomically: if the task is already running (another
+    // pump pass or an explicit start() won the race), do NOT spawn a second
+    // coordinator for it — overwriting the entry would drop the live
+    // coordinator's only command sender, which it treats as a cancel.
+    {
+        let mut map = tasks.write().await;
+        if map.contains_key(&task_id) {
+            debug!(task = %task_id, "spawn_coordinator: already running, skipping");
+            return;
+        }
+        map.insert(
+            task_id.clone(),
+            ActiveTask {
+                cmd_tx: cmd_tx.clone(),
+            },
+        );
+    }
+    tokio::spawn(async move {
+        let result = run_task_coordinator(
+            db.clone(),
+            http,
+            qos,
+            events.clone(),
+            task_id.clone(),
+            cmd_rx,
+        )
+        .await;
+        // Reap unconditionally — the task is no longer running.
+        tasks.write().await.remove(&task_id);
+        if let Err(e) = result {
+            error!(task = %task_id, error = %e, "task coordinator failed");
+        }
+        // Kick the queue pump only when the task reached a TERMINAL state —
+        // a pause must NOT auto-start a queued replacement (the user paused
+        // to reclaim bandwidth). Removed/complete/error free a slot.
+        if let Ok(Some(row)) = TasksRepo::new(&db).get(&task_id) {
+            if matches!(
+                row.state,
+                TaskState::Complete | TaskState::Error | TaskState::Removed
+            ) {
+                queue_notify.notify_one();
+            }
+        }
+    });
+}
+
+/// Queue-pump loop: on every wake, start queued tasks (oldest first) while
+/// the running count is below `max_concurrent_tasks`. 0 / missing / unparsable
+/// setting = unlimited (drain the whole queue).
+async fn pump_loop(
+    db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    tasks: Arc<RwLock<HashMap<String, ActiveTask>>>,
+    http: HttpClient,
+    qos: QosLimiter,
+    events: EventBus,
+    notify: Arc<Notify>,
+) {
+    loop {
+        notify.notified().await;
+        pump_once(&db, &tasks, &http, &qos, &events, &notify).await;
+    }
+}
+
+async fn pump_once(
+    db: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+    tasks: &Arc<RwLock<HashMap<String, ActiveTask>>>,
+    http: &HttpClient,
+    qos: &QosLimiter,
+    events: &EventBus,
+    notify: &Arc<Notify>,
+) {
+    let limit: usize = SettingsRepo::new(db)
+        .get("max_concurrent_tasks")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    // IDs spawned during THIS pass: the coordinator marks its row
+    // `downloading` asynchronously, so a plain DB re-list could return a
+    // task that was already picked — filtering here prevents double spawns
+    // (the map guard in spawn_coordinator is the second line of defense).
+    let mut started: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    loop {
+        let running = tasks.read().await.len();
+        if limit > 0 && running >= limit {
+            debug!(running, limit, "queue pump: at capacity");
+            return;
+        }
+        // Next queued task, oldest first, excluding ones this pass started.
+        let next = TasksRepo::new(db)
+            .list_by_state(Some(TaskState::Queued))
+            .ok()
+            .and_then(|rows| {
+                rows.into_iter()
+                    .filter(|t| !started.contains(&t.id))
+                    .min_by_key(|t| t.created_at)
+            });
+        let Some(row) = next else {
+            return; // queue drained
+        };
+        started.insert(row.id.clone());
+        info!(task = %row.id, running, limit, "queue pump: starting queued task");
+        spawn_coordinator(
+            Arc::clone(db),
+            Arc::clone(tasks),
+            http.clone(),
+            qos.clone(),
+            events.clone(),
+            Arc::clone(notify),
+            row.id.clone(),
+        )
+        .await;
+    }
+}
+
 /// Decisive staleness check: compare stored validators with a fresh probe.
 ///
 /// Only validators we actually stored are compared — a server *starting* to
@@ -420,7 +585,7 @@ async fn run_task_coordinator(
     mut cmd_rx: mpsc::Receiver<TaskCommand>,
 ) -> Result<(), EngineError> {
     // Re-fetch the task row (we may have paused and resumed).
-    let row = {
+    let mut row = {
         let repo = TasksRepo::new(&db);
         repo.get(&task_id)?
             .ok_or_else(|| EngineError::TaskNotFound(task_id.clone()))?
@@ -471,6 +636,23 @@ async fn run_task_coordinator(
         probe.accept_ranges,
         probe.content_length,
     )?;
+
+    // Mid-session remote-change recheck. The startup resume pass validates
+    // stored offsets against the remote, but a task can also sit paused /
+    // errored in-session (pause → remote replaced → resume, or retry after
+    // error) — re-applying stale byte offsets to a DIFFERENT remote file
+    // would silently corrupt the output. If any stored validator now
+    // disagrees with the fresh probe, discard offsets and restart cleanly.
+    // (A brand-new task has no stored validators and passes untouched.)
+    if remote_changed(&row, &probe) {
+        warn!(
+            task = %task_id,
+            "remote file changed since this task last ran; discarding stored offsets"
+        );
+        let _ = SegmentsRepo::new(&db).delete_for_task(&task_id);
+        row.downloaded_bytes = 0;
+        TasksRepo::new(&db).touch(&task_id, TaskState::Downloading, 0, None)?;
+    }
 
     let total_bytes = match probe.content_length {
         Some(n) => n,
@@ -1310,5 +1492,292 @@ mod tests {
 
         // Clean up.
         let _ = std::fs::remove_file("/tmp/hyprfetch-test.bin");
+    }
+
+    // ------------------------------------------------------------------
+    // Task reaping + queue pump
+    // ------------------------------------------------------------------
+
+    fn seed_queue_task(
+        db: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+        url: &str,
+        path: &str,
+    ) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = now_ms();
+        let row = TaskRow {
+            id: id.clone(),
+            url: url.into(),
+            filename: "queue.bin".into(),
+            save_path: path.into(),
+            total_bytes: None,
+            downloaded_bytes: 0,
+            state: TaskState::Queued,
+            etag: None,
+            last_modified: None,
+            accept_ranges: false,
+            segments_requested: 1,
+            qos_override: None,
+            extra_headers: None,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        TasksRepo::new(db).insert(&row).unwrap();
+        id
+    }
+
+    /// Mock server: 100-byte file, HEAD + a single full-body GET range with
+    /// a per-request delay so queue behavior is observable.
+    async fn mount_queue_server(server: &MockServer, delay_ms: u64) {
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", "100")
+                    .insert_header("accept-ranges", "bytes"),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=0-99"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-99/100")
+                    .insert_header("content-length", "100")
+                    .set_body_bytes(vec![7u8; 100])
+                    .set_delay(Duration::from_millis(delay_ms)),
+            )
+            .mount(server)
+            .await;
+    }
+
+    async fn wait_running_count(engine: &Engine, expected: usize) {
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut n = 0;
+            for id in TasksRepo::new(&engine.db)
+                .list_by_state(None)
+                .unwrap()
+                .iter()
+                .map(|t| t.id.clone())
+            {
+                if engine.is_running(&id).await {
+                    n += 1;
+                }
+            }
+            if n == expected {
+                return;
+            }
+        }
+        panic!("running count never reached {expected}");
+    }
+
+    #[tokio::test]
+    async fn download_from_server_without_range_support() {
+        // Regression: a server that answers 200 OK (no Range support at all)
+        // must work through the single-segment fallback. The worker used to
+        // require 206 unconditionally and every such download failed with
+        // "only 0 of 1 segments completed".
+        let server = MockServer::start().await;
+        let body: Vec<u8> = (0..100u8).collect();
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200).insert_header("content-length", "100"),
+                // deliberately NO accept-ranges
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", "100")
+                    .set_body_bytes(body.clone()),
+            )
+            .mount(&server)
+            .await;
+
+        let engine = fresh_engine();
+        let id = seed_queue_task(&engine.db, &server.uri(), "/tmp/hyprfetch-norange.bin");
+        engine.start(&id).await.unwrap();
+
+        let row = wait_terminal(&engine.db, &id).await;
+        assert_eq!(row.state, TaskState::Complete, "{:?}", row.error_message);
+        assert_eq!(row.downloaded_bytes, 100);
+        let contents = std::fs::read("/tmp/hyprfetch-norange.bin").unwrap();
+        assert_eq!(contents, body, "100-byte file must be byte-exact");
+        let _ = std::fs::remove_file("/tmp/hyprfetch-norange.bin");
+    }
+
+    #[tokio::test]
+    async fn finished_task_is_reaped_from_active_map() {
+        let server = MockServer::start().await;
+        mount_queue_server(&server, 0).await;
+        let engine = fresh_engine();
+        let id = seed_queue_task(&engine.db, &server.uri(), "/tmp/hyprfetch-reap.bin");
+
+        engine.start(&id).await.unwrap();
+        assert!(
+            engine.is_running(&id).await,
+            "task must register as running"
+        );
+
+        let row = wait_terminal(&engine.db, &id).await;
+        assert_eq!(row.state, TaskState::Complete, "{:?}", row.error_message);
+
+        // The wrapper must reap the finished entry promptly.
+        for _ in 0..40 {
+            if !engine.is_running(&id).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("finished task was never reaped from the engine map");
+    }
+
+    #[tokio::test]
+    async fn queue_pump_respects_max_concurrent_tasks() {
+        let server = MockServer::start().await;
+        mount_queue_server(&server, 250).await;
+        let engine = fresh_engine();
+
+        {
+            let s = SettingsRepo::new(&engine.db);
+            s.set("max_concurrent_tasks", "2").unwrap();
+        }
+
+        let ids: Vec<String> = (0..4)
+            .map(|i| {
+                seed_queue_task(
+                    &engine.db,
+                    &server.uri(),
+                    &format!("/tmp/hyprfetch-queue-{i}.bin"),
+                )
+            })
+            .collect();
+
+        // Creating tasks only kicks the pump (mirrors the API create path).
+        engine.pump().await;
+
+        // Exactly 2 must run; the other 2 stay queued.
+        wait_running_count(&engine, 2).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        for (i, id) in ids.iter().enumerate() {
+            let row = TasksRepo::new(&engine.db).get(id).unwrap().unwrap();
+            if i < 2 {
+                assert!(
+                    engine.is_running(id).await,
+                    "task {i} should have started (state {:?})",
+                    row.state
+                );
+            } else {
+                assert_eq!(
+                    row.state,
+                    TaskState::Queued,
+                    "task {i} must still be queued while at capacity"
+                );
+            }
+        }
+
+        // As running tasks finish, the pump must chain-start the rest.
+        for id in &ids {
+            let row = wait_terminal(&engine.db, id).await;
+            assert_eq!(row.state, TaskState::Complete, "{:?}", row.error_message);
+        }
+        for (i, _) in ids.iter().enumerate() {
+            let _ = std::fs::remove_file(format!("/tmp/hyprfetch-queue-{i}.bin"));
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_pump_unlimited_drains_queue() {
+        let server = MockServer::start().await;
+        // Delay > poll interval so all three are simultaneously observable
+        // as running before any of them completes.
+        mount_queue_server(&server, 200).await;
+        let engine = fresh_engine();
+        // 0 = unlimited: everything queued starts immediately.
+        SettingsRepo::new(&engine.db)
+            .set("max_concurrent_tasks", "0")
+            .unwrap();
+
+        let ids: Vec<String> = (0..3)
+            .map(|i| {
+                seed_queue_task(
+                    &engine.db,
+                    &server.uri(),
+                    &format!("/tmp/hyprfetch-unl-{i}.bin"),
+                )
+            })
+            .collect();
+
+        engine.pump().await;
+        wait_running_count(&engine, 3).await;
+        for id in &ids {
+            let row = wait_terminal(&engine.db, id).await;
+            assert_eq!(row.state, TaskState::Complete, "{:?}", row.error_message);
+        }
+        for i in 0..3 {
+            let _ = std::fs::remove_file(format!("/tmp/hyprfetch-unl-{i}.bin"));
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_after_remote_change_mid_session_resets_offsets() {
+        // Pause → (remote replaced) → resume must NOT re-apply stale byte
+        // offsets to the new remote file. Stored etag "v-old" vs remote
+        // "v-new" → coordinator discards offsets and redownloads fully.
+        let server = MockServer::start().await;
+        let body: Vec<u8> = (0..100).collect();
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", "100")
+                    .insert_header("accept-ranges", "bytes")
+                    .insert_header("etag", "\"v-new\""),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=0-49"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-49/100")
+                    .insert_header("content-length", "50")
+                    .set_body_bytes(body[..50].to_vec()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=50-99"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 50-99/100")
+                    .insert_header("content-length", "50")
+                    .set_body_bytes(body[50..].to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let engine = fresh_engine();
+        let id = seed_resumable_task(
+            &engine.db,
+            &server.uri(),
+            TaskState::Paused,
+            Some("\"v-old\""), // stored validator is STALE
+            100,
+        );
+
+        // Local file holding the OLD remote's bytes: if stale offsets were
+        // applied, the segments would look complete and this garbage stays.
+        let path = resume_path(&id);
+        std::fs::write(&path, vec![0xEEu8; 100]).unwrap();
+
+        engine.start(&id).await.unwrap();
+        let row = wait_terminal(&engine.db, &id).await;
+        assert_eq!(row.state, TaskState::Complete, "{:?}", row.error_message);
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, body, "stale offsets must be discarded in-session");
+        let _ = std::fs::remove_file(path);
     }
 }

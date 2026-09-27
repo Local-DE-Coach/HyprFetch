@@ -60,10 +60,20 @@ impl Default for HttpClient {
 }
 
 impl HttpClient {
-    /// Construct with a given SSRF policy.
+    /// Construct with a given SSRF policy and the default User-Agent.
     pub fn new(ssrf_policy: SsrfPolicy) -> Self {
+        Self::with_user_agent(ssrf_policy, None)
+    }
+
+    /// Construct with a given SSRF policy and an optional User-Agent override
+    /// (from the `user_agent` setting; empty/None keeps the default).
+    pub fn with_user_agent(ssrf_policy: SsrfPolicy, user_agent: Option<String>) -> Self {
         let inner = Client::builder()
-            .user_agent(DEFAULT_USER_AGENT)
+            .user_agent(
+                user_agent
+                    .filter(|ua| !ua.trim().is_empty())
+                    .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string()),
+            )
             // NOTE: deliberately NO total `.timeout()` on this client.
             // reqwest's client-level timeout covers the ENTIRE request
             // including streaming the body, so it aborted every segment

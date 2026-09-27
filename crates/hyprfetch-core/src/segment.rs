@@ -197,10 +197,23 @@ impl SegmentWorker {
             .await?;
 
         let status = resp.status();
-        if status != reqwest::StatusCode::PARTIAL_CONTENT {
-            // Server returned 200 OK or similar — it ignored our Range header.
-            // This is fatal for segmented download; the engine should fall
-            // back to a single-connection download.
+        // Response rules:
+        // - 206 Partial Content: the happy path — body is exactly the
+        //   requested range.
+        // - 200 OK when this segment starts at byte 0: the server ignored
+        //   Range and sent the WHOLE file. For the single-segment fallback
+        //   (servers without `Accept-Ranges` support) that body is exactly
+        //   what we need — accept it, cap writes at this segment's end and
+        //   discard the excess. Writes beyond the cap would corrupt the
+        //   pre-allocated file.
+        // - 200 OK with start > 0: the server ignored Range mid-file; the
+        //   body starts at file byte 0 but we would write it at `start` —
+        //   corruption. Fatal for this attempt.
+        if status == reqwest::StatusCode::OK {
+            if start != 0 {
+                return Err(SegmentWorkerError::RangeIgnored);
+            }
+        } else if status != reqwest::StatusCode::PARTIAL_CONTENT {
             return Err(SegmentWorkerError::RangeIgnored);
         }
 
@@ -222,7 +235,15 @@ impl SegmentWorker {
             }
 
             while !remaining.is_empty() {
-                let n = remaining.len().min(buf_size);
+                // Cap writes at this segment's end: a 200 (whole-file) body
+                // is longer than the requested range — discard the excess.
+                if offset >= self.segment.end_byte {
+                    break;
+                }
+                let n = remaining
+                    .len()
+                    .min(buf_size)
+                    .min((self.segment.end_byte - offset) as usize);
                 let slice = &remaining[..n];
                 // pwrite — positional write, no seek needed.
                 self.file.write_at(slice, offset as u64)?;
@@ -234,6 +255,12 @@ impl SegmentWorker {
                     current_byte: offset,
                 });
                 remaining = &remaining[n..];
+            }
+
+            // Got the full range already (200 with excess bytes) — stop
+            // reading the stream.
+            if self.segment.current_byte >= self.segment.end_byte {
+                break;
             }
         }
 

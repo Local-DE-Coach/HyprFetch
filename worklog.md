@@ -32,6 +32,51 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-28] Full audit → worktasks.md board, 3 engine bugs fixed, retry/auth/config shipped — Super Z sandbox
+- **Commit(s):** (this commit) `fix(core)+feat(api,cli): audit fixes — task reaping, queue pump, non-Range 200 fallback, retry, delete_file, bearer auth, config.toml, worktasks.md`
+- **Did:**
+  - **Audit**: read all ~5.6k lines of source vs docs (api.md/architecture.md/
+    design.md); ran the 93-test suite, clippy, fmt; live smoke tests of the
+    release binary (loopback + 0.0.0.0 + config file + auth).
+  - **Bugs fixed (core):** (1) finished tasks never reaped from the engine
+    map (leak + wrong is_running + "already running" on restart);
+    (2) downloads from non-Range servers always failed — worker required 206
+    even for the single-connection fallback, now accepts 200 whole-file
+    bodies at segment start with write-capping; (3) queue double-spawn race
+    → spurious `removed` states (check-and-insert atomic spawn + per-pass id
+    filter).
+  - **Missing features added:** `max_concurrent_tasks` queue pump (oldest
+    first, chain-start on completion, 0=unlimited, manual resume bypasses);
+    `POST /api/tasks/:id/retry` (error→queued, offsets kept, remote-change
+    validated); `DELETE ?delete_file=true` really removes the file;
+    bearer auth on non-loopback binds (header or `?access_token=`, 401 +
+    WWW-Authenticate, healthz/SPA open, token auto-generated to
+    `~/.config/hyprfetch/token` 0600); config.toml loading with `--config`
+    and CLI > env > file > default; `user_agent` + `ssrf_block_private`
+    settings honored; in-session remote-change recheck on task (re)start.
+  - **UI:** Retry buttons (Active error + Finished lists), Finished ✕ now
+    `?delete_file=true`; `ui/dist` rebuilt via npm and committed.
+  - **Docs:** api.md (auth reality, retry, delete_file, settings enforcement
+    table), README (config keys, known-gaps ledger updated),
+    **worktasks.md** — new project task board (per-area status with proof +
+    verify commands, bug tracker, backlog, definition-of-done protocol).
+  - **Tests:** 93 → **110 passing**; clippy `-D warnings` clean; fmt clean.
+- **Why:** user asked to test everything, fix what doesn't work, add what's
+  missing, review the architecture, and create a worktasks.md to manage the
+  project tasks.
+- **Result / state:** all green; live smoke re-run after fixes: non-Range
+  download completes byte-exact, retry clears error + re-queues, delete_file
+  removes the file, 0.0.0.0 bind enforces the token (401/200), config file
+  drives bind/download_dir/segments. Remaining gaps are tracked in
+  worktasks.md (max_connections, protocol_pref, stats/history/settings pages,
+  checksums, arm64 deb, etc.).
+- **Notes for next sandbox:** start from worktasks.md — pick any ⬜ row and
+  follow its Verify command + the definition-of-done checklist at the top.
+  Engine map/pump invariants: never call spawn_coordinator twice for the
+  same id without checking the map; reap happens in the wrapper task. UI
+  changes must be followed by `npm run build` in crates/hyprfetch-api/ui and
+  the rebuilt dist committed.
+
 ### [2026-09-28] Release v0.2.0 — Super Z sandbox
 - **Commit(s):** (this commit) `chore(release): v0.2.0` + tag `v0.2.0`
 - **Did:** workspace version 0.1.1 → 0.2.0 (all 4 member crates via

@@ -4,10 +4,13 @@
 
 #![forbid(unsafe_code)]
 
+mod auth;
 mod error;
 mod routes;
 mod ui;
 mod ws;
+
+pub use auth::require_bearer;
 
 pub use error::{ApiError, ApiErrorCode};
 
@@ -73,9 +76,17 @@ impl TaskListFilter {
 
 /// Build the public axum router.
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", axum::routing::get(ui::index))
-        .route("/healthz", axum::routing::get(routes::healthz))
+    router_with_token(state, None)
+}
+
+/// Build the router with Bearer-token auth enforced on `/api/*` and `/ws`.
+///
+/// Used when the daemon binds a non-loopback address. `/healthz` and the
+/// embedded SPA stay open; clients present the token via
+/// `Authorization: Bearer <token>` or `?access_token=` (browser WS).
+pub fn router_with_token(state: AppState, token: impl Into<Option<String>>) -> Router {
+    let token: Option<Arc<String>> = token.into().filter(|t| !t.is_empty()).map(Arc::new);
+    let mut app = Router::new()
         .route("/ws", axum::routing::get(ws::ws_handler))
         .route(
             "/api/tasks",
@@ -98,6 +109,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(routes::cancel_task),
         )
         .route(
+            "/api/tasks/:id/retry",
+            axum::routing::post(routes::retry_task),
+        )
+        .route(
             "/api/qos",
             axum::routing::get(routes::get_qos).put(routes::set_qos),
         )
@@ -105,13 +120,36 @@ pub fn router(state: AppState) -> Router {
             "/api/settings",
             axum::routing::get(routes::get_settings).patch(routes::patch_settings),
         )
+        .with_state(state.clone());
+
+    if let Some(token) = token {
+        app = app.layer(axum::middleware::from_fn(move |req, next| {
+            let token = Arc::clone(&token);
+            async move { auth::require_bearer(req, next, token).await }
+        }));
+    }
+
+    // /healthz, the SPA, and the fallback are OUTSIDE the auth layer —
+    // liveness probes and the login page must work without a token.
+    app.route("/healthz", axum::routing::get(routes::healthz))
+        .route("/", axum::routing::get(ui::index))
         .fallback(ui::static_path)
         .with_state(state)
 }
 
 /// Convenience: build router + bind + serve. Used by the binary.
 pub async fn serve(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
-    let app = router(state);
+    serve_with_token(state, addr, None).await
+}
+
+/// Bind + serve with an optional API token (non-loopback binds MUST pass a
+/// token here — `hyprfetch serve` resolves/generates it before calling).
+pub async fn serve_with_token(
+    state: AppState,
+    addr: SocketAddr,
+    token: impl Into<Option<String>>,
+) -> anyhow::Result<()> {
+    let app = router_with_token(state, token);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "hyprfetch API listening");
     axum::serve(listener, app).await?;

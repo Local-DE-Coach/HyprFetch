@@ -6,7 +6,9 @@
     pauseTask,
     resumeTask,
     cancelTask,
+    retryTask,
     deleteTask,
+    deleteTaskWithFile,
     getQos,
     setQos,
     connectEvents,
@@ -110,7 +112,9 @@
       if (action === 'pause') await pauseTask(task.id)
       else if (action === 'resume') await resumeTask(task.id)
       else if (action === 'cancel') await cancelTask(task.id)
+      else if (action === 'retry') await retryTask(task.id)
       else if (action === 'delete') await deleteTask(task.id)
+      else if (action === 'delete-file') await deleteTaskWithFile(task.id)
       await refresh()
     } catch (e) {
       notice = `${action} failed: ${e.message}`
@@ -194,6 +198,8 @@
               <button on:click={() => act(t, 'pause')}>Pause</button>
             {:else if t.state === 'paused'}
               <button on:click={() => act(t, 'resume')}>Resume</button>
+            {:else if t.state === 'error'}
+              <button on:click={() => act(t, 'retry')}>Retry</button>
             {/if}
             {#if t.state !== 'complete'}
               <button class="danger" on:click={() => act(t, 'cancel')}>Cancel</button>
@@ -219,7 +225,10 @@
             <span class="badge {t.state}">{stateLabel(t.state)}</span>
             <span class="grow" />
             <span class="bytes">{fmtBytes(t.downloaded_bytes)}</span>
-            <button class="danger" on:click={() => act(t, 'delete')}>✕</button>
+            {#if t.state === 'error'}
+              <button on:click={() => act(t, 'retry')}>Retry</button>
+            {/if}
+            <button class="danger" title="remove task + downloaded file" on:click={() => act(t, 'delete-file')}>✕</button>
           </div>
         </article>
       {/each}

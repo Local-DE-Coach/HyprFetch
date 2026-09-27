@@ -48,8 +48,16 @@ export async function cancelTask(id) {
   return handle(await fetch(`/api/tasks/${id}/cancel`, { method: 'POST' }))
 }
 
+export async function retryTask(id) {
+  return handle(await fetch(`/api/tasks/${id}/retry`, { method: 'POST' }))
+}
+
 export async function deleteTask(id) {
   return handle(await fetch(`/api/tasks/${id}`, { method: 'DELETE' }))
+}
+
+export async function deleteTaskWithFile(id) {
+  return handle(await fetch(`/api/tasks/${id}?delete_file=true`, { method: 'DELETE' }))
 }
 
 export async function getQos() {

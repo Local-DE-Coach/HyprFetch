@@ -226,14 +226,11 @@ pub async fn create_task(
         created.push(row);
     }
 
-    // Auto-start each task in the engine (best-effort — engine errors are
-    // surfaced via the task's `error_message` field in the DB, not the HTTP
-    // response, because the coordinator runs in a spawned task).
-    for row in &created {
-        if let Err(e) = state.engine.start(&row.id).await {
-            tracing::warn!(task = %row.id, error = %e, "engine.start() failed on create");
-        }
-    }
+    // Auto-start: kick the queue pump instead of starting each task
+    // directly. The pump enforces the `max_concurrent_tasks` setting —
+    // tasks beyond the cap stay `queued` and start automatically as slots
+    // free up. Explicit user resumes bypass the cap (user intent).
+    state.engine.pump().await;
     let dtos = created.into_iter().map(TaskDto::from).collect();
     Ok((
         axum::http::StatusCode::CREATED,
@@ -310,16 +307,36 @@ pub async fn get_task(
 pub async fn delete_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<DeleteTaskQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let existed = db(&state).get(&id)?.is_some();
-    if !existed {
-        return Err(ApiError::TaskNotFound(id));
-    }
+    let row = db(&state)
+        .get(&id)?
+        .ok_or_else(|| ApiError::TaskNotFound(id.clone()))?;
     db(&state).delete(&id)?;
     EventsRepo::new(&state.db)
         .append(Some(&id), "task.removed", "{}")
         .ok();
+
+    // `?delete_file=true` also removes the (partially) downloaded file from
+    // disk. Best-effort: a missing file is not an error — the task row is
+    // already gone either way.
+    if q.delete_file == Some(true) && !row.save_path.is_empty() {
+        match std::fs::remove_file(&row.save_path) {
+            Ok(()) => tracing::info!(task = %id, path = %row.save_path, "deleted task file"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(task = %id, path = %row.save_path, error = %e, "could not delete task file")
+            }
+        }
+    }
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Query params for `DELETE /api/tasks/:id`.
+#[derive(Debug, Deserialize, Default)]
+pub struct DeleteTaskQuery {
+    /// When `true`, also delete the downloaded (partial) file from disk.
+    pub delete_file: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +356,8 @@ async fn transition(
     let allowed = match target {
         TaskState::Paused => matches!(row.state, TaskState::Queued | TaskState::Downloading),
         TaskState::Downloading => matches!(row.state, TaskState::Queued | TaskState::Paused),
+        // Retry: an errored task goes back to the queue (clears the error).
+        TaskState::Queued => matches!(row.state, TaskState::Error),
         TaskState::Removed => matches!(
             row.state,
             TaskState::Queued
@@ -356,11 +375,18 @@ async fn transition(
         )));
     }
 
+    // Moving a task back to the queue (retry) clears its error message;
+    // other transitions preserve it.
+    let clear_error = target == TaskState::Queued;
     db(state).touch(
         id,
         target,
         row.downloaded_bytes,
-        row.error_message.as_deref(),
+        if clear_error {
+            None
+        } else {
+            row.error_message.as_deref()
+        },
     )?;
     EventsRepo::new(&state.db)
         .append(Some(id), &format!("task.{action_label}"), "{}")
@@ -401,6 +427,25 @@ pub async fn cancel_task(
 ) -> Result<Json<TaskDto>, ApiError> {
     let updated = transition(&state, &id, TaskState::Removed, "cancelled").await?;
     let _ = state.engine.cancel(&id).await;
+    Ok(updated)
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/tasks/:id/retry
+// ---------------------------------------------------------------------------
+
+/// `POST /api/tasks/:id/retry` — re-run an errored task.
+///
+/// Clears the error, moves the task back to `queued`, and kicks the queue
+/// pump. Persisted segment offsets are kept: if the remote is unchanged the
+/// retry resumes from the last written byte; if it changed, the coordinator's
+/// validator recheck discards the offsets and restarts from byte 0.
+pub async fn retry_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TaskDto>, ApiError> {
+    let updated = transition(&state, &id, TaskState::Queued, "retried").await?;
+    state.engine.pump().await;
     Ok(updated)
 }
 
@@ -943,5 +988,148 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_str(res.into_body()).await;
         assert!(body.contains("HyprFetch"));
+    }
+
+    // -- retry endpoint ---------------------------------------------------
+
+    /// Seed a task directly in a given state (bypassing the create API).
+    fn seed_raw_task(state: &AppState, st: TaskState, save_path: &str) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let row = hyprfetch_db::TaskRow {
+            id: id.clone(),
+            url: "https://example.com/r.bin".into(),
+            filename: "r.bin".into(),
+            save_path: save_path.into(),
+            total_bytes: Some(10),
+            downloaded_bytes: 4,
+            state: st,
+            etag: None,
+            last_modified: None,
+            accept_ranges: true,
+            segments_requested: 2,
+            qos_override: None,
+            extra_headers: None,
+            error_message: Some("only 0 of 2 segments completed".into()),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        hyprfetch_db::TasksRepo::new(&state.db)
+            .insert(&row)
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn retry_moves_errored_task_to_queued_and_clears_error() {
+        let state = test_state();
+        let id = seed_raw_task(&state, TaskState::Error, "/tmp/hyprfetch-retry-api.bin");
+        let res = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{id}/retry"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["state"], "queued", "retry must re-queue the task");
+        assert!(
+            v["error_message"].is_null(),
+            "retry must clear the error message, got: {v}"
+        );
+        let _ = std::fs::remove_file("/tmp/hyprfetch-retry-api.bin");
+    }
+
+    #[tokio::test]
+    async fn retry_on_queued_task_returns_409() {
+        let state = test_state();
+        let id = seed_raw_task(&state, TaskState::Queued, "/tmp/hyprfetch-retry-q.bin");
+        let res = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{id}/retry"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn retry_on_missing_task_returns_404() {
+        let res = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks/nope/retry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -- delete with file removal -----------------------------------------
+
+    #[tokio::test]
+    async fn delete_with_delete_file_removes_file_from_disk() {
+        let state = test_state();
+        let path = "/tmp/hyprfetch-del-api.bin";
+        std::fs::write(path, b"partial data").unwrap();
+        let id = seed_raw_task(&state, TaskState::Paused, path);
+
+        let res = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/tasks/{id}?delete_file=true"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "delete_file=true must remove the file from disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_without_param_keeps_file_on_disk() {
+        let state = test_state();
+        let path = "/tmp/hyprfetch-keep-api.bin";
+        std::fs::write(path, b"partial data").unwrap();
+        let id = seed_raw_task(&state, TaskState::Paused, path);
+
+        let res = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/tasks/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(
+            std::path::Path::new(path).exists(),
+            "plain delete must keep the file"
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

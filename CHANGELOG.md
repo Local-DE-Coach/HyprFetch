@@ -6,6 +6,67 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
+## [Unreleased]
+
+### Fixed (found by the 2026-09-28 full audit: code review + live smoke test)
+- **Downloads from servers without Range support failed entirely.** The
+  segment worker required `206 Partial Content` even on the single-connection
+  fallback path, so any server answering `200 OK` with the whole file (no
+  `Accept-Ranges`) produced `only 0 of 1 segments completed`. The worker now
+  accepts a 200 whole-file body when the segment starts at byte 0 and caps
+  writes at the segment end. Regression test:
+  `download_from_server_without_range_support`.
+- **Finished tasks were never reaped from the engine's active-task map** —
+  the map grew forever, `is_running()` stayed true after completion, and
+  re-starting a finished task failed with "already running". Coordinator
+  wrappers now remove their own entry; the map only holds running tasks
+  (`finished_task_is_reaped_from_active_map`).
+- **Queue double-spawn race could mark tasks `removed` spuriously** —
+  spawning two coordinators for one task overwrote the map entry and dropped
+  the live coordinator's only command sender (interpreted as cancel).
+  `spawn_coordinator` is now check-and-insert atomic and each pump pass
+  filters ids it already started.
+
+### Added
+- **`max_concurrent_tasks` is now enforced** (was a seeded-but-dead setting):
+  a queue pump starts queued tasks oldest-first while running < limit and
+  chains new starts when running tasks finish; 0/missing = unlimited;
+  explicit user resumes bypass the cap.
+  Tests: `queue_pump_respects_max_concurrent_tasks`,
+  `queue_pump_unlimited_drains_queue`.
+- **`POST /api/tasks/:id/retry`** — re-run an errored task: clears the
+  error, re-queues, keeps persisted offsets (remote-change recheck on
+  restart discards them if the file changed). Tests: 3 API cases + live
+  smoke.
+- **`DELETE /api/tasks/:id?delete_file=true`** now really deletes the
+  (partial) file from disk (previously the param was silently ignored).
+- **Bearer-token auth on non-loopback binds** — was documented in api.md but
+  not implemented. `/api/*` + `/ws` now require `Authorization: Bearer
+  <token>` (or `?access_token=` for browser WebSocket clients) when the
+  daemon is bound off-loopback; `401` + `WWW-Authenticate` otherwise;
+  `/healthz` + SPA stay open. Token auto-generates on first run to
+  `~/.config/hyprfetch/token` (0600); resolution order: CLI `--api-token` >
+  `HYPRFETCH_API_TOKEN` > config > settings > token file. Tests: 7 auth
+  cases + live smoke (401/200/query-param).
+- **Config file support** — `~/.config/hyprfetch/config.toml` (keys: `bind`,
+  `db_path`, `download_dir`, `segments`, `allow_private`, `api_token`) with
+  `--config` override; precedence CLI > env > file > default. Was documented
+  in README/development.md but not implemented.
+- **`user_agent` and `ssrf_block_private` settings are honored** at startup
+  (were seeded-dead).
+- **UI: Retry button** on errored tasks (Active + Finished lists) and the
+  Finished ✕ now removes task + downloaded file (`?delete_file=true`);
+  `ui/dist` rebuilt and committed.
+- **In-session remote-change recheck** — on every (re)start of a task
+  (pause → resume, retry), stored ETag/Last-Modified/size are compared
+  against a fresh probe; stale offsets are discarded instead of corrupting
+  the output (`resume_after_remote_change_mid_session_resets_offsets`).
+- **`worktasks.md`** — project task board: per-feature-area status with test
+  proof and verify commands, open bug tracker, backlog, and the task
+  definition-of-done protocol for future sandboxes.
+- docs/api.md: retry + delete_file documented; Auth section rewritten to
+  match reality; settings enforcement table (which keys are live vs not yet).
+
 ## [0.2.0] — 2026-09-28
 
 Packaging release: every release now ships ready-made Linux packages —
