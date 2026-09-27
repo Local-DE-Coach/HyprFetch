@@ -107,32 +107,35 @@ If `target_bps` is omitted when enabling, defaults to 70% of measured max bandwi
 
 ## WebSocket
 
-`GET /ws`
+`GET /ws` — upgrade to WebSocket; the server pushes engine events as JSON
+text frames so the UI never has to poll.
 
-Server pushes JSON messages. Client may send JSON commands (same shape as REST, prefixed with `cmd:`).
+Server → client only. Client messages are ignored (protocol pings are
+answered automatically). If a slow client lags, missed events are skipped —
+progress is self-correcting because every event carries absolute totals.
 
 ### Server → client events
 
 ```json
-{ "type": "task:added", "task": { /* ... */ } }
-{ "type": "task:progress", "id": "01HVA...", "percent": 68.3, "speed_bps": 4423456, "eta_sec": 252, "downloaded_bytes": 3650722204 }
-{ "type": "task:state", "id": "01HVA...", "state": "paused", "error": null }
-{ "type": "task:removed", "id": "01HVA..." }
-{ "type": "global:speed", "speed_bps": 4423456, "qos_enabled": true, "qos_target_bps": 5242880 }
-{ "type": "segment:update", "task_id": "01HVA...", "segments": [ /* same shape as GET /api/tasks/:id segments */ ] }
+{ "event": "task:progress", "task_id": "01HVA...", "downloaded_bytes": 3650722204, "total_bytes": 5368709120, "speed_bps": 4423456, "ts": 1769000000000 }
+{ "event": "task:state", "task_id": "01HVA...", "state": "downloading", "error": null, "ts": 1769000000000 }
+{ "event": "global:speed", "speed_bps": 8846912, "active_tasks": 2, "ts": 1769000000000 }
 ```
 
-Progress events are throttled to one per 500ms per task. `global:speed` is pushed every 1s.
+- `task:state` is emitted for `downloading`, `paused`, `removed`, `error`
+  (with `error` populated) and `complete` transitions.
+- `task:progress` is throttled to one event per 500ms per task and includes
+  a per-task instantaneous `speed_bps`.
+- `global:speed` is pushed every 1s while tasks are active, plus one final
+  zero-speed event when the daemon goes idle.
 
-### Client → server commands
+## Embedded web UI
 
-```json
-{ "type": "task:add", "urls": ["..."], "opts": { /* same as REST POST */ } }
-{ "type": "task:pause", "id": "01HVA..." }
-{ "type": "task:resume", "id": "01HVA..." }
-{ "type": "task:cancel", "id": "01HVA..." }
-{ "type": "qos:set", "enabled": true, "target_bps": 5242880 }
-```
+`GET /` serves a Svelte SPA compiled into the binary (rust-embed): active
+list with live progress, an add-task modal, and a QoS bandwidth toggle,
+all driven by the `/ws` stream above. Hashed assets under `/assets/*` are
+served with `Cache-Control: immutable`; unknown extension-less paths fall
+back to the SPA; unknown `/api/*` paths still return JSON 404s.
 
 ## Error responses
 
