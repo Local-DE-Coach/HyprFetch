@@ -30,6 +30,6 @@ futures.workspace = true
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 hyper = { workspace = true, features = ["full"] }
-tokio-tungstenite = "0.21"
+tokio-tungstenite = "0.24"
 wiremock = "0.6"
 tempfile = "3"
