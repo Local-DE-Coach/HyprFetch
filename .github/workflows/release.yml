@@ -149,7 +149,7 @@ jobs:
           cat PKGBUILD
 
       - name: Create / update release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # Attach artifacts to the tag the build was made for (inputs.tag on
           # workflow_dispatch, the pushed tag otherwise) — never the branch name.
