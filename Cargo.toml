@@ -37,7 +37,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Logging / errors
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
 
 # Misc
