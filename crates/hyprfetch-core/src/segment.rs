@@ -94,7 +94,9 @@ pub struct SegmentWorker {
     pub url: Url,
     pub segment: Segment,
     pub file: Arc<std::fs::File>,
-    pub qos: QosLimiter,
+    /// Shared engine-wide limiter. `None` bypasses QoS entirely (per-task
+    /// `force_off` override).
+    pub qos: Option<QosLimiter>,
     pub buffer_size: usize,
     pub progress_tx: mpsc::UnboundedSender<SegmentEvent>,
     pub extra_headers: Option<crate::http_client::ExtraHeaders>,
@@ -140,10 +142,12 @@ impl SegmentWorker {
             let chunk = chunk_result?;
             let mut remaining = &chunk[..];
 
-            // Apply QoS throttle. Acquire for the whole chunk at once; if the
-            // chunk is larger than the bucket capacity, governor will sleep
-            // and refill.
-            self.qos.acquire(chunk.len() as u64).await;
+            // Apply QoS throttle (no-op when QoS is off or the task opted
+            // out). Acquire for the whole chunk at once; the limiter splits
+            // chunks larger than the bucket capacity internally.
+            if let Some(qos) = &self.qos {
+                qos.acquire(chunk.len() as u64).await;
+            }
 
             while !remaining.is_empty() {
                 let n = remaining.len().min(buf_size);

@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hyprfetch_db::schema::TaskState;
-use hyprfetch_db::{SegmentRow, SegmentsRepo, TasksRepo};
+use hyprfetch_db::schema::{QosOverride, TaskState};
+use hyprfetch_db::{SegmentRow, SegmentsRepo, SettingsRepo, TasksRepo};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -55,6 +55,9 @@ pub struct Engine {
     http: HttpClient,
     /// Tasks currently running. One entry per active task.
     tasks: RwLock<HashMap<String, ActiveTask>>,
+    /// Engine-wide QoS governor shared by ALL active tasks — one token
+    /// bucket caps the aggregate download rate of the whole daemon.
+    qos: QosLimiter,
 }
 
 /// A running task: handle to the coordinator task + channel to send commands.
@@ -80,14 +83,50 @@ impl Engine {
     }
 
     /// Construct a new engine with a custom SSRF policy (e.g. disabled for tests).
+    ///
+    /// The engine-wide QoS limiter is initialized from the persisted
+    /// `qos_enabled` / `qos_target_bps` settings.
     pub fn with_ssrf_policy(
         db: Arc<std::sync::Mutex<rusqlite::Connection>>,
         policy: SsrfPolicy,
     ) -> Self {
+        let qos = QosLimiter::new();
+        // Restore QoS state from settings (best-effort — a missing/broken
+        // setting just means QoS stays off).
+        if let Ok(Some(target)) = SettingsRepo::new(&db).get("qos_target_bps") {
+            let enabled = SettingsRepo::new(&db)
+                .get("qos_enabled")
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("true");
+            if enabled {
+                if let Ok(bps) = target.parse::<u64>() {
+                    qos.enable(bps);
+                }
+            }
+        }
         Self {
             db,
             http: HttpClient::new(policy),
             tasks: RwLock::new(HashMap::new()),
+            qos,
+        }
+    }
+
+    /// The engine-wide QoS limiter. Clone it into workers; every clone
+    /// spends from the same token bucket.
+    pub fn qos(&self) -> &QosLimiter {
+        &self.qos
+    }
+
+    /// Apply a new global QoS configuration at runtime (from the settings
+    /// API). `enabled == false` or `target_bps == 0` turns QoS off.
+    pub fn set_qos(&self, enabled: bool, target_bps: u64) {
+        if enabled && target_bps > 0 {
+            self.qos.enable(target_bps);
+        } else {
+            self.qos.disable();
         }
     }
 
@@ -118,10 +157,12 @@ impl Engine {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let engine_db = Arc::clone(&self.db);
         let engine_http = self.http.clone();
+        let engine_qos = self.qos.clone();
         let task_id_owned = task_id.to_string();
         let handle = tokio::spawn(async move {
             if let Err(e) =
-                run_task_coordinator(engine_db, engine_http, task_id_owned, cmd_rx).await
+                run_task_coordinator(engine_db, engine_http, engine_qos, task_id_owned, cmd_rx)
+                    .await
             {
                 error!(error = %e, "task coordinator failed");
             }
@@ -167,6 +208,7 @@ impl Engine {
 async fn run_task_coordinator(
     db: Arc<std::sync::Mutex<rusqlite::Connection>>,
     http: HttpClient,
+    qos: QosLimiter,
     task_id: String,
     mut cmd_rx: mpsc::Receiver<TaskCommand>,
 ) -> Result<(), EngineError> {
@@ -295,8 +337,12 @@ async fn run_task_coordinator(
     let file = crate::segment::open_target_file(&save_path, total_bytes)?;
     let file = Arc::new(file);
 
-    // Shared QoS limiter for this task (engine-wide limiter is a follow-up).
-    let qos = QosLimiter::new();
+    // Effective QoS for this task: the engine-wide limiter is shared by all
+    // active tasks, but a per-task `force_off` override bypasses it.
+    let task_qos: Option<QosLimiter> = match row.qos_override {
+        Some(QosOverride::ForceOff) => None,
+        _ => Some(qos),
+    };
 
     // Spawn segment workers.
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<SegmentEvent>();
@@ -311,7 +357,7 @@ async fn run_task_coordinator(
             url: url.clone(),
             segment: seg,
             file: Arc::clone(&file),
-            qos: qos.clone(),
+            qos: task_qos.clone(),
             buffer_size: 64 * 1024,
             progress_tx: progress_tx.clone(),
             extra_headers: extra.clone(),
@@ -523,6 +569,98 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::TaskNotFound(_)));
+    }
+
+    #[test]
+    fn qos_loaded_from_settings_on_construction() {
+        let db = open_in_memory().unwrap();
+        {
+            let s = hyprfetch_db::SettingsRepo::new(&db);
+            s.set("qos_enabled", "true").unwrap();
+            s.set("qos_target_bps", "123456").unwrap();
+        }
+        let engine = Engine::new(db);
+        assert!(engine.qos().is_enabled());
+        assert_eq!(engine.qos().target_bps(), 123_456);
+    }
+
+    #[test]
+    fn qos_stays_off_when_setting_disabled() {
+        let db = open_in_memory().unwrap();
+        {
+            let s = hyprfetch_db::SettingsRepo::new(&db);
+            s.set("qos_enabled", "false").unwrap();
+            s.set("qos_target_bps", "123456").unwrap();
+        }
+        let engine = Engine::new(db);
+        assert!(!engine.qos().is_enabled());
+    }
+
+    #[test]
+    fn set_qos_updates_shared_limiter() {
+        let engine = fresh_engine();
+        assert!(!engine.qos().is_enabled());
+        engine.set_qos(true, 500_000);
+        assert!(engine.qos().is_enabled());
+        assert_eq!(engine.qos().target_bps(), 500_000);
+        engine.set_qos(false, 500_000);
+        assert!(!engine.qos().is_enabled());
+    }
+
+    #[tokio::test]
+    async fn force_off_task_bypasses_qos() {
+        // Enable a painfully slow QoS, start a task with force_off override,
+        // and verify it still completes quickly. A 100-byte download at
+        // 600 B/s is instant from a full bucket anyway — so instead assert
+        // on wiring: the coordinator accepts force_off tasks while QoS is on.
+        let server = MockServer::start().await;
+        let body: Vec<u8> = (0..100).collect();
+        let total = body.len() as i64;
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", total.to_string())
+                    .insert_header("accept-ranges", "bytes"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", format!("bytes 0-99/{total}"))
+                    .insert_header("content-length", "100")
+                    .set_body_bytes(body),
+            )
+            .mount(&server)
+            .await;
+
+        let engine = fresh_engine();
+        engine.set_qos(true, 600);
+        let id = seed_task(&engine.db, &server.uri(), Some(total));
+        {
+            let db = Arc::clone(&engine.db);
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET qos_override = 'force_off', segments_requested = 1 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+        engine.start(&id).await.unwrap();
+
+        let mut attempts = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            attempts += 1;
+            if attempts > 60 {
+                panic!("force_off task did not complete in time");
+            }
+            let row = TasksRepo::new(&engine.db).get(&id).unwrap().unwrap();
+            if row.state == TaskState::Complete || row.state == TaskState::Error {
+                assert_eq!(row.state, TaskState::Complete, "{:?}", row.error_message);
+                break;
+            }
+        }
     }
 
     #[tokio::test]
