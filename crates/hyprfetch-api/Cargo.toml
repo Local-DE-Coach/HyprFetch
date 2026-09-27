@@ -1,0 +1,27 @@
+[package]
+name = "hyprfetch-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+hyprfetch-core = { path = "../hyprfetch-core" }
+hyprfetch-db = { path = "../hyprfetch-db" }
+
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+rust-embed.workspace = true
+mime_guess.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+hyper = { workspace = true, features = ["full"] }

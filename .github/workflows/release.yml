@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist on the repo)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - target: x86_64-unknown-linux-musl
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross-compilation deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libsqlite3-dev pkg-config \
+            gcc-aarch64-linux-gnu \
+            musl-tools
+
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          VERSION="${VERSION#v}"
+          ARCHIVE="hyprfetch-${VERSION}-${{ matrix.target }}"
+          mkdir -p "$ARCHIVE"
+          cp target/${{ matrix.target }}/release/hyprfetch "$ARCHIVE/"
+          cp README.md LICENSE CHANGELOG.md "$ARCHIVE/"
+          tar czf "$ARCHIVE.tar.gz" "$ARCHIVE"
+          sha256sum "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
+          ls -la "$ARCHIVE.tar.gz" "$ARCHIVE.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hyprfetch-${{ matrix.target }}
+          path: |
+            hyprfetch-*.tar.gz
+            hyprfetch-*.sha256
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Display structure
+        run: ls -laR artifacts
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/hyprfetch-*.tar.gz
+            artifacts/hyprfetch-*.sha256

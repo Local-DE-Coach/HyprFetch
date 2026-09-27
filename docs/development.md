@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Rust** 1.75+ (stable). Install via [rustup](https://rustup.rs).
+- **Rust** 1.85+ (stable). Install via [rustup](https://rustup.rs). (1.85 because some deps require edition 2024.)
 - **Node** 20+ and npm. Used only for the Svelte frontend.
 - **SQLite** system libraries — `apt install libsqlite3-dev` on Debian/Ubuntu, `pacman -S sqlite` on Arch.
 - **pkg-config** — `apt install pkg-config` (needed by `libsqlite3-sys` build script).
