@@ -80,12 +80,43 @@ jobs:
           sha256sum "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
           ls -la "$ARCHIVE.tar.gz" "$ARCHIVE.tar.gz.sha256"
 
+      # .deb for Ubuntu/Debian — only on the native x86_64 GNU target.
+      # cargo-deb re-packages the already-built binary (--no-build); the
+      # "target/release/hyprfetch" asset entry in [package.metadata.deb]
+      # resolves under target/<triple>/release/ because --target is passed.
+      - name: Build .deb (Ubuntu/Debian)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb --no-build --target x86_64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/debian/hyprfetch_*.deb ./
+          ls -la hyprfetch_*.deb
+
+      # .rpm for Fedora/RHEL — repackages the tar.gz produced by the Package
+      # step via rpmbuild; the spec ships in packaging/rpm/.
+      - name: Build .rpm (Fedora/RHEL)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get install -y -qq rpm
+          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          TOPDIR="$PWD/rpmbuild"
+          mkdir -p "$TOPDIR"/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
+          cp "hyprfetch-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" "$TOPDIR/SOURCES/"
+          sed "s/__VERSION__/${VERSION}/" packaging/rpm/hyprfetch.spec > "$TOPDIR/SPECS/hyprfetch.spec"
+          rpmbuild -bb --define "_topdir $TOPDIR" "$TOPDIR/SPECS/hyprfetch.spec"
+          cp "$TOPDIR"/RPMS/x86_64/hyprfetch-*.rpm ./
+          rpm -qpi hyprfetch-*.rpm
+          ls -la hyprfetch-*.rpm
+
       - uses: actions/upload-artifact@v4
         with:
           name: hyprfetch-${{ matrix.target }}
           path: |
             hyprfetch-*.tar.gz
             hyprfetch-*.sha256
+            hyprfetch_*.deb
+            hyprfetch-*.rpm
           retention-days: 14
 
   release:
@@ -105,6 +136,18 @@ jobs:
       - name: Display structure
         run: ls -laR artifacts
 
+      - name: Generate Arch PKGBUILD (AUR fast install)
+        run: |
+          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          # The sha256 file format is "<hash>  <filename>"; take the hash.
+          SHA=$(cut -d' ' -f1 "artifacts/hyprfetch-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256")
+          sed -e "s/__VERSION__/${VERSION}/g" -e "s/__SHA256__/${SHA}/" \
+            packaging/arch/PKGBUILD.bin.template > PKGBUILD
+          # Syntax-check the generated PKGBUILD; print it for the run log.
+          bash -n PKGBUILD
+          cat PKGBUILD
+
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:
@@ -116,3 +159,6 @@ jobs:
           files: |
             artifacts/hyprfetch-*.tar.gz
             artifacts/hyprfetch-*.sha256
+            artifacts/hyprfetch_*.deb
+            artifacts/hyprfetch-*.rpm
+            PKGBUILD

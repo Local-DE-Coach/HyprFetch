@@ -3,6 +3,7 @@ name = "hyprfetch"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -24,3 +25,24 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 toml.workspace = true
+
+# Debian packaging (built in CI via `cargo deb`; see .github/workflows/release.yml)
+[package.metadata.deb]
+maintainer = "HyprFetch Contributors <Local-DE-Coach@users.noreply.github.com>"
+depends = "$auto"
+section = "net"
+priority = "optional"
+extended-description = """\
+HyprFetch is a minimal-RAM, fast, resumable internet download manager \
+with a browser-based control panel. A single Rust binary serves the web \
+UI on 127.0.0.1:7780, runs segmented multi-connection downloads with \
+byte-exact resume, and enforces an optional engine-wide QoS bandwidth cap.\
+"""
+assets = [
+    # "target/..." is resolved by cargo-deb relative to the workspace target
+    # dir (and under target/<triple>/ when --target is passed in CI).
+    ["target/release/hyprfetch", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/hyprfetch/README", "644"],
+    ["../../CHANGELOG.md", "usr/share/doc/hyprfetch/CHANGELOG", "644"],
+    ["../../LICENSE", "usr/share/doc/hyprfetch/copyright", "644"],
+]

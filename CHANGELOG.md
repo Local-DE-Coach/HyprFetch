@@ -6,6 +6,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
+## [Unreleased]
+
+### Added
+- **Linux packages in every release** (fast installation) — the release
+  workflow now builds and attaches three package formats next to the binary
+  tarballs:
+  - `hyprfetch_<version>-1_amd64.deb` (Ubuntu/Debian) — built with
+    `cargo-deb` from `[package.metadata.deb]` in `crates/hyprfetch/Cargo.toml`.
+    Installs `/usr/bin/hyprfetch` + README/CHANGELOG/copyright under
+    `/usr/share/doc/hyprfetch/`; the only runtime dependency is glibc
+    (SQLite is bundled, TLS is rustls).
+  - `hyprfetch-<version>-1.x86_64.rpm` (Fedora/RHEL) — built with
+    `rpmbuild` from the new `packaging/rpm/hyprfetch.spec`, repackaging the
+    x86_64 release tarball (binary + docs at the standard locations).
+  - `PKGBUILD` (Arch Linux) — generated per release from the new
+    `packaging/arch/PKGBUILD.bin.template` with the version and the sha256 of
+    the x86_64 tarball substituted in, so Arch users can download one file
+    from the release page and run `makepkg -si` for a fast, checksum-verified
+    install (`hyprfetch-bin`).
+
 ## [0.1.1] — 2026-09-28
 
 CI and engine reliability release. No new features — fixes the release

@@ -1,0 +1,27 @@
+# Maintainer: HyprFetch Contributors <Local-DE-Coach@users.noreply.github.com>
+# Fast-install binary package for Arch Linux (generated for each release;
+# pkgver and sha256sums are pinned to that release by CI).
+# Usage: download PKGBUILD from a HyprFetch release, then run:  makepkg -si
+pkgname=hyprfetch-bin
+pkgver=__VERSION__
+pkgrel=1
+pkgdesc="Minimal-RAM, fast, resumable download manager with a web UI (prebuilt binary)"
+arch=('x86_64')
+url="https://github.com/Local-DE-Coach/HyprFetch"
+license=('MIT')
+depends=('glibc' 'gcc-libs')
+optdepends=('xdg-utils: open the web UI / download folder from the daemon')
+provides=('hyprfetch')
+conflicts=('hyprfetch')
+source=("hyprfetch-${pkgver}.tar.gz::https://github.com/Local-DE-Coach/HyprFetch/releases/download/v${pkgver}/hyprfetch-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums=('__SHA256__')
+
+package() {
+    local _srcdir="${srcdir}/hyprfetch-${pkgver}-x86_64-unknown-linux-gnu"
+    install -Dm755 "${_srcdir}/hyprfetch"   "${pkgdir}/usr/bin/hyprfetch"
+    install -Dm644 "${_srcdir}/README.md"   "${pkgdir}/usr/share/doc/hyprfetch/README.md"
+    install -Dm644 "${_srcdir}/CHANGELOG.md" "${pkgdir}/usr/share/doc/hyprfetch/CHANGELOG.md"
+    install -Dm644 "${_srcdir}/LICENSE"     "${pkgdir}/usr/share/licenses/hyprfetch-bin/LICENSE"
+}
+
+# vim: set ft=sh:

@@ -11,6 +11,7 @@ members = [
 version = "0.1.1"
 edition = "2021"
 rust-version = "1.85"
+description = "Minimal-RAM, fast, resumable internet download manager with a browser-based control panel"
 authors = ["HyprFetch Contributors"]
 license = "MIT"
 repository = "https://github.com/Local-DE-Coach/HyprFetch"

@@ -32,6 +32,42 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-28] Release packaging: .deb / .rpm / PKGBUILD — Super Z sandbox
+- **Commit(s):** (this commit) `feat(packaging): add .deb, .rpm, and Arch PKGBUILD to release workflow`
+- **Did:**
+  - `crates/hyprfetch/Cargo.toml`: added `[package.metadata.deb]` (maintainer,
+    section `net`, extended-description, assets = binary + README/CHANGELOG/
+    copyright) so `cargo deb` produces the Ubuntu/Debian package; added
+    `description` to the workspace `Cargo.toml` (cargo-deb warns without it).
+  - `packaging/rpm/hyprfetch.spec`: new RPM spec (source = the x86_64 release
+    tarball; `__VERSION__` substituted by CI; binary → `/usr/bin`, docs →
+    `%_docdir`, license → `%_licensedir`).
+  - `packaging/arch/PKGBUILD.bin.template`: new Arch template (`hyprfetch-bin`,
+    downloads the release tarball; `__VERSION__` + `__SHA256__` substituted by
+    CI so `makepkg` verifies the checksum).
+  - `.github/workflows/release.yml`: x86_64-unknown-linux-gnu matrix job now
+    also builds the `.deb` (`cargo deb --no-build --target …`) and the `.rpm`
+    (`rpmbuild -bb` over the tarball made by the Package step); release job
+    generates `PKGBUILD` from the template (version + sha256 of the tarball)
+    and attaches it; upload-artifact globs extended with `hyprfetch_*.deb` and
+    `hyprfetch-*.rpm`.
+- **Why:** user asked the release to carry ready-made packages for
+  Ubuntu/Debian, Fedora/RHEL, and Arch (AUR-style fast install) instead of
+  only raw tarballs.
+- **Result / state:** verified locally in the sandbox: full workspace builds
+  (`cargo build --release --locked`), all 93 tests pass, `cargo deb
+  --no-build --target x86_64-unknown-linux-gnu` produces
+  `target/<triple>/debian/hyprfetch_0.1.1-1_amd64.deb` (contents inspected
+  with dpkg-deb: `/usr/bin/hyprfetch` + docs, `Depends: libc6`), spec/PKGBUILD
+  substitution + tarball layout simulated with the exact CI commands
+  (rpmbuild itself is not installable in this sandbox — no sudo — the spec is
+  standard and validated structurally).
+- **Notes for next sandbox:** the release job `fail_on_unmatched_files: true`
+  now also expects `PKGBUILD` at repo root — keep the template path
+  `packaging/arch/PKGBUILD.bin.template` in sync with the workflow sed step.
+  deb/rpm build only on the native x86_64 GNU target (aarch64/musl jobs
+  unchanged). Docs commit follows: install guide + design rationale.
+
 ### [2026-09-28] Release v0.1.1 — Super Z sandbox
 - **Commit(s):** (this commit) `chore(release): v0.1.1` + tag `v0.1.1`
 - **Did:** workspace version 0.1.0 → 0.1.1 (all 4 member crates via
