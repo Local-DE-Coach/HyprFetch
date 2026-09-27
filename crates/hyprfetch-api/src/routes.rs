@@ -434,6 +434,11 @@ pub async fn set_qos(
     let s = SettingsRepo::new(&state.db);
     s.set("qos_enabled", if req.enabled { "true" } else { "false" })?;
     s.set("qos_target_bps", &req.target_bps.unwrap_or(0).to_string())?;
+    // Apply live to the engine-wide limiter so running tasks pick up the
+    // new rate immediately (the limiter is shared by all active tasks).
+    state
+        .engine
+        .set_qos(req.enabled, req.target_bps.unwrap_or(0));
     EventsRepo::new(&state.db)
         .append(
             None,
@@ -789,6 +794,56 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_str(res.into_body()).await;
         assert!(body.contains("\"enabled\":false"));
+    }
+
+    #[tokio::test]
+    async fn set_qos_applies_to_engine_limiter_live() {
+        let state = test_state();
+        let app = router(state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/qos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "enabled": true,
+                            "target_bps": 250_000,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // The engine-wide limiter must reflect the new config immediately —
+        // running tasks share this bucket.
+        assert!(state.engine.qos().is_enabled());
+        assert_eq!(state.engine.qos().target_bps(), 250_000);
+
+        // Turning it off must disable the limiter too.
+        let res = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/qos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "enabled": false,
+                            "target_bps": 0,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!state.engine.qos().is_enabled());
     }
 
     #[tokio::test]
