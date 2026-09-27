@@ -31,6 +31,10 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
   and the not-implemented `POST /api/tasks/:id/retry` endpoint is marked as planned.
 
 ### Added
+- **README: "Sandbox test results (2026-09-28)"** — full test data of the
+  1 GB / 5 GB thinkbroadband runs (throughput, RSS, integrity sha256
+  verification, resume-across-restart proof) and the analysis that led to the
+  two engine fixes above.
 - **Multi-sandbox coordination** — repo-root `worklog.md` records what each
   sandbox/agent did per commit; every commit is expected to update both
   `CHANGELOG.md` and `worklog.md` (protocol documented in the file and in

@@ -32,6 +32,20 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-28] README: sandbox test data & analysis — Super Z sandbox
+- **Commit(s):** (this commit) `docs(readme): add sandbox test results and analysis`
+- **Did:** README gained a full "Sandbox test results" section: environment,
+  results table (1 GB QoS-capped run, 5 GB two-phase pause/resume run, idle RSS,
+  UI serving), byte-exact integrity verification (sha256 vs independent curl
+  range downloads), the root-cause analysis of the two engine bugs fixed in the
+  previous commit, observations (segment scaling, QoS accuracy), and known gaps.
+- **Why:** the user asked for the sandbox tests + analysis to be recorded in the
+  README as test data.
+- **Result / state:** docs only; no code changes. Raw JSON time-series stay in
+  the sandbox (not committed — 5 × ~50 KB of samples).
+- **Notes for next sandbox:** when implementing `/api/tasks/:id/retry`, update
+  both `docs/api.md` (remove "planned" note) and the README "Known gaps" list.
+
 ### [2026-09-28] Sandbox download tests → two engine bugs found & fixed — Super Z sandbox
 - **Commit(s):** (this commit) `fix(core): remove 30s total request timeout, add per-segment retry`
 - **Did:**
