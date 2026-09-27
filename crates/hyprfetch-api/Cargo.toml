@@ -25,7 +25,11 @@ url.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
 anyhow.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 hyper = { workspace = true, features = ["full"] }
+tokio-tungstenite = "0.21"
+wiremock = "0.6"
+tempfile = "3"

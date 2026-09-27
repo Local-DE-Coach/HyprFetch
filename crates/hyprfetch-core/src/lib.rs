@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod engine;
+pub mod events;
 pub mod http_client;
 pub mod planner;
 pub mod qos;
@@ -14,6 +15,7 @@ pub mod ssrf;
 pub mod task;
 
 pub use engine::{Engine, EngineError};
+pub use events::{EngineEvent, EventBus};
 pub use http_client::{ExtraHeaders, HttpClient, HttpError, ProbeResult, DEFAULT_USER_AGENT};
 pub use planner::split as split_segments;
 pub use qos::QosLimiter;
