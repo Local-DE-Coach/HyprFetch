@@ -1,22 +1,106 @@
 //! HTTP + WebSocket server (axum). Serves the embedded SPA and the REST/WS API.
 //!
-//! Stub. Real router lands in `feature/http-api`.
+//! See `docs/api.md` for the full API contract.
 
 #![forbid(unsafe_code)]
 
-/// Placeholder for the future router builder. Currently returns a static
-/// `{"status":"ok"}` JSON response.
-pub async fn healthz() -> &'static str {
-    "{\"status\":\"ok\"}"
+mod error;
+mod routes;
+
+pub use error::{ApiError, ApiErrorCode};
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::Router;
+use hyprfetch_db::schema::TaskState;
+
+/// Shared application state passed to every handler.
+#[derive(Clone)]
+pub struct AppState {
+    /// Database handle (Arc'd Mutex around a single rusqlite Connection).
+    pub db: Arc<std::sync::Mutex<rusqlite::Connection>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Filter for the `?state=` query param on `GET /api/tasks`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskListFilter {
+    /// `?state=active` — return queued + downloading + paused
+    Active,
+    /// `?state=completed` — return complete + error
+    Completed,
+    /// `?state=all` or omitted — return everything except removed
+    All,
+}
 
-    #[tokio::test]
-    async fn healthz_returns_ok() {
-        let body = healthz().await;
-        assert!(body.contains("\"ok\""));
+impl TaskListFilter {
+    /// Parse from the raw query value. `None` maps to `All`.
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::to_ascii_lowercase).as_deref() {
+            Some("active") => Self::Active,
+            Some("completed") => Self::Completed,
+            Some("all") | None => Self::All,
+            Some(_) => Self::All, // unknown → all
+        }
     }
+
+    /// Return the SQL `state IN (...)` clause (without parentheses) and
+    /// matching parameter list.
+    pub fn states(self) -> &'static [TaskState] {
+        match self {
+            Self::Active => &[TaskState::Queued, TaskState::Downloading, TaskState::Paused],
+            Self::Completed => &[TaskState::Complete, TaskState::Error],
+            Self::All => &[
+                TaskState::Queued,
+                TaskState::Downloading,
+                TaskState::Paused,
+                TaskState::Complete,
+                TaskState::Error,
+            ],
+        }
+    }
+}
+
+/// Build the public axum router.
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", axum::routing::get(routes::healthz))
+        .route(
+            "/api/tasks",
+            axum::routing::get(routes::list_tasks).post(routes::create_task),
+        )
+        .route(
+            "/api/tasks/:id",
+            axum::routing::get(routes::get_task).delete(routes::delete_task),
+        )
+        .route(
+            "/api/tasks/:id/pause",
+            axum::routing::post(routes::pause_task),
+        )
+        .route(
+            "/api/tasks/:id/resume",
+            axum::routing::post(routes::resume_task),
+        )
+        .route(
+            "/api/tasks/:id/cancel",
+            axum::routing::post(routes::cancel_task),
+        )
+        .route(
+            "/api/qos",
+            axum::routing::get(routes::get_qos).put(routes::set_qos),
+        )
+        .route(
+            "/api/settings",
+            axum::routing::get(routes::get_settings).patch(routes::patch_settings),
+        )
+        .with_state(state)
+}
+
+/// Convenience: build router + bind + serve. Used by the binary.
+pub async fn serve(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
+    let app = router(state);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(%addr, "hyprfetch API listening");
+    axum::serve(listener, app).await?;
+    Ok(())
 }
