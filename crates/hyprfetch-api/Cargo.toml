@@ -21,6 +21,10 @@ thiserror.workspace = true
 rust-embed.workspace = true
 mime_guess.workspace = true
 bytes.workspace = true
+url.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -16,7 +16,7 @@ mod repo;
 pub mod schema;
 
 pub use repo::{EventRow, EventsRepo, SegmentRow, SegmentsRepo, SettingsRepo, TaskRow, TasksRepo};
-pub use schema::TaskState;
+pub use schema::{QosOverride, SegmentState, TaskState};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -30,14 +30,26 @@ use rusqlite::Connection;
 /// since our access pattern is mostly sequential writes from the engine.
 pub fn open(path: &Path) -> rusqlite::Result<Arc<Mutex<Connection>>> {
     let conn = Connection::open(path)?;
+    configure_and_migrate(&conn)?;
+    Ok(Arc::new(Mutex::new(conn)))
+}
+
+/// Open an in-memory database (for tests). Runs migrations + applies pragmas.
+pub fn open_in_memory() -> rusqlite::Result<Arc<Mutex<Connection>>> {
+    let conn = Connection::open_in_memory()?;
+    configure_and_migrate(&conn)?;
+    Ok(Arc::new(Mutex::new(conn)))
+}
+
+fn configure_and_migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     // Keep page cache small — we target low RAM.
     conn.pragma_update(None, "cache_size", "-256")?; // 256 KB
-    migrations::run(&conn)?;
-    Ok(Arc::new(Mutex::new(conn)))
+    migrations::run(conn)?;
+    Ok(())
 }
 
 use std::sync::Mutex;

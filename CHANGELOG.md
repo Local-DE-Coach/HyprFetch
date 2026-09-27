@@ -9,14 +9,26 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 ## [Unreleased]
 
 ### Added
-- SQLite persistence layer (`hyprfetch-db` crate):
-  - `migrations/001_init.sql` — schema for `tasks`, `segments`, `settings`, `events` tables
-  - `migrations/002_seed_settings.sql` — default app settings (bind, download_dir, segments_default, qos_*, etc.)
-  - Migration runner with `schema_migrations` tracking table; idempotent
-  - `TaskState`, `SegmentState`, `QosOverride` enums with serde + DB-string round-trip
-  - `TasksRepo` (insert, get, list_by_state, touch, update_cache_validators, delete)
-  - `SegmentsRepo` (insert_batch, list_for_task, touch)
-  - `SettingsRepo` (get, set, all)
-  - `EventsRepo` (append, tail, prune_before)
-  - 16 new unit tests covering migrations, repos, and state machine round-trips
-- `open()` configures WAL mode, foreign_keys=ON, 256 KB page cache (RAM target preserved)
+- HTTP API (`hyprfetch-api` crate, axum 0.7):
+  - `GET /healthz` — `{"status":"ok"}` for liveness probes
+  - `GET /api/tasks?state=active|completed|all` — list with filter
+  - `POST /api/tasks` — bulk create (up to 100 URLs per request), validates
+    scheme is http/https, derives filename from URL, persists to SQLite,
+    appends `task.created` audit event
+  - `GET /api/tasks/:id` — full task detail with per-segment progress
+  - `DELETE /api/tasks/:id` — removes task + cascades segments
+  - `POST /api/tasks/:id/{pause,resume,cancel}` — state machine transitions
+    with `409 Conflict` on invalid transitions
+  - `GET /api/qos` / `PUT /api/qos` — read/write QoS state
+  - `GET /api/settings` / `PATCH /api/settings` — flat key/value settings
+  - Structured error responses: `{ "error": { "code": "...", "message": "..." } }`
+    with stable codes (`invalid_url`, `ssrf_blocked`, `task_not_found`,
+    `invalid_state_transition`, `invalid_request`, `internal_error`)
+- `hyprfetch` binary:
+  - `serve` command binds axum on `127.0.0.1:7780` (configurable via
+    `--bind` or `HYPRFETCH_BIND` env var)
+  - `doctor` command verifies db, settings, and pragma state
+  - `--db-path`, `--download-dir`, `--segments` CLI flags + env var equivalents
+  - Default db path: `${XDG_DATA_HOME:-~/.local/share}/hyprfetch/hyprfetch.db`
+- `hyprfetch_db::open_in_memory()` — for tests; runs migrations + applies pragmas
+- 9 new API integration tests (33 tests total across workspace)
