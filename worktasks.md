@@ -249,6 +249,7 @@ tracker / Backlog.
 | 14.5 | Release-notes automation (generate_release_notes) | ✅ | v0.2.0 release |
 | 14.6 | Nightly build workflow (main → artifact) | ⬜ | — |
 | 14.7 | Benchmark workflow (engine throughput regression) | 💭 | — |
+| 14.8 | **Dependency sync 2026-09-28**: merged all 10 Dependabot branches into `main` (cargo: thiserror 2.0.21, toml 1.1.6, tokio-tungstenite 0.24.0, rusqlite 0.40.2, governor 0.10.4; actions: checkout@v7, upload-artifact@v7, download-artifact@v8, stale@v11, action-gh-release@v3); repaired governor-merge Cargo.lock duplication; branches deleted, PRs #10–#19 closed | ✅ | fmt/clippy clean, **110/110 tests**, live smoke (config/WAL/download/doctor), merge commits `36be434`–`a79d93d` |
 
 ---
 

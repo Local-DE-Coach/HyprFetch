@@ -8,6 +8,22 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+### Dependencies (merged from 10 Dependabot branches, 2026-09-28)
+- **cargo:** `thiserror` 1 → 2.0.21, `toml` 0.8 → 1.1.6+spec-1.1.0,
+  `tokio-tungstenite` 0.21 → 0.24.0, `rusqlite` 0.32 → 0.40.2 (bundled SQLite
+  refreshed), `governor` 0.6 → 0.10.4. No source changes required — the APIs
+  HyprFetch uses are stable across each bump. Verified by the full suite
+  (110/110) + live smoke (config parse, WAL open, download through the new
+  token bucket, doctor).
+- **CI actions:** `actions/checkout` 4 → 7, `actions/upload-artifact` 4 → 7,
+  `actions/download-artifact` 4 → 8, `actions/stale` 9 → 11,
+  `softprops/action-gh-release` 2 → 3. Workflows re-validated (YAML parse +
+  `uses:` review).
+- **Housekeeping:** the governor merge initially produced a duplicated
+  `Cargo.lock` stanza (`hashbrown` twice); the lock was regenerated and
+  verified. All 10 Dependabot branches deleted (remote now has only `main`),
+  PRs #10–#19 closed.
+
 ### Fixed (found by the 2026-09-28 full audit: code review + live smoke test)
 - **Downloads from servers without Range support failed entirely.** The
   segment worker required `206 Partial Content` even on the single-connection

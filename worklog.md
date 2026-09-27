@@ -32,6 +32,44 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-28] Branch hygiene: merged all 10 Dependabot branches, fixed Cargo.lock, deleted branches + closed PRs — Super Z sandbox
+- **Commit(s):** merge commits `36be434` (stale@v11), `17601b0` (upload-artifact@v7),
+  `4a906bc` (download-artifact@v8), `95e6c17` (checkout@v7), `3751c42`
+  (action-gh-release@v3), `8075f8b` (thiserror 2.0.21), `0454a8f` (toml 1.1.6),
+  `24d7814` (tokio-tungstenite 0.24.0), `100a4bc` (rusqlite 0.40.2), `a79d93d`
+  (governor 0.10.4, amended to repair Cargo.lock); (this commit) work-file updates.
+- **Did:**
+  - Inventoried the 10 open Dependabot branches (5 cargo + 5 GitHub Actions),
+    all based on v0.2.0 / the audit commit; merged them into `main` one by one,
+    running `cargo check --workspace --all-targets` after each cargo bump.
+  - **Fix:** the governor merge textually auto-merged `Cargo.lock` into an
+    unparseable state (`package hashbrown is specified twice` — duplicated
+    stanza from the branch's lock). Repaired by restoring the previous good
+    lock and letting cargo re-resolve governor minimally; amended the merge
+    commit. Verified the final lock has no same name+version duplicates.
+  - All 5 Actions bumps validated by YAML parse + `uses:` review
+    (checkout v7 ×5, upload-artifact v7, download-artifact v8, stale v11,
+    action-gh-release v3 — all drop-in, no schema changes needed).
+  - **Zero code changes needed** for the 5 cargo bumps: the APIs we use
+    (`DefaultDirectRateLimiter::direct`, `Quota::per_second`, rusqlite
+    connection/params, thiserror derives, `toml::from_str`,
+    `connect_async`/`Message::Text`) are stable across each jump.
+  - **Verified:** `cargo fmt` clean, `cargo clippy --all-targets -- -D warnings`
+    clean, **110/110 tests passing** (same count as pre-merge, includes ws e2e
+    over real TCP with tungstenite 0.24 client), live smoke test (config.toml
+    parsed by toml 1.1 → settings applied; SQLite opened WAL via rusqlite 0.40;
+    a real download completed through the governor 0.10 token bucket; doctor OK).
+- **Result / state:** `main` at `a79d93d` contains all 10 bumps; remote has
+  exactly one branch (`main`); all 10 PRs (#10–#19) closed with an explanatory
+  comment (Dependabot auto-deleted its branches on close). CI green on the
+  merge train.
+- **Notes for next sandbox:** Dependabot will NOT reopen these — versions in
+  `main` now satisfy its checks. `thiserror 1.0.69` still appears in
+  `Cargo.lock` as a transitive dep of another crate — that is normal and not
+  actionable. If CI fails on `softprops/action-gh-release@v3` at the next tag,
+  check its changelog for input renames (v2→v3 may deprecate inputs; not
+  verifiable locally).
+
 ### [2026-09-28] Full audit → worktasks.md board, 3 engine bugs fixed, retry/auth/config shipped — Super Z sandbox
 - **Commit(s):** (this commit) `fix(core)+feat(api,cli): audit fixes — task reaping, queue pump, non-Range 200 fallback, retry, delete_file, bearer auth, config.toml, worktasks.md`
 - **Did:**
