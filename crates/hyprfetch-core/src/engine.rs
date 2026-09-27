@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use url::Url;
 
+use crate::events::{run_speed_aggregator, EngineEvent, EventBus};
 use crate::http_client::{ExtraHeaders, HttpClient};
 use crate::planner;
 use crate::qos::QosLimiter;
@@ -58,6 +60,13 @@ pub struct Engine {
     /// Engine-wide QoS governor shared by ALL active tasks — one token
     /// bucket caps the aggregate download rate of the whole daemon.
     qos: QosLimiter,
+    /// Broadcast bus for lifecycle events (task:progress, task:state,
+    /// global:speed). WebSocket clients subscribe through the API layer.
+    events: EventBus,
+    /// Guards the one-time spawn of the speed aggregator (spawned lazily on
+    /// the first `start()`, which is guaranteed to run inside a tokio
+    /// runtime — constructors may be called from sync contexts).
+    aggregator_started: AtomicBool,
 }
 
 /// A running task: handle to the coordinator task + channel to send commands.
@@ -106,11 +115,14 @@ impl Engine {
                 }
             }
         }
+
         Self {
             db,
             http: HttpClient::new(policy),
             tasks: RwLock::new(HashMap::new()),
             qos,
+            events: EventBus::new(),
+            aggregator_started: AtomicBool::new(false),
         }
     }
 
@@ -130,8 +142,28 @@ impl Engine {
         }
     }
 
+    /// Subscribe to the engine event bus (`task:progress`, `task:state`,
+    /// `global:speed`). Each subscriber gets its own live stream.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EngineEvent> {
+        self.events.subscribe()
+    }
+
+    /// Spawn the global-speed aggregator exactly once. Must be called from
+    /// async context (`start()` guarantees that).
+    fn ensure_aggregator(&self) {
+        if !self.aggregator_started.swap(true, Ordering::SeqCst) {
+            let bus = self.events.clone();
+            let rx = self.events.subscribe();
+            tokio::spawn(async move {
+                run_speed_aggregator(bus, rx, crate::events::SPEED_TICK).await;
+            });
+        }
+    }
+
     /// Start a queued task. Probes the URL, splits into segments, spawns workers.
     pub async fn start(&self, task_id: &str) -> Result<(), EngineError> {
+        self.ensure_aggregator();
+
         // Fetch the task row.
         let row = {
             let repo = TasksRepo::new(&self.db);
@@ -158,11 +190,18 @@ impl Engine {
         let engine_db = Arc::clone(&self.db);
         let engine_http = self.http.clone();
         let engine_qos = self.qos.clone();
+        let engine_events = self.events.clone();
         let task_id_owned = task_id.to_string();
         let handle = tokio::spawn(async move {
-            if let Err(e) =
-                run_task_coordinator(engine_db, engine_http, engine_qos, task_id_owned, cmd_rx)
-                    .await
+            if let Err(e) = run_task_coordinator(
+                engine_db,
+                engine_http,
+                engine_qos,
+                engine_events,
+                task_id_owned,
+                cmd_rx,
+            )
+            .await
             {
                 error!(error = %e, "task coordinator failed");
             }
@@ -209,6 +248,7 @@ async fn run_task_coordinator(
     db: Arc<std::sync::Mutex<rusqlite::Connection>>,
     http: HttpClient,
     qos: QosLimiter,
+    events: EventBus,
     task_id: String,
     mut cmd_rx: mpsc::Receiver<TaskCommand>,
 ) -> Result<(), EngineError> {
@@ -221,6 +261,11 @@ async fn run_task_coordinator(
 
     // Mark as downloading.
     TasksRepo::new(&db).touch(&task_id, TaskState::Downloading, row.downloaded_bytes, None)?;
+    events.emit(EngineEvent::task_state(
+        &task_id,
+        TaskState::Downloading,
+        None,
+    ));
 
     // Parse URL.
     let url = Url::parse(&row.url).map_err(|e| EngineError::Other(format!("bad url: {e}")))?;
@@ -242,6 +287,11 @@ async fn run_task_coordinator(
                 row.downloaded_bytes,
                 Some(&format!("probe failed: {e}")),
             )?;
+            events.emit(EngineEvent::task_state(
+                &task_id,
+                TaskState::Error,
+                Some(&format!("probe failed: {e}")),
+            ));
             return Err(e.into());
         }
     };
@@ -265,6 +315,11 @@ async fn run_task_coordinator(
                 row.downloaded_bytes,
                 Some("server did not return Content-Length; cannot segment"),
             )?;
+            events.emit(EngineEvent::task_state(
+                &task_id,
+                TaskState::Error,
+                Some("server did not return Content-Length; cannot segment"),
+            ));
             return Err(EngineError::Other("missing Content-Length".into()));
         }
     };
@@ -375,6 +430,9 @@ async fn run_task_coordinator(
     let initial_downloaded = downloaded_bytes;
     let mut per_segment_current: HashMap<i64, i64> =
         segments.iter().map(|s| (s.idx, s.current_byte)).collect();
+    // Speed sampling window for task:progress events.
+    let mut speed_window_start = Instant::now();
+    let mut speed_window_bytes = downloaded_bytes;
 
     loop {
         tokio::select! {
@@ -390,6 +448,7 @@ async fn run_task_coordinator(
                         }
                         // Persist current state.
                         let _ = persist_progress(&db, &task_id, &per_segment_current, &segments, TaskState::Paused, None).await;
+                        events.emit(EngineEvent::task_state(&task_id, TaskState::Paused, None));
                         return Ok(());
                     }
                     Some(TaskCommand::Cancel) | None => {
@@ -398,6 +457,7 @@ async fn run_task_coordinator(
                             h.abort();
                         }
                         let _ = persist_progress(&db, &task_id, &per_segment_current, &segments, TaskState::Removed, None).await;
+                        events.emit(EngineEvent::task_state(&task_id, TaskState::Removed, None));
                         return Ok(());
                     }
                 }
@@ -423,6 +483,7 @@ async fn run_task_coordinator(
                             h.abort();
                         }
                         let _ = persist_progress(&db, &task_id, &per_segment_current, &segments, TaskState::Error, Some(&error)).await;
+                        events.emit(EngineEvent::task_state(&task_id, TaskState::Error, Some(&error)));
                         return Ok(());
                     }
                     None => {
@@ -430,9 +491,23 @@ async fn run_task_coordinator(
                         break;
                     }
                 }
-                // Debounced persist.
+                // Debounced persist + progress broadcast.
                 if last_persist.elapsed() >= DEBOUNCE_INTERVAL {
                     let _ = persist_progress(&db, &task_id, &per_segment_current, &segments, TaskState::Downloading, None).await;
+                    let elapsed = speed_window_start.elapsed().as_secs_f64();
+                    let speed = if elapsed > 0.0 {
+                        (downloaded_bytes - speed_window_bytes).max(0) as f64 / elapsed
+                    } else {
+                        0.0
+                    } as u64;
+                    events.emit(EngineEvent::task_progress(
+                        &task_id,
+                        downloaded_bytes,
+                        Some(total_bytes),
+                        speed,
+                    ));
+                    speed_window_start = Instant::now();
+                    speed_window_bytes = downloaded_bytes;
                     last_persist = Instant::now();
                 }
             }
@@ -467,6 +542,11 @@ async fn run_task_coordinator(
         err_msg.as_deref(),
     )
     .await?;
+    events.emit(EngineEvent::task_state(
+        &task_id,
+        final_state,
+        err_msg.as_deref(),
+    ));
 
     info!(
         task = %task_id,
