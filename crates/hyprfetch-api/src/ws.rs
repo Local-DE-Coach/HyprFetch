@@ -37,7 +37,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Ok(ev) => {
                         match serde_json::to_string(&ev) {
                             Ok(json) => {
-                                if sink.send(Message::Text(json)).await.is_err() {
+                                if sink.send(Message::Text(json.into())).await.is_err() {
                                     break; // client went away
                                 }
                             }

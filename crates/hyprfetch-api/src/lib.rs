@@ -93,23 +93,23 @@ pub fn router_with_token(state: AppState, token: impl Into<Option<String>>) -> R
             axum::routing::get(routes::list_tasks).post(routes::create_task),
         )
         .route(
-            "/api/tasks/:id",
+            "/api/tasks/{id}",
             axum::routing::get(routes::get_task).delete(routes::delete_task),
         )
         .route(
-            "/api/tasks/:id/pause",
+            "/api/tasks/{id}/pause",
             axum::routing::post(routes::pause_task),
         )
         .route(
-            "/api/tasks/:id/resume",
+            "/api/tasks/{id}/resume",
             axum::routing::post(routes::resume_task),
         )
         .route(
-            "/api/tasks/:id/cancel",
+            "/api/tasks/{id}/cancel",
             axum::routing::post(routes::cancel_task),
         )
         .route(
-            "/api/tasks/:id/retry",
+            "/api/tasks/{id}/retry",
             axum::routing::post(routes::retry_task),
         )
         .route(
