@@ -23,7 +23,7 @@ readme = "README.md"
 tokio = { version = "1.40", features = ["full"] }
 
 # HTTP server + client
-axum = { version = "0.7", features = ["ws", "macros"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
 hyper = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "brotli", "deflate"] }
 
