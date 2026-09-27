@@ -44,3 +44,6 @@ logs/
 # OS
 Thumbs.db
 desktop.ini
+
+# UI build tooling (dist/ IS committed so cargo builds work without node)
+crates/hyprfetch-api/ui/node_modules/

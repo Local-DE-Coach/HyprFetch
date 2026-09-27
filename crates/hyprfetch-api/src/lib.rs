@@ -6,6 +6,7 @@
 
 mod error;
 mod routes;
+mod ui;
 mod ws;
 
 pub use error::{ApiError, ApiErrorCode};
@@ -73,6 +74,7 @@ impl TaskListFilter {
 /// Build the public axum router.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", axum::routing::get(ui::index))
         .route("/healthz", axum::routing::get(routes::healthz))
         .route("/ws", axum::routing::get(ws::ws_handler))
         .route(
@@ -103,6 +105,7 @@ pub fn router(state: AppState) -> Router {
             "/api/settings",
             axum::routing::get(routes::get_settings).patch(routes::patch_settings),
         )
+        .fallback(ui::static_path)
         .with_state(state)
 }
 
