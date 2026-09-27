@@ -226,6 +226,14 @@ pub async fn create_task(
         created.push(row);
     }
 
+    // Auto-start each task in the engine (best-effort — engine errors are
+    // surfaced via the task's `error_message` field in the DB, not the HTTP
+    // response, because the coordinator runs in a spawned task).
+    for row in &created {
+        if let Err(e) = state.engine.start(&row.id).await {
+            tracing::warn!(task = %row.id, error = %e, "engine.start() failed on create");
+        }
+    }
     let dtos = created.into_iter().map(TaskDto::from).collect();
     Ok((
         axum::http::StatusCode::CREATED,
@@ -368,21 +376,32 @@ pub async fn pause_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<TaskDto>, ApiError> {
-    transition(&state, &id, TaskState::Paused, "paused").await
+    let updated = transition(&state, &id, TaskState::Paused, "paused").await?;
+    // Also tell the engine to stop workers.
+    let _ = state.engine.pause(&id).await; // ignore "not running" — task may be paused from queued state
+    Ok(updated)
 }
 
 pub async fn resume_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<TaskDto>, ApiError> {
-    transition(&state, &id, TaskState::Downloading, "resumed").await
+    let updated = transition(&state, &id, TaskState::Downloading, "resumed").await?;
+    // Kick the engine to start (or restart) the workers.
+    if let Err(e) = state.engine.start(&id).await {
+        tracing::warn!(task = %id, error = %e, "engine.start() failed on resume");
+        // Non-fatal: the task is in Downloading state in the DB; user can retry.
+    }
+    Ok(updated)
 }
 
 pub async fn cancel_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<TaskDto>, ApiError> {
-    transition(&state, &id, TaskState::Removed, "cancelled").await
+    let updated = transition(&state, &id, TaskState::Removed, "cancelled").await?;
+    let _ = state.engine.cancel(&id).await;
+    Ok(updated)
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +499,7 @@ mod tests {
 
     fn test_state() -> AppState {
         let db = hyprfetch_db::open_in_memory().expect("open_in_memory should succeed");
-        AppState { db }
+        crate::make_state(db)
     }
 
     async fn body_str(body: Body) -> String {

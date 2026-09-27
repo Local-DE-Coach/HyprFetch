@@ -33,6 +33,10 @@ enum Command {
         download_dir: Option<PathBuf>,
         #[arg(long, default_value_t = 8, env = "HYPRFETCH_SEGMENTS")]
         segments: u8,
+        /// Allow downloads from loopback/private IP ranges. NOT recommended
+        /// in production — disables SSRF protection. Useful for testing.
+        #[arg(long, env = "HYPRFETCH_ALLOW_PRIVATE", default_value_t = false)]
+        allow_private: bool,
     },
     /// Verify configuration and exit.
     Doctor,
@@ -73,10 +77,11 @@ async fn main() -> Result<()> {
             db_path,
             download_dir,
             segments,
+            allow_private,
         } => {
             let db_path = db_path.unwrap_or_else(default_db_path);
             ensure_data_dir(&db_path)?;
-            tracing::info!(db = %db_path.display(), %bind, segments, "starting hyprfetch");
+            tracing::info!(db = %db_path.display(), %bind, segments, allow_private, "starting hyprfetch");
 
             let db = hyprfetch_db::open(&db_path)
                 .with_context(|| format!("opening db at {}", db_path.display()))?;
@@ -92,8 +97,13 @@ async fn main() -> Result<()> {
                 .parse()
                 .with_context(|| format!("invalid --bind {bind}"))?;
 
+            let policy = hyprfetch_core::SsrfPolicy {
+                block_private: !allow_private,
+            };
+            let engine = hyprfetch_core::Engine::with_ssrf_policy(Arc::clone(&db), policy);
             let state = hyprfetch_api::AppState {
-                db: Arc::clone(&db),
+                db,
+                engine: Arc::new(engine),
             };
             hyprfetch_api::serve(state, addr).await?;
             Ok(())

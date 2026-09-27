@@ -1,14 +1,16 @@
-//! Task model — the in-memory representation of a download.
+//! Task model re-exports.
 //!
-//! Stub: full state machine + persistence wiring lands in later PRs.
+//! The canonical `TaskState` lives in `hyprfetch_db::schema` so it can be
+//! used uniformly by the DB layer and the engine. We re-export it here
+//! for callers who only want to depend on `hyprfetch-core`.
 
-use std::fmt;
+pub use hyprfetch_db::schema::TaskState;
 
 /// Opaque, sortable, unique task ID. Uses UUID v7 so creation order is
 /// lexicographically sortable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct TaskId(uuid::Uuid);
+pub struct TaskId(pub uuid::Uuid);
 
 impl TaskId {
     /// Generate a new v7 UUID-based ID.
@@ -23,40 +25,9 @@ impl Default for TaskId {
     }
 }
 
-impl fmt::Display for TaskId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
-    }
-}
-
-/// Lifecycle state of a task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TaskState {
-    /// Created, waiting for a worker slot.
-    Queued,
-    /// Actively downloading.
-    Downloading,
-    /// User-paused or paused by QoS.
-    Paused,
-    /// Finished successfully.
-    Complete,
-    /// Failed — see `error` field on Task.
-    Error,
-    /// Removed by user. Kept in memory briefly for UI feedback.
-    Removed,
-}
-
-impl fmt::Display for TaskState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Queued => write!(f, "queued"),
-            Self::Downloading => write!(f, "downloading"),
-            Self::Paused => write!(f, "paused"),
-            Self::Complete => write!(f, "complete"),
-            Self::Error => write!(f, "error"),
-            Self::Removed => write!(f, "removed"),
-        }
     }
 }
 
@@ -72,34 +43,9 @@ mod tests {
     }
 
     #[test]
-    fn task_state_roundtrips() {
-        for s in [
-            TaskState::Queued,
-            TaskState::Downloading,
-            TaskState::Paused,
-            TaskState::Complete,
-            TaskState::Error,
-            TaskState::Removed,
-        ] {
-            let json = serde_json::to_string(&s).unwrap();
-            let back: TaskState = serde_json::from_str(&json).unwrap();
-            assert_eq!(s, back);
-        }
-    }
-
-    #[test]
-    fn task_state_display_matches_serde() {
-        for s in [
-            TaskState::Queued,
-            TaskState::Downloading,
-            TaskState::Paused,
-            TaskState::Complete,
-            TaskState::Error,
-            TaskState::Removed,
-        ] {
-            let json = serde_json::to_string(&s).unwrap();
-            let json_inner = json.trim_matches('"');
-            assert_eq!(s.to_string(), json_inner);
-        }
+    fn task_state_is_reexported() {
+        let _s = TaskState::Queued;
+        let _s = TaskState::Downloading;
+        let _s = TaskState::Complete;
     }
 }

@@ -20,6 +20,14 @@ use hyprfetch_db::schema::TaskState;
 pub struct AppState {
     /// Database handle (Arc'd Mutex around a single rusqlite Connection).
     pub db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    /// Download engine.
+    pub engine: Arc<hyprfetch_core::Engine>,
+}
+
+/// Construct the shared AppState from a DB connection.
+pub fn make_state(db: Arc<std::sync::Mutex<rusqlite::Connection>>) -> AppState {
+    let engine = Arc::new(hyprfetch_core::Engine::new(Arc::clone(&db)));
+    AppState { db, engine }
 }
 
 /// Filter for the `?state=` query param on `GET /api/tasks`.

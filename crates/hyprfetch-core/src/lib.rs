@@ -1,11 +1,22 @@
 //! Download engine: task lifecycle, segmented downloads, resume, QoS.
 //!
-//! Stub for now. Real implementation lands in `feature/segmented-downloader`.
+//! The engine is the heart of HyprFetch. It owns the task table, spawns
+//! segment workers, aggregates progress, and persists to the DB.
 
 #![forbid(unsafe_code)]
 
+pub mod engine;
+pub mod http_client;
+pub mod planner;
 pub mod qos;
+pub mod segment;
+pub mod ssrf;
 pub mod task;
 
+pub use engine::{Engine, EngineError};
+pub use http_client::{ExtraHeaders, HttpClient, HttpError, ProbeResult, DEFAULT_USER_AGENT};
+pub use planner::split as split_segments;
 pub use qos::QosLimiter;
+pub use segment::{open_target_file, Segment, SegmentEvent, SegmentWorker, SegmentWorkerError};
+pub use ssrf::{check_url, is_private_ip, private_range_name, SsrfPolicy, UrlSafetyError};
 pub use task::{TaskId, TaskState};
