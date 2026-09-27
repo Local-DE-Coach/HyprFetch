@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hyprfetch",
+    "crates/hyprfetch-core",
+    "crates/hyprfetch-db",
+    "crates/hyprfetch-api",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+authors = ["HyprFetch Contributors"]
+license = "MIT"
+repository = "https://github.com/Local-DE-Coach/HyprFetch"
+homepage = "https://github.com/Local-DE-Coach/HyprFetch"
+readme = "README.md"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+
+# HTTP server + client
+axum = { version = "0.7", features = ["ws", "macros"] }
+hyper = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "brotli", "deflate"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Logging / errors
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+anyhow = "1"
+
+# Misc
+clap = { version = "4.5", features = ["derive", "env"] }
+toml = "0.8"
+url = "2"
+uuid = { version = "1", features = ["v7", "serde"] }
+time = { version = "0.3", features = ["serde", "serde-human-readable"] }
+bytes = "1"
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+rust-embed = "8"
+governor = "0.6"
+mime_guess = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
