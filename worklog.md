@@ -32,6 +32,32 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-28] Docs: install guide + design rationale, drift fixes, dependabot — Super Z sandbox
+- **Commit(s):** (this commit) `docs: add install + design docs, fix UI-path drift, add dependabot`
+- **Did:**
+  - `docs/install.md`: new end-to-end install guide (deb/rpm/PKGBUILD/tarball/
+    source), first-run flags, `ulimit` note.
+  - `docs/design.md`: new design-rationale doc (why Rust, architecture,
+    resume, segmentation, QoS, crates, prior art, UI pages, WS contract,
+    gotchas, v1→v2 roadmap with [done]/[planned] markers).
+  - README: added "Install" section, fixed UI path to
+    `crates/hyprfetch-api/ui/`, Rust requirement 1.75+ → 1.85+,
+    project-layout tree now shows packaging/ and the real UI dir.
+  - `docs/development.md`: same path fixes; "Releases" section now lists the
+    new artifacts + the tag-version rule.
+  - `.github/dependabot.yml`: weekly cargo + github-actions updates.
+- **Why:** user asked to check the docs folder "has everything" and the
+  `.github` folder completeness; README/development.md still referenced a
+  `web/` directory that never existed in this layout.
+- **Result / state:** docs now cover what (architecture.md) / why
+  (design.md) / how to install (install.md) / how to develop
+  (development.md) / HTTP surface (api.md); `.github` has CI + release +
+  stale workflows, issue/PR templates, and dependabot.
+- **Notes for next sandbox:** next commit bumps 0.1.1 → 0.2.0 and tags
+  `v0.2.0` to produce the first release with packages. Keep
+  `docs/install.md` filenames in sync with release.yml globs
+  (`hyprfetch_<ver>-1_amd64.deb`, `hyprfetch-<ver>-1.x86_64.rpm`).
+
 ### [2026-09-28] Release packaging: .deb / .rpm / PKGBUILD — Super Z sandbox
 - **Commit(s):** (this commit) `feat(packaging): add .deb, .rpm, and Arch PKGBUILD to release workflow`
 - **Did:**

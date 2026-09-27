@@ -25,6 +25,22 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
     the x86_64 tarball substituted in, so Arch users can download one file
     from the release page and run `makepkg -si` for a fast, checksum-verified
     install (`hyprfetch-bin`).
+- **docs/install.md** — full installation guide: .deb / .rpm / PKGBUILD /
+  tarball / from-source paths, first-run flags, fd-limit note for heavy use.
+- **docs/design.md** — design rationale ("why") for new contributors and
+  sandboxes: language choice vs Go/Python, architecture, resume design,
+  segmented downloads, QoS strategy, crate choices, prior art (aria2, gopeed),
+  UI structure, WebSocket event contract, honest gotchas, and v1→v2 scope
+  with per-item status markers.
+- `.github/dependabot.yml` — weekly update PRs for Cargo dependencies and
+  GitHub Actions.
+
+### Changed
+- Doc drift fixed: README + `docs/development.md` now point to the real UI
+  directory (`crates/hyprfetch-api/ui/`, not the planned `web/`), README
+  requires Rust 1.85+ (matching `rust-version`), and `docs/development.md`
+  "Releases" lists the new deb/rpm/PKGBUILD artifacts and the
+  tag-version-must-match-workspace-version rule.
 
 ## [0.1.1] — 2026-09-28
 

@@ -15,11 +15,11 @@
 │   ├── hyprfetch/         # binary
 │   ├── hyprfetch-core/    # download engine
 │   ├── hyprfetch-db/      # SQLite + migrations
-│   └── hyprfetch-api/     # axum HTTP + WebSocket
-├── web/                   # Svelte SPA (built → embedded in binary)
+│   ├── hyprfetch-api/     # axum HTTP + WebSocket
+│   │   └── ui/            # Svelte SPA (src + committed dist/, embedded at compile time)
+├── packaging/             # deb/rpm/Arch packaging used by the release workflow
 ├── docs/
-├── .github/workflows/
-└── scripts/               # dev helpers
+└── .github/workflows/
 ```
 
 ## First-time setup
@@ -34,14 +34,16 @@ cargo test             # runs all unit + integration tests
 For frontend dev:
 
 ```bash
-cd web
+cd crates/hyprfetch-api/ui
 npm install
-npm run build          # outputs to web/dist/, embedded at compile time
+npm run build          # outputs to ui/dist/, embedded at compile time
 # OR
-npm run dev            # Vite dev server on :5173, proxies /api and /ws to :7780
+npm run dev            # Vite dev server, proxies /api and /ws to :7780
 ```
 
-When `web/dist/` exists at compile time, `hyprfetch-api` embeds it via `rust-embed`. When it doesn't exist, the binary serves a "build the frontend" placeholder page.
+When `crates/hyprfetch-api/ui/dist/` exists at compile time (it is committed),
+`hyprfetch-api` embeds it via `rust-embed`. When it is missing, the binary
+serves a "build the frontend" placeholder page.
 
 ## Running
 
@@ -122,10 +124,19 @@ test(core): add resume-after-restart integration test
 Tags follow `vMAJOR.MINOR.PATCH`. While pre-1.0, MINOR bumps are allowed to break APIs.
 
 The `release.yml` workflow runs on tag push and produces:
-- `hyprfetch-x86_64-unknown-linux-gnu` (static-linked binary tarball)
-- `hyprfetch-aarch64-unknown-linux-gnu`
-- SHA256 checksums
-- A GitHub Release with the above attached
+- `hyprfetch-<version>-x86_64-unknown-linux-gnu.tar.gz` (binary + docs tarball)
+- `hyprfetch-<version>-aarch64-unknown-linux-gnu.tar.gz`
+- `hyprfetch-<version>-x86_64-unknown-linux-musl.tar.gz`
+- SHA256 checksums for each tarball
+- `hyprfetch_<version>-1_amd64.deb` — Ubuntu/Debian package (via cargo-deb)
+- `hyprfetch-<version>-1.x86_64.rpm` — Fedora/RHEL package (via rpmbuild,
+  spec in `packaging/rpm/`)
+- `PKGBUILD` — Arch fast-install package, generated from
+  `packaging/arch/PKGBUILD.bin.template` with version + tarball sha256 pinned
+- A GitHub Release with all of the above attached
+
+A tag must match the workspace version in `Cargo.toml` (the packages embed
+it), so release commits bump `version.workspace` first.
 
 ## Adding a new crate
 

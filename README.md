@@ -45,7 +45,9 @@ HyprFetch is a single Rust binary that serves a web UI on `127.0.0.1`. You open 
 └─────────────────────────────────────────────┘
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for details.
+See [`docs/architecture.md`](docs/architecture.md) for what the system is,
+[`docs/design.md`](docs/design.md) for why it is built this way, and
+[`docs/install.md`](docs/install.md) for packaged installation options.
 
 ## Project layout
 
@@ -56,14 +58,31 @@ See [`docs/architecture.md`](docs/architecture.md) for details.
 │   ├── hyprfetch-core/    # download engine: segments, resume, QoS
 │   ├── hyprfetch-db/      # SQLite persistence + migrations
 │   └── hyprfetch-api/     # axum HTTP server + WebSocket
-├── web/                   # Svelte SPA frontend
-├── docs/                  # architecture, API, dev guide
-└── .github/workflows/     # CI: fmt + clippy + test + audit
+│       └── ui/            # Svelte SPA (src + committed dist/, embedded at compile time)
+├── packaging/             # deb/rpm/Arch packaging used by the release workflow
+├── docs/                  # architecture, design rationale, API, install, dev guide
+└── .github/               # CI: fmt + clippy + test + audit; release builds packages
+```
+
+## Install
+
+Fast paths per distribution (see [`docs/install.md`](docs/install.md) for all
+options):
+
+```bash
+# Ubuntu / Debian
+sudo apt install ./hyprfetch_<version>-1_amd64.deb
+
+# Fedora / RHEL
+sudo dnf install ./hyprfetch-<version>-1.x86_64.rpm
+
+# Arch Linux — download the release PKGBUILD, then:
+makepkg -si
 ```
 
 ## Build & run
 
-Requirements: Rust stable (1.75+), Node 20+ (only for UI dev).
+Requirements: Rust stable (1.85+), Node 20+ (only for UI dev).
 
 ```bash
 # Build everything (UI is embedded at compile time)
@@ -83,7 +102,7 @@ For development with hot-reload on the frontend:
 cargo run -- serve
 
 # Terminal 2: frontend dev server (proxies API to backend)
-cd web && npm install && npm run dev
+cd crates/hyprfetch-api/ui && npm install && npm run dev
 ```
 
 ## Configuration
