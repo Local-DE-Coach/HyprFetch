@@ -32,6 +32,36 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-29] Desktop integration + default dir ~/Desktop; full E2E re-run green; v0.2.0 re-cut — Super Z sandbox
+- **Commit(s):** `4a6de25` feat(desktop) + this docs commit; tag `v0.2.0`
+  re-cut at the feat commit (see below).
+- **Did:**
+  - Remote re-inventory: only `origin/main` remains — every feature /
+    Dependabot branch from the earlier hygiene passes is merged and gone
+    (axum 0.8.9 migration + resume-race fix are on main).
+  - **Default download dir changed to `~/Desktop`** (was `~/Downloads`)
+    per owner request — `routes.rs` built-in fallback, docs updated.
+  - **Desktop entry added** (`packaging/desktop/hyprfetch.desktop`):
+    release tarball ships it; Arch PKGBUILD, .rpm spec and .deb assets all
+    install it to `/usr/share/applications/` — shows in desktop menus.
+  - E2E harness hardening: hermetic `--db-path` per run (a crashed run
+    leaves resumable tasks that auto-resume on next startup and break the
+    WS idle-silence check), `HF_E2E_SKIP_LARGE` phase flag, standalone
+    `1GB` phase script; fixed hardcoded 1 GiB size (thinkbroadband's
+    `1GB.zip` is actually 1,073,725,334 B — trust Content-Length).
+  - **Full E2E green:** 29/29 (UI assets, SPA fallback, API 404 no-leak,
+    error paths, local Range sha256, real-network 10MB + 50MB byte-exact,
+    pause→resume sha256, QoS 1 MiB/s cap timing, WS live events + idle
+    silence (0 frames), DELETE ?delete_file=true) + 3/3 large phase
+    (1GB exact size + head/tail 1MiB sha256 byte-exact).
+  - Unit: fmt + clippy `-D warnings` + 111 tests green.
+  - Tag `v0.2.0` re-pointed from the premature cut (`14f2f5b`) to this
+    state so release assets include axum 0.8 + race fix + desktop entry;
+    release notes now embed the copy-paste Arch install commands
+    (only `<YOUR_PAT>` needs changing).
+- **Proof:** E2E summary lines `29/29` / `LARGE-PHASE: PASS`; `hyprfetch
+  --version` → 0.2.0; CI green on main.
+
 ### [2026-09-28] Merged final 2 Dependabot branches (axum 0.8!), fixed resume-race bug, 30/30 live E2E — Super Z sandbox
 - **Commit(s):** merge `e761928` (axum 0.8.9 — amended with `{id}` route fix +
   WS `Utf8Bytes` fix), merge `23e5b93` (tokio-tungstenite 0.30.0, Cargo.lock

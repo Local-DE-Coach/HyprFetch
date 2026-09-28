@@ -206,6 +206,8 @@ tracker / Backlog.
 | 11.3 | `.deb` (cargo-deb, amd64) attached to releases | ✅ | v0.2.0 asset + dpkg-deb inspection |
 | 11.4 | `.rpm` (rpmbuild from spec, x86_64) attached to releases | ✅ | v0.2.0 asset |
 | 11.5 | `PKGBUILD` (Arch, generated per release with pinned version+sha256) attached | ✅ | v0.2.0 asset; sha256 verified byte-exact |
+| 11.10 | Desktop entry (`packaging/desktop/hyprfetch.desktop`) shipped in tarball + installed by PKGBUILD/.deb/.rpm at `/usr/share/applications/` | ✅ | 2026-09-29: file in tarball step of release.yml; PKGBUILD/rpm-spec/deb-assets install it; see CHANGELOG |
+| 11.11 | Default download dir switched to `~/Desktop` (was `~/Downloads`), overridable via `save_dir`/setting/`--download-dir` | ✅ | 2026-09-29: `routes.rs` fallback `+ "/Desktop"`; 111 unit tests green; docs updated |
 | 11.6 | arm64 `.deb` (aarch64 Debian package) | ⬜ | — |
 | 11.7 | AUR submission (`hyprfetch-bin`) from the release PKGBUILD | ⬜ | — |
 | 11.8 | Windows / macOS builds | ⛔ out of scope for now (Linux-first project) | — |
