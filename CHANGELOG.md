@@ -8,29 +8,60 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
-### Docs (2026-09-29)
-- **New `docs/feature-research.md`** — Linux download-manager feature
-  research checklist compared against HyprFetch, area by area: every shipped
-  feature is marked ✅ with its concrete proof (test name / E2E check /
-  release asset), and every not-yet-implemented feature is listed ⬜ unchanged
-  from the research. Note: the owner's uploaded research file did not reach
-  the build sandbox, so the list was rebuilt from the standard research
-  dimensions and verified line-by-line against the code (see the doc's
-  source note).
-- **Roadmap for v0.3.0 recorded** (owner request): Node.js-style run modes
-  (dev mode with console debug logs; `--daemon` prod mode with file logs +
-  `logs/status/stop/restart` subcommands) and an in-app updater (check →
-  pull/download → verify → apply → restart with auto-resume). Tracked as
-  `worktasks.md` §15 rows 15.1–15.5.
+- Nothing yet.
 
-### Planned — targeted for v0.3.0 (no code yet)
-- **Run modes:** `hyprfetch dev` / `serve --mode dev` (verbose console logs),
-  `serve --daemon` (PID file + rotating file logs), `hyprfetch logs/status/
-  stop/restart` lifecycle commands.
-- **Self-update:** release check surfaced in UI + CLI; apply from a source
-  clone (`git pull` → build → swap → restart) or from release tarballs
-  (sha256-verified replace → restart); drain-pause → auto-resume around the
-  restart.
+## [0.3.1] — 2026-09-29
+
+### Added — run modes, in-app updates, resource footprint (owner request, applied)
+- **Node.js-style run modes:**
+  - `hyprfetch dev` — foreground dev mode: pretty debug-level logs, auto-opens
+    the web UI, same flags as `serve` (`serve --mode dev` is the flag form).
+  - `hyprfetch daemon start [--serve flags…]` — detached prod server: own
+    process group, stdout/stderr into a size-rotated log file
+    (`~/.local/state/hyprfetch/logs/hyprfetch.log`, 5 MiB × 3 rotations), JSON
+    PID file, and `start` returns only after `/healthz` answers.
+  - `hyprfetch daemon stop|restart|status` + `hyprfetch logs [-f] [-n N]` —
+    pm2-style lifecycle. `status` prints PID, uptime, live version/active
+    task/ws-client counts and update availability.
+- **In-app self-update (private-repo aware):**
+  - `hyprfetch update [--check] [--yes] [--repo owner/name]
+    [--token PAT] [--from-git --source-dir <clone>]` — queries the latest
+    GitHub release, downloads the matching target tarball through the REST
+    API octet-stream endpoint (works with fine-grained PATs on the private
+    repo), verifies sha256, then atomically swaps the binary (previous
+    binary kept as `hyprfetch.old`). Restarts a running daemon automatically.
+  - REST: `GET /api/update/check`, `POST /api/update/apply?restart=…`,
+    `POST /api/update/restart`. Apply + restart perform **drain-pause →
+    swap → re-exec → auto-resume**; the new server binds with a retry window
+    so the hand-off is race-free. The UI gets an **Updates** card (check /
+    install & restart / restart).
+  - Config: `[update] repo / token / source_dir`; env `HYPRFETCH_GITHUB_TOKEN`
+    / `GITHUB_TOKEN`; `HYPRFETCH_UPDATE_API` overrides the API base (tests).
+- **`GET /api/server`** — version, uptime, active tasks, ws clients, cached
+  update availability (consumed by `daemon status` and the UI footer).
+- **Sleep mode `--exit-when-idle <minutes>`** (config `exit_when_idle`): the
+  server exits gracefully after N minutes with zero active downloads and zero
+  UI clients — it never sits resident doing nothing. Default off.
+- **`--workers <n>`** (config `workers`, env `HYPRFETCH_WORKERS`): tokio
+  worker threads, default **2** — the workload is IO-bound, so a lean runtime
+  keeps the idle RAM/CPU footprint minimal.
+- **Web UI restyled with Tailwind + DaisyUI** (`dim` theme): navbar with live
+  stats, card-based task list, DaisyUI badges/progress/buttons/toggle/modal.
+  Total bundle ≈ 18 KiB gzipped (CSS 8.4 KiB + JS 9.7 KiB) — pure CSS, no
+  runtime framework cost, RAM-neutral.
+- **`docs/feature-research.md`** — feature checklist against the standard
+  Linux download-manager research set: shipped items ✅ with proof
+  (test / E2E / asset), missing items ⬜ unchanged.
+
+### Perf (measured by the v0.3.1 E2E, 4 MiB segmented download)
+- Idle RSS **8.0 MB**; peak during download **9.4 MB**; 9.4 MB after
+  completion (no leak). Typical Electron/Java download managers sit at
+  100–500 MB with the same feature surface.
+
+### Fixed
+- **In-app restart port hand-off:** `POST /api/update/restart` spawns the
+  replacement before the old listener closes; the server now retries a busy
+  bind for up to 15 s, making restart/update hand-offs deterministic.
 
 ### Added (2026-09-29 — desktop integration for the v0.2.0 re-release)
 - **Desktop entry** (`packaging/desktop/hyprfetch.desktop`) so HyprFetch

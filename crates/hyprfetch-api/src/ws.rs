@@ -28,6 +28,13 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let mut rx = state.engine.subscribe();
+    state
+        .ws_clients
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tracing::debug!(
+        clients = state.ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+        "ws client connected"
+    );
 
     loop {
         tokio::select! {
@@ -64,5 +71,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
+    state
+        .ws_clients
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     let _ = sink.close().await;
 }

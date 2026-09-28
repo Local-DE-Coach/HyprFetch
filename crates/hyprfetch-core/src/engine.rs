@@ -259,6 +259,30 @@ impl Engine {
         }
     }
 
+    /// Number of tasks in a "would do work" state (queued + downloading).
+    /// Used by the idle watcher and `GET /api/server`.
+    pub fn active_task_count(&self) -> Result<usize, EngineError> {
+        let repo = TasksRepo::new(&self.db);
+        let n = repo.list_by_state(Some(TaskState::Queued))?.len()
+            + repo.list_by_state(Some(TaskState::Downloading))?.len();
+        Ok(n)
+    }
+
+    /// Drain helper for restarts: pause every currently-downloading task.
+    /// Paused tasks are auto-resumed by `resume_all()` on the next startup,
+    /// which gives the update flow its "drain → restart → auto-resume"
+    /// behavior. Returns how many tasks were paused.
+    pub async fn pause_all_active(&self) -> Result<usize, EngineError> {
+        let rows = TasksRepo::new(&self.db).list_by_state(Some(TaskState::Downloading))?;
+        let mut paused = 0usize;
+        for row in rows {
+            if self.pause(&row.id).await.is_ok() {
+                paused += 1;
+            }
+        }
+        Ok(paused)
+    }
+
     /// Cancel a running task. Workers will be aborted.
     pub async fn cancel(&self, task_id: &str) -> Result<(), EngineError> {
         let tasks = self.tasks.read().await;

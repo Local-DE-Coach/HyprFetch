@@ -139,6 +139,56 @@ Enforcement status of the seeded keys (be honest in the UI):
 | `max_connections` | **not enforced yet** (planned global connection cap) |
 | `protocol_pref` | **not enforced yet** (planned HTTP/2/3 selection) |
 
+### Server info
+
+`GET /api/server` — runtime info for `hyprfetch daemon status` and the UI
+footer:
+
+```json
+{
+  "version": "0.3.1",
+  "uptime_secs": 42,
+  "active_tasks": 1,
+  "ws_clients": 2,
+  "update_available": true,
+  "latest_version": "0.3.2"
+}
+```
+
+`update_available` / `latest_version` are `null` until a check has run.
+
+### In-app updates
+
+The updater queries the latest GitHub release of the configured repo
+(`[update] repo` in `config.toml`, default `Local-DE-Coach/HyprFetch`). For
+private repos a PAT is resolved from `HYPRFETCH_GITHUB_TOKEN` / `GITHUB_TOKEN`
+/ `[update] token` / the `github_token` setting. Release assets are
+downloaded through the REST API octet-stream endpoint and sha256-verified
+before anything touches disk.
+
+`GET /api/update/check` → runs the check and caches it:
+
+```json
+{
+  "current": "0.3.1",
+  "latest": "0.3.2",
+  "available": true,
+  "published_at": "2026-09-29T00:00:00Z",
+  "release_url": "https://github.com/…/releases/tag/v0.3.2",
+  "asset": { "name": "hyprfetch-0.3.2-x86_64-unknown-linux-gnu.tar.gz", "size": 3605057, "id": 1001 }
+}
+```
+
+`POST /api/update/apply?restart=true|false` → download → sha256 verify →
+atomic binary swap (`hyprfetch.old` kept as rollback). With `restart=true`
+(default) it then drains (pause) active downloads, re-execs a fresh server
+with the same arguments — which auto-resumes the paused tasks — and shuts
+this process down gracefully. Requires the server to have been started
+through `hyprfetch serve`/`dev` (CLI restarts keep their own args).
+
+`POST /api/update/restart` → just the drain → re-exec → auto-resume part,
+without an update.
+
 ## WebSocket
 
 `GET /ws` — upgrade to WebSocket; the server pushes engine events as JSON

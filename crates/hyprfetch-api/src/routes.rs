@@ -563,6 +563,164 @@ pub async fn patch_settings(
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/server
+// ---------------------------------------------------------------------------
+
+/// `GET /api/server` — runtime info for `hyprfetch status` and the UI footer.
+pub async fn server_info(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let cached = state.update_cache.lock().await;
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": state.started_at.elapsed().as_secs(),
+        "active_tasks": state.engine.active_task_count().unwrap_or(0),
+        "ws_clients": state.ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+        "update_available": cached.as_ref().map(|c| c.available),
+        "latest_version": cached.as_ref().map(|c| c.latest.clone()),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/update/check
+// ---------------------------------------------------------------------------
+
+/// `GET /api/update/check` — query the latest GitHub release and cache it.
+pub async fn update_check(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let checked = hyprfetch_core::update::check(&state.update_cfg)
+        .await
+        .map_err(|e| ApiError::InternalError(format!("update check: {e}")))?;
+
+    match checked {
+        Some(chk) => {
+            let available = chk.available;
+            let latest = chk.latest.clone();
+            *state.update_cache.lock().await = Some(chk.clone());
+            Ok(Json(serde_json::to_value(chk).unwrap_or(
+                serde_json::json!({
+                    "current": env!("CARGO_PKG_VERSION"),
+                    "latest": latest,
+                    "available": available,
+                }),
+            )))
+        }
+        None => Ok(Json(serde_json::json!({
+            "current": env!("CARGO_PKG_VERSION"),
+            "latest": null,
+            "available": false,
+            "error": "no published release found",
+        }))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/update/apply
+// ---------------------------------------------------------------------------
+
+/// Query body for `POST /api/update/apply`.
+#[derive(Debug, Deserialize, Default)]
+pub struct UpdateApplyQuery {
+    /// Restart the server after a successful swap (default: true).
+    pub restart: Option<bool>,
+}
+
+/// `POST /api/update/apply` — download, sha256-verify, swap the binary and
+/// (optionally, default) drain-pause → re-exec → auto-resume.
+pub async fn update_apply(
+    State(state): State<AppState>,
+    Query(q): Query<UpdateApplyQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let latest = {
+        let cache = state.update_cache.lock().await;
+        cache
+            .as_ref()
+            .map(|c| c.latest.clone())
+            .ok_or_else(|| ApiError::InvalidRequest("run GET /api/update/check first".into()))?
+    };
+
+    let chk = hyprfetch_core::update::UpdateCheck {
+        current: env!("CARGO_PKG_VERSION").to_string(),
+        latest: latest.clone(),
+        available: true,
+        published_at: None,
+        release_url: None,
+        asset: None,
+    };
+
+    let applied = hyprfetch_core::update::apply(&state.update_cfg, &chk)
+        .await
+        .map_err(|e| ApiError::InternalError(format!("update apply: {e}")))?;
+
+    let restart = q.restart.unwrap_or(true);
+    let restarted = if restart {
+        trigger_restart(&state).await.is_ok()
+    } else {
+        false
+    };
+
+    Ok(Json(serde_json::json!({
+        "installed": applied.installed,
+        "previous": applied.current,
+        "sha256": applied.sha256,
+        "backup": applied.backup_path,
+        "restarting": restarted,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/update/restart
+// ---------------------------------------------------------------------------
+
+/// `POST /api/update/restart` — drain-pause active downloads, re-exec a fresh
+/// server with the same arguments, then gracefully stop this process. The new
+/// process auto-resumes the paused tasks on startup.
+pub async fn update_restart(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    trigger_restart(&state)
+        .await
+        .map_err(|e| ApiError::InternalError(format!("restart: {e}")))?;
+    Ok(Json(serde_json::json!({"restarting": true})))
+}
+
+/// Shared restart logic: drain → spawn replacement → notify shutdown.
+async fn trigger_restart(state: &AppState) -> Result<(), String> {
+    let args = crate::SERVE_ARGS
+        .get()
+        .ok_or_else(|| {
+            "server was not started through `hyprfetch serve`; use `hyprfetch restart`".to_string()
+        })?
+        .clone();
+
+    // 1. Drain: pause active downloads (auto-resumed by the new process).
+    match state.engine.pause_all_active().await {
+        Ok(n) if n > 0 => tracing::info!(tasks = n, "drained active downloads for restart"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "drain pass failed; continuing restart"),
+    }
+
+    // 2. Spawn the replacement server, detached from this process.
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    tracing::info!(exe = %exe.display(), "spawning replacement server");
+    #[allow(clippy::zombie_processes)]
+    let child = {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new(&exe)
+            .args(&args)
+            .process_group(0)
+            .spawn()
+            .map_err(|e| format!("spawn replacement: {e}"))?
+    };
+    let pid = child.id();
+    tracing::info!(pid, "replacement server spawned");
+    std::mem::forget(child); // detached: do not reap; it outlives us
+
+    // 3. Graceful shutdown of THIS process.
+    state.shutdown.notify_waiters();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1189,10 +1347,7 @@ mod tests {
         // Throttle to 2 MiB/s so the 8 MiB download spans ~4s and the
         // pause→resume race window is wide and deterministic.
         engine.set_qos(true, 2 * 1024 * 1024);
-        let state = crate::AppState {
-            db: db.clone(),
-            engine: std::sync::Arc::new(engine),
-        };
+        let state = crate::AppState::with_defaults(db.clone(), std::sync::Arc::new(engine));
         let app = router(state.clone());
 
         let id = uuid::Uuid::now_v7().to_string();

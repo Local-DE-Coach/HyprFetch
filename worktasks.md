@@ -256,21 +256,27 @@ tracker / Backlog.
 
 ---
 
-## 15. Run modes & self-update (planned for v0.3.0 — owner request, 2026-09-29)
+## 15. Run modes & self-update (v0.3.1 — owner request, APPLIED 2026-09-29)
 
-Design sketch: `docs/feature-research.md` → "Roadmap — next version".
-Nothing implemented yet — every row ⬜ by definition.
+Design sketch: `docs/feature-research.md` → "Roadmap". **All rows applied and
+verified** — E2E suite `scripts/e2e_full_test.py` (73/73) + workspace tests
+117/117 + clippy clean.
 
 | # | Task | Status | Tests / Proof |
 |---|---|---|---|
-| 15.1 | Dev mode: `serve --mode dev` / `hyprfetch dev` — debug tracing to console, pretty format, git-clone workflow | ⬜ | — |
-| 15.2 | Prod daemon mode: `--daemon` with PID file + rotating log files under `~/.local/share/hyprfetch/logs/` | ⬜ | — |
-| 15.3 | Lifecycle subcommands: `hyprfetch logs [-f]` / `status` / `stop` / `restart` (pm2-style UX) | ⬜ | — |
-| 15.4 | Updater check: GitHub release query (PAT, private repo) + local-clone `git pull` check; "new version" surfaced in UI settings + `status` | ⬜ | — |
-| 15.5 | Updater apply: source mode (pull → build → swap → restart) and binary mode (tarball → sha256 verify → replace → restart), with drain-pause → restart → auto-resume | ⬜ | — |
+| 15.1 | Dev mode: `hyprfetch dev` / `serve --mode dev` — debug tracing, pretty console, auto-open UI | ✅ | binary `--help`; E2E UI phase; dev logger unit path |
+| 15.2 | Prod daemon mode: `daemon start` — detached, PID file + rotating logs under state dir (`HYPRFETCH_STATE_DIR` > XDG) | ✅ | E2E daemon phase: start/status/logs/restart/stop all green |
+| 15.3 | Lifecycle subcommands: `hyprfetch logs [-f] [-n N]` / `daemon status` / `stop` / `restart` (pm2-style UX) | ✅ | E2E daemon phase 7/7 |
+| 15.4 | Updater check: GitHub release query (PAT, private repo) + "new version" in UI settings card + `daemon status` | ✅ | E2E mock-GitHub phase: check + cache + `/api/server` flag; live check against real private repo (PAT) |
+| 15.5 | Updater apply: binary mode (tarball → sha256 verify → atomic swap → restart) and source mode (`--from-git`: pull → build → swap), with drain-pause → restart → auto-resume | ✅ | E2E: apply swaps on-disk binary, sha256 verified, `.old` backup; restart spawns NEW process, replacement healthy; CLI `update --yes` full path |
+| 15.6 | `GET /api/server` (version, uptime, active tasks, ws clients, update flag) | ✅ | E2E UI phase + ws phase |
+| 15.7 | Sleep mode: `--exit-when-idle <min>` — graceful exit after fully-idle budget | ✅ | E2E exit-when-idle phase (3s budget → clean exit code 0) |
+| 15.8 | `--workers <n>` runtime sizing, default 2 (IO-bound, minimal RAM) | ✅ | build + serve smoke; RSS phase |
+| 15.9 | Web UI restyle: Tailwind + DaisyUI (`dim` theme), ~18 KiB gzipped total bundle | ✅ | E2E UI phase: dim theme + daisy css served; npm build |
+| 15.10 | Restart hand-off race fixed (bind retry window 15 s) | ✅ | E2E restart phase: replacement healthy on same port |
 
-**Verify (when done):** `hyprfetch dev` shows debug logs; `--daemon` + `logs -f`
-+ `stop` round-trip; updater dry-run against a mock release.
+**Measured (E2E resource phase):** idle RSS 8.0 MB, peak 9.4 MB during a
+segmented download, no leak after completion.
 
 ---
 

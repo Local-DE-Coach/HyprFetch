@@ -159,12 +159,14 @@
 | Feature | Status | Proof |
 |---|---|---|
 | Structured tracing logs (env-filter) | ✅ | `tracing_subscriber` + `RUST_LOG` |
-| Dev / prod run modes (Node.js-style multi-run: foreground dev logs, daemon prod, `logs/status/stop`) | ⬜ | **planned v0.3.0 — see roadmap** |
-| In-app updater (pull updates, apply, restart) | ⬜ | **planned v0.3.0 — see roadmap** |
+| Dev / prod run modes (Node.js-style multi-run: `dev`, `serve`, `daemon start/stop/restart/status`, `logs -f`) | ✅ | v0.3.1 — E2E daemon phase 7/7 |
+| In-app updater (check → download → sha256 verify → swap → restart → auto-resume; PAT/private-repo aware) | ✅ | v0.3.1 — E2E mock-GitHub phase + CLI apply |
+| `GET /api/server` runtime info endpoint | ✅ | v0.3.1 — E2E UI phase |
+| Sleep mode `--exit-when-idle <min>` (exit when nothing to do) | ✅ | v0.3.1 — E2E exit-when-idle phase |
 
 ---
 
-## Roadmap — next version (v0.3.0), as requested by the owner
+## Roadmap — next version (v0.3.0 request) — SHIPPED in v0.3.1
 
 ### R1. Run modes — "like a Node.js app: multiple run options and see logs"
 
@@ -191,4 +193,8 @@
 - **Safe apply**: drain active downloads first (pause), restart, auto-resume
   — the engine already resumes across restarts.
 
-*Both items are recorded in `worktasks.md` §15; no code exists yet.*
+*Both items **shipped in v0.3.1** (2026-09-29): run modes (dev / serve /
+daemon / logs), the PAT-aware self-updater with drain-pause → swap →
+auto-resume, plus `--exit-when-idle` sleep mode, `--workers` runtime sizing,
+`GET /api/server`, and the Tailwind+DaisyUI restyle. See `CHANGELOG.md`
+§0.3.1 and `worktasks.md` §15 for the full proof list.*

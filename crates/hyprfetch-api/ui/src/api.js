@@ -73,6 +73,26 @@ export async function setQos(enabled, targetBps) {
   return handle(res)
 }
 
+// ---- server info + in-app updates --------------------------------------
+
+export async function getServerInfo() {
+  return handle(await fetch('/api/server'))
+}
+
+export async function checkUpdate() {
+  return handle(await fetch('/api/update/check'))
+}
+
+export async function applyUpdate(restart = true) {
+  return handle(
+    await fetch(`/api/update/apply?restart=${restart ? 'true' : 'false'}`, { method: 'POST' }),
+  )
+}
+
+export async function restartServer() {
+  return handle(await fetch('/api/update/restart', { method: 'POST' }))
+}
+
 export function connectEvents(onEvent) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const ws = new WebSocket(`${proto}://${location.host}/ws`)

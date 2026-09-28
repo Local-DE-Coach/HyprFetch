@@ -100,10 +100,7 @@ async fn ws_streams_progress_state_and_global_speed() {
     // Throttle to ~1 MiB/s so the 2 MiB download spans > 1s and the
     // debounced progress broadcasts + speed ticks actually fire.
     engine.set_qos(true, 1024 * 1024);
-    let state = AppState {
-        db: db.clone(),
-        engine: Arc::new(engine),
-    };
+    let state = AppState::with_defaults(db.clone(), Arc::new(engine));
 
     // Bind an ephemeral port and serve.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -199,10 +196,7 @@ async fn ws_rejects_non_upgrade_requests() {
     use tower::ServiceExt;
 
     let db = open_in_memory().unwrap();
-    let state = AppState {
-        db: db.clone(),
-        engine: Arc::new(Engine::new(db)),
-    };
+    let state = AppState::with_defaults(db.clone(), Arc::new(Engine::new(db)));
     let app = hyprfetch_api::router(state);
     let res = app
         .oneshot(

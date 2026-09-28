@@ -13,6 +13,7 @@ pub mod qos;
 pub mod segment;
 pub mod ssrf;
 pub mod task;
+pub mod update;
 
 pub use engine::{Engine, EngineError};
 pub use events::{EngineEvent, EventBus};
@@ -22,3 +23,4 @@ pub use qos::QosLimiter;
 pub use segment::{open_target_file, Segment, SegmentEvent, SegmentWorker, SegmentWorkerError};
 pub use ssrf::{check_url, is_private_ip, private_range_name, SsrfPolicy, UrlSafetyError};
 pub use task::{TaskId, TaskState};
+pub use update::{ApplyResult, UpdateCheck, UpdateConfig, UpdateError};

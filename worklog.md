@@ -32,6 +32,53 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-29] v0.3.1 — run modes + in-app updater APPLIED, DaisyUI UI, sleep mode, full E2E (73/73) — Super Z sandbox
+- **Commit(s):** (this commit) — tag `v0.3.1`.
+- **Did:**
+  - Owner asked to stop describing and **apply** the §15 plan: "last commit
+    say i description it roadmap but i say apply it". Also asked for a
+    v0.3.0 release (none existed — verified via API: only v0.2.0/v0.1.1/
+    v0.1.0), a beautiful release page, SvelteKit+DaisyUI for the UI, and a
+    leaner resource profile ("not always active, sleep, less RAM than a
+    normal download manager").
+  - **R1 run modes (applied):** `hyprfetch dev` (pretty debug logs, auto-open
+    UI), `serve --mode dev|prod --open --workers N --exit-when-idle min`,
+    `daemon start|stop|restart|status` (detached process group, JSON PID
+    file, 5 MiB × 3 rotating logs under `~/.local/state/hyprfetch/logs/`,
+    start waits for `/healthz`), `logs [-f] [-n N]` tail/follow. New modules:
+    `crates/hyprfetch/src/{daemon.rs,logger.rs,helpers.rs,update_cmd.rs}`.
+  - **R2 updater (applied):** `hyprfetch-core/src/update.rs` — release check
+    (PAT-aware, fine-grained PAT ok), target-triple asset matching, API
+    octet-stream download, sha256 verify, tarball extraction hardened
+    (regular-file `hyprfetch` only), atomic swap with `.old` rollback;
+    source mode via `--from-git` (pull → build → swap). REST:
+    `GET /api/update/check`, `POST /api/update/apply?restart=…`,
+    `POST /api/update/restart` (drain-pause → re-exec → auto-resume);
+    `SERVE_ARGS` OnceLock carries the original serve args. UI: **Updates**
+    card (check / install & restart / restart).
+  - **Resource mode:** tokio workers default 2 (`--workers`, config, env);
+    `--exit-when-idle <min>` graceful-exit watchdog (tick 1–30 s, scales with
+    budget); WS client counter in `AppState`; measured idle RSS **8.0 MB**,
+    9.4 MB during download, no leak.
+  - **`GET /api/server`:** version / uptime / active tasks / ws clients /
+    cached update flag.
+  - **UI restyle:** Tailwind 3 + DaisyUI 4 (`dim` theme) on the existing
+    Svelte 4 SPA (SvelteKit adds SSR weight for zero benefit inside an
+    embedded binary — documented choice); bundle ≈ 18 KiB gzipped; committed
+    rebuilt `ui/dist`.
+  - **Fixed en route:** restart port hand-off race (bind retry ≤ 15 s in
+    `serve_with_token`); reqwest `json`+`blocking` features; workspace
+    version → 0.3.1.
+  - **Tests:** workspace 117/117; clippy clean; fmt clean; E2E suite
+    recreated + extended at `/scripts` (sandbox-side): **73/73** incl. mock
+    GitHub updater flow (check/apply/restore, in-app restart spawns NEW
+    process, CLI `update --check`/`--yes`), daemon lifecycle 7/7,
+    exit-when-idle, real network 10 MB + 50 MB, RSS footprint phase.
+  - **Docs:** CHANGELOG §0.3.1; worktasks §15 all ✅ (+15.6–15.10);
+    feature-research §12 ✅ + roadmap SHIPPED note; README (Features, Run
+    modes, Self-update, Configuration, Security); docs/api.md (server info +
+    in-app updates); docs/install.md (Keeping it updated).
+
 ### [2026-09-29] Feature-research comparison doc + v0.3.0 roadmap (run modes, in-app updater) — Super Z sandbox
 - **Commit(s):** (this commit).
 - **Did:**

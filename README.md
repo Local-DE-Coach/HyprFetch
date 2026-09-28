@@ -13,14 +13,17 @@ Most download managers are either:
 
 HyprFetch is a single Rust binary that serves a web UI on `127.0.0.1`. You open the page in your browser; the binary does the downloading. Idle RAM target: < 10 MB.
 
-## Features (planned)
+## Features
 
 - **Resumable downloads** — survive restarts, crashes, and interruptions via SQLite-backed segment state
 - **Multi-connection segmented downloads** — split a file into N ranges, fetch in parallel, write via `pwrite` to one fd
 - **HTTP/1.1, HTTP/2, HTTP/3 (QUIC)** — protocol auto-negotiation
 - **QoS / bandwidth-sharing mode** — toggle that caps downloads to leave headroom for browsing, gaming, video calls
-- **Browser-based UI** — Svelte SPA embedded in the binary, served from `127.0.0.1:<port>`
-- **Single static binary** — no runtime deps, no shared libraries, no Electron
+- **Browser-based UI** — Svelte + Tailwind + DaisyUI SPA embedded in the binary (~18 KiB gzipped), served from `127.0.0.1:<port>`
+- **Node.js-style run modes** — `dev` console, `serve` foreground, managed `daemon` with `logs -f` / `status` / `stop` / `restart`
+- **In-app self-update** — checks GitHub releases (private-repo PAT aware), sha256-verifies, swaps the binary atomically, auto-resumes downloads
+- **Sleep mode** — `--exit-when-idle` so nothing stays resident when there is nothing to do
+- **Lean by design** — measured idle RSS ≈ 8 MB; single static binary, no runtime deps, no Electron
 
 ## Architecture
 
@@ -98,20 +101,60 @@ xdg-open http://127.0.0.1:7780
 For development with hot-reload on the frontend:
 
 ```bash
-# Terminal 1: backend
-cargo run -- serve
+# Terminal 1: backend (dev mode — pretty debug logs, opens the UI)
+cargo run -- dev
 
 # Terminal 2: frontend dev server (proxies API to backend)
 cd crates/hyprfetch-api/ui && npm install && npm run dev
 ```
 
+## Run modes (Node.js-style)
+
+Pick how you want it running — foreground dev console, plain prod server, or
+a pm2-style managed daemon:
+
+```bash
+hyprfetch dev                 # dev mode: verbose pretty logs + auto-open UI
+hyprfetch serve               # prod server in the foreground (compact logs)
+
+hyprfetch daemon start        # detached prod server (PID file + rotating logs)
+hyprfetch daemon status       # running? pid, uptime, version, active tasks
+hyprfetch daemon restart      # stop + start again (same args)
+hyprfetch daemon stop         # graceful SIGTERM (SIGKILL fallback)
+hyprfetch logs -f             # follow the daemon log (like tail -f)
+
+hyprfetch serve --exit-when-idle 30   # sleep mode: exit after 30 idle minutes
+```
+
+Daemon state lives under `~/.local/state/hyprfetch/` (logs rotate at 5 MiB,
+3 files kept). `daemon start` returns only after `/healthz` answers.
+
+## Self-update
+
+Update straight from GitHub releases — works with the **private repo** when
+a PAT is configured (`HYPRFETCH_GITHUB_TOKEN` env, `[update] token` in the
+config, or `--token`):
+
+```bash
+hyprfetch update --check      # report only
+hyprfetch update              # download → sha256 verify → atomic swap → restart daemon
+hyprfetch update --from-git --source-dir ~/HyprFetch   # pull + build + swap instead
+```
+
+The in-app updater does the same from the UI (**Updates** card): check,
+install & restart, or a plain restart. Active downloads are drained (paused),
+the new binary is swapped in atomically (previous binary kept as
+`hyprfetch.old`), and the paused tasks **auto-resume** on the fresh server.
+Tarballs are verified with sha256 before anything touches disk.
+
 ## Configuration
 
 HyprFetch reads a config file if present — default location
 `~/.config/hyprfetch/config.toml` (override with `--config`). Keys: `bind`,
-`db_path`, `download_dir`, `segments`, `allow_private`, `api_token`. CLI
-flags and `HYPRFETCH_*` env vars override the file. Run `hyprfetch --help`
-for the full list.
+`db_path`, `download_dir`, `segments`, `allow_private`, `api_token`,
+`workers`, `exit_when_idle`, plus an `[update]` section (`repo`, `token`,
+`source_dir`). CLI flags and `HYPRFETCH_*` env vars override the file. Run
+`hyprfetch --help` for the full list.
 
 Key defaults:
 - Bind: `127.0.0.1:7780` (loopback only by default — non-loopback binds require the API token, see `docs/api.md`)
@@ -125,7 +168,7 @@ Key defaults:
 - Binds to loopback only by default
 - Fine-grained PAT-style API token for any non-loopback access
 - SSRF protection: rejects `file://`, `ftp://`, private IP ranges (RFC 1918, loopback, link-local)
-- No telemetry, no phone-home, no auto-update
+- No telemetry, no phone-home. Updates only happen when **you** run `hyprfetch update` or press the UI button — and every update is sha256-verified before it is applied
 
 ## Sandbox test results (2026-09-28)
 

@@ -137,6 +137,22 @@ Downloads resume automatically across restarts: incomplete tasks are
 re-probed at startup and continued from the last persisted byte offset
 (remote change is detected via ETag/Last-Modified and restarts cleanly).
 
+## Keeping it updated
+
+Once installed, updating does not need pacman/curl again — the binary can
+update itself straight from GitHub releases (PAT-aware for this private
+repo, sha256-verified, atomic swap):
+
+```bash
+export HYPRFETCH_GITHUB_TOKEN=<YOUR_PAT>   # or [update] token in config.toml
+hyprfetch update --check                   # report only
+hyprfetch update                           # install + restart the daemon (auto-resume)
+```
+
+If you installed from a source clone instead, `hyprfetch update --from-git
+--source-dir <clone>` pulls and rebuilds. See `docs/api.md` → "In-app
+updates" for the REST surface and the UI **Updates** card.
+
 ## Heavy-use note (file descriptor limits)
 
 Each active segment is one HTTP connection. With many concurrent tasks, the
