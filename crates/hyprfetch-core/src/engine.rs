@@ -211,18 +211,26 @@ impl Engine {
                 .ok_or_else(|| EngineError::TaskNotFound(task_id.to_string()))?
         };
 
-        if row.state != TaskState::Queued && row.state != TaskState::Paused {
-            return Err(EngineError::InvalidState(row.state));
-        }
-
-        // Check if already running.
-        {
+        // Single snapshot of "is a live coordinator attached" — used both for
+        // the stranded-state rule and the double-spawn guard below.
+        let is_running = {
             let tasks = self.tasks.read().await;
-            if tasks.contains_key(task_id) {
-                return Err(EngineError::Other(format!(
-                    "task {task_id} is already running"
-                )));
-            }
+            tasks.contains_key(task_id)
+        };
+        match row.state {
+            TaskState::Queued | TaskState::Paused => {}
+            // A task left in `downloading` with NO live coordinator is
+            // restartable: nothing owns it. This happens when a resume races
+            // an in-flight pause (the pause route already flipped the DB row
+            // to `downloading` before the old coordinator finished stopping),
+            // or after a hard crash that skipped the startup normalize pass.
+            TaskState::Downloading if !is_running => {}
+            other => return Err(EngineError::InvalidState(other)),
+        }
+        if is_running {
+            return Err(EngineError::Other(format!(
+                "task {task_id} is already running"
+            )));
         }
 
         // Spawn the coordinator with a self-reaping wrapper.

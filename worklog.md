@@ -32,6 +32,49 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-28] Merged final 2 Dependabot branches (axum 0.8!), fixed resume-race bug, 30/30 live E2E — Super Z sandbox
+- **Commit(s):** merge `e761928` (axum 0.8.9 — amended with `{id}` route fix +
+  WS `Utf8Bytes` fix), merge `23e5b93` (tokio-tungstenite 0.30.0, Cargo.lock
+  conflict resolved by re-resolve); (this commit) resume-race fix +
+  regression test + work files.
+- **Did:**
+  - Two NEW Dependabot branches had appeared after the previous batch (they
+    were only offered once thiserror/tungstenite landed): `axum 0.7.9 → 0.8.9`
+    and `tokio-tungstenite 0.24 → 0.30.0`. Merged both; remote again has ONLY
+    `main`.
+  - **axum 0.8 code fixes (merge commit):** all 5 `/api/tasks/:id/...` routes
+    migrated to the new `{id}` syntax (old syntax PANICS at startup on axum
+    0.8 — a compile-clean but runtime-fatal trap), and the WS sink adapted to
+    `Message::Text(Utf8Bytes)`.
+  - **Real bug found by the live E2E:** resume immediately after pause
+    stranded the task in `downloading` forever. Root cause: pause is async;
+    the resume route set the DB row to `downloading` and then
+    `engine.start()` rejected that state unconditionally, swallowed the
+    error, and returned 2xx. Fix (core+api): engine treats a `downloading`
+    row with no live coordinator as restartable; the resume route retries
+    through the wind-down window and on persistent failure rolls back to
+    `paused` + returns 409. Regression test added:
+    `resume_immediately_after_pause_does_not_strand_task` (wiremock with a
+    dynamic Range responder, zero-delay pause→resume, must complete).
+  - **Verified:** fmt + clippy `-D warnings` clean; **111/111 tests**; live
+    E2E **30/30** against the release binary: UI assets + SPA fallback +
+    retry/delete bundle, byte-exact sha256 on local 10 MB and network
+    10 MB, 50 MB pause→resume→complete byte-exact, **1 GB large download
+    completed in 122 s** (exact size + head/tail 1 MiB sha256), QoS 1 MiB/s
+    cap accurate (10 MB in 9.0 s), WS progress/state/global-speed events
+    received live during download, idle silence confirmed, delete-with-file
+    removes the file, all error paths correct (400/404/409).
+- **Result / state:** `main` is the only branch; everything merged, fixed,
+  tested. E2E harness (sandbox-only, not committed) at
+  `/home/z/my-project/scripts/e2e_full_test.py`.
+- **Notes for next sandbox:** axum 0.8's `:id` → `{id}` migration is easy to
+  miss because it fails at RUNTIME (router panic on startup), not compile
+  time — keep the route-syntax check in mind for future axum upgrades. The
+  resume rollback path returns 409 `invalid_state_transition`; UI treats
+  non-2xx as failure so a retried tap works — acceptable. thinkbroadband
+  blocks the python-urllib UA with 403; use curl for reference downloads in
+  sandbox harnesses.
+
 ### [2026-09-28] Branch hygiene: merged all 10 Dependabot branches, fixed Cargo.lock, deleted branches + closed PRs — Super Z sandbox
 - **Commit(s):** merge commits `36be434` (stale@v11), `17601b0` (upload-artifact@v7),
   `4a906bc` (download-artifact@v8), `95e6c17` (checkout@v7), `3751c42`

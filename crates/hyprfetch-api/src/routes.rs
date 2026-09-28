@@ -413,10 +413,35 @@ pub async fn resume_task(
     Path(id): Path<String>,
 ) -> Result<Json<TaskDto>, ApiError> {
     let updated = transition(&state, &id, TaskState::Downloading, "resumed").await?;
-    // Kick the engine to start (or restart) the workers.
-    if let Err(e) = state.engine.start(&id).await {
-        tracing::warn!(task = %id, error = %e, "engine.start() failed on resume");
-        // Non-fatal: the task is in Downloading state in the DB; user can retry.
+    // Kick the engine to start (or restart) the workers. Pausing is
+    // asynchronous — right after a pause the old coordinator is still winding
+    // down, so the first start attempt can transiently fail ("already
+    // running"). Retry with a short backoff; if it still fails, roll the row
+    // back to `paused` and return 409 so the task is never left stranded in
+    // `downloading` with no workers attached (the engine also accepts a
+    // stranded `downloading` row as a restartable state — this rollback is
+    // the belt to that braces).
+    let mut started = false;
+    let mut last_err = None;
+    for _ in 0..20 {
+        match state.engine.start(&id).await {
+            Ok(()) => {
+                started = true;
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+    if !started {
+        let e = last_err.expect("retry loop runs at least once");
+        tracing::warn!(task = %id, error = %e, "engine.start() failed on resume; rolling back to paused");
+        db(&state).touch(&id, TaskState::Paused, updated.0.downloaded_bytes, None)?;
+        return Err(ApiError::InvalidStateTransition(format!(
+            "engine could not resume the task ({e}); task rolled back to paused"
+        )));
     }
     Ok(updated)
 }
@@ -1080,6 +1105,210 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -- pause/resume race -------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn resume_immediately_after_pause_does_not_strand_task() {
+        // Regression: pausing is asynchronous (workers stop, offsets flush,
+        // the coordinator self-reaps). The resume route used to flip the DB
+        // row straight to `downloading` and then call engine.start(), which
+        // rejected a `downloading` row unconditionally — the error was
+        // swallowed and the task was stranded in `downloading` forever with
+        // no coordinator attached. The route now retries through the
+        // wind-down window and rolls back to `paused` (409) on persistent
+        // failure; the engine accepts a stranded `downloading` row as
+        // restartable. This test drives pause→resume with ZERO delay, the
+        // exact race window, and requires the task to finish.
+        use hyprfetch_core::{Engine, SsrfPolicy};
+        use std::sync::Arc;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
+
+        const TOTAL: i64 = 8 * 1024 * 1024;
+        const SEGS: i64 = 4;
+
+        // Dynamic Range responder: after a pause mid-segment the resumed
+        // workers request ARBITRARY byte ranges, so the mock must slice the
+        // body per request instead of matching fixed segment boundaries.
+        struct ServeRange(Arc<Vec<u8>>);
+        impl Respond for ServeRange {
+            fn respond(&self, req: &wiremock::Request) -> ResponseTemplate {
+                let total = self.0.len();
+                let range = req
+                    .headers
+                    .get("range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if range.is_empty() || !range.starts_with("bytes=") {
+                    return ResponseTemplate::new(200)
+                        .insert_header("content-length", total.to_string())
+                        .insert_header("accept-ranges", "bytes")
+                        .insert_header("etag", "\"resume-race-etag\"");
+                }
+                let spec = range.trim_start_matches("bytes=");
+                let (a, b) = spec.split_once('-').unwrap_or(("", ""));
+                let (start, end) = if a.is_empty() {
+                    // suffix form: bytes=-N
+                    let n: usize = b.parse().unwrap_or(total);
+                    (total.saturating_sub(n), total - 1)
+                } else {
+                    let s: usize = a.parse().unwrap_or(0);
+                    let e: usize = b.parse().unwrap_or(total - 1);
+                    (s, e.min(total - 1))
+                };
+                let slice = self.0[start..=end].to_vec();
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", format!("bytes {start}-{end}/{total}"))
+                    .insert_header("content-length", slice.len().to_string())
+                    .set_body_bytes(slice)
+            }
+        }
+
+        let server = MockServer::start().await;
+        let body: Arc<Vec<u8>> = Arc::new((0..TOTAL as usize).map(|i| (i % 251) as u8).collect());
+        Mock::given(method("HEAD"))
+            .respond_with(ServeRange(Arc::clone(&body)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ServeRange(body))
+            .mount(&server)
+            .await;
+
+        let db = hyprfetch_db::open_in_memory().unwrap();
+        let engine = Engine::with_ssrf_policy(
+            db.clone(),
+            SsrfPolicy {
+                block_private: false,
+            },
+        );
+        // Throttle to 2 MiB/s so the 8 MiB download spans ~4s and the
+        // pause→resume race window is wide and deterministic.
+        engine.set_qos(true, 2 * 1024 * 1024);
+        let state = crate::AppState {
+            db: db.clone(),
+            engine: std::sync::Arc::new(engine),
+        };
+        let app = router(state.clone());
+
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = 0i64;
+        let row = TaskRow {
+            id: id.clone(),
+            url: format!("{}/file.bin", server.uri()),
+            filename: "file.bin".into(),
+            save_path: "/tmp/hyprfetch-resume-race.bin".into(),
+            total_bytes: Some(TOTAL),
+            downloaded_bytes: 0,
+            state: TaskState::Queued,
+            etag: None,
+            last_modified: None,
+            accept_ranges: false,
+            segments_requested: SEGS,
+            qos_override: None,
+            extra_headers: None,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        TasksRepo::new(&db).insert(&row).unwrap();
+        state.engine.start(&id).await.unwrap();
+
+        // Wait for real progress AND the downloading state before hitting
+        // the race window.
+        for _ in 0..400 {
+            let repo_row = TasksRepo::new(&db).get(&id).ok().flatten();
+            let bytes = repo_row.as_ref().map(|r| r.downloaded_bytes).unwrap_or(0);
+            let st = repo_row
+                .map(|r| r.state.as_str().to_string())
+                .unwrap_or_default();
+            if bytes > 0 && st == "downloading" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        // Pause, then resume with NO delay — the exact race.
+        let pause = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{id}/pause"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pause.status(), StatusCode::OK);
+
+        let resume = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{id}/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Either the engine (re)started (200) or it honestly rolled back to
+        // paused with 409 — both are recoverable. A silent 200 with a
+        // stranded task is the bug.
+        assert!(
+            resume.status() == StatusCode::OK || resume.status() == StatusCode::CONFLICT,
+            "resume must be 200 or 409, got {}",
+            resume.status()
+        );
+
+        // The task must reach `complete` (resuming again if it was rolled
+        // back). It must NEVER sit in `downloading` without progressing.
+        let mut complete = false;
+        for _ in 0..240 {
+            let st = db_state(&db, &id);
+            match st.as_str() {
+                "complete" => {
+                    complete = true;
+                    break;
+                }
+                "paused" => {
+                    let _ = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(Method::POST)
+                                .uri(format!("/api/tasks/{id}/resume"))
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        let final_row = TasksRepo::new(&db).get(&id).ok().flatten();
+        assert!(
+            complete,
+            "task must complete after resume; last state was {}, error {:?}",
+            db_state(&db, &id),
+            final_row.and_then(|r| r.error_message)
+        );
+    }
+
+    /// Current state string of a task straight from the DB.
+    fn db_state(db: &std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>, id: &str) -> String {
+        TasksRepo::new(db)
+            .get(id)
+            .ok()
+            .flatten()
+            .map(|r| r.state.as_str().to_string())
+            .unwrap_or_else(|| "missing".into())
     }
 
     // -- delete with file removal -----------------------------------------

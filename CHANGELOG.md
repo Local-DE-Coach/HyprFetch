@@ -8,6 +8,33 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+### Fixed (found by the 2026-09-28 E2E re-run after the axum 0.8 upgrade)
+- **Resume-after-pause race could strand a task in `downloading` forever.**
+  Pausing is asynchronous; the resume route flipped the DB row straight to
+  `downloading` and then called `engine.start()`, which rejected
+  `downloading` rows unconditionally, swallowed the error, and answered 2xx —
+  leaving a task with no coordinator attached. The engine now treats a
+  `downloading` row with **no live coordinator** as restartable, the resume
+  route retries through the pause wind-down window (~2 s) and, on persistent
+  failure, rolls the row back to `paused` and returns **409** instead of a
+  silent 200. Regression test:
+  `resume_immediately_after_pause_does_not_strand_task` (drives pause→resume
+  with zero delay against a live mock server and requires completion).
+- **axum 0.8 migration fixes:** route path params updated to the new `{id}`
+  syntax (the old `:id` syntax panics at startup on axum 0.8) and the WS sink
+  now passes `Utf8Bytes` (`Message::Text(json.into())`).
+
+### Dependencies (merged from 2 new Dependabot branches, 2026-09-28)
+- **cargo:** `axum` 0.7.9 → 0.8.9 (breaking: route `{id}` syntax, WS
+  `Message::Text` now `Utf8Bytes` — code fixed), `tokio-tungstenite` 0.24 →
+  0.30.0 (tests compile unchanged). Verified: fmt + clippy `-D warnings`
+  clean, **111/111 tests** (new resume-race regression test included), live
+  E2E **30/30** incl. a 1 GB real-network download (byte-exact head+tail
+  sha256 + exact size), pause→resume→complete on 50 MB, QoS cap accuracy
+  (10 MB @ 1 MiB/s in 9.0 s), and live WebSocket event checks.
+- **Housekeeping:** both Dependabot branches merged into `main` and deleted;
+  PRs #20, #21 closed.
+
 ### Dependencies (merged from 10 Dependabot branches, 2026-09-28)
 - **cargo:** `thiserror` 1 → 2.0.21, `toml` 0.8 → 1.1.6+spec-1.1.0,
   `tokio-tungstenite` 0.21 → 0.24.0, `rusqlite` 0.32 → 0.40.2 (bundled SQLite

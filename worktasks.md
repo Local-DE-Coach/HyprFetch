@@ -230,7 +230,7 @@ tracker / Backlog.
 
 | # | Task | Status | Proof |
 |---|---|---|---|
-| 13.1 | Unit + integration suite (engine, api, db, ws e2e) | ✅ | **110 passing** (93 before this audit) |
+| 13.1 | Unit + integration suite (engine, api, db, ws e2e) | ✅ | **111 passing** (110 before resume-race regression test) |
 | 13.2 | CI: fmt + clippy `-D warnings` + test + audit + MSRV check | ✅ | ci.yml |
 | 13.3 | Real-network sandbox tests (1 GB / 5 GB thinkbroadband, pause/resume, QoS accuracy, RSS) | ✅ | README test section |
 | 13.4 | Load test: 50+ concurrent tasks / fd-limit behavior | ⬜ | — |
@@ -250,6 +250,7 @@ tracker / Backlog.
 | 14.6 | Nightly build workflow (main → artifact) | ⬜ | — |
 | 14.7 | Benchmark workflow (engine throughput regression) | 💭 | — |
 | 14.8 | **Dependency sync 2026-09-28**: merged all 10 Dependabot branches into `main` (cargo: thiserror 2.0.21, toml 1.1.6, tokio-tungstenite 0.24.0, rusqlite 0.40.2, governor 0.10.4; actions: checkout@v7, upload-artifact@v7, download-artifact@v8, stale@v11, action-gh-release@v3); repaired governor-merge Cargo.lock duplication; branches deleted, PRs #10–#19 closed | ✅ | fmt/clippy clean, **110/110 tests**, live smoke (config/WAL/download/doctor), merge commits `36be434`–`a79d93d` |
+| 14.9 | **Dependency sync round 2**: merged axum 0.7.9→0.8.9 (route `{id}` syntax + WS `Utf8Bytes` code fixes) and tokio-tungstenite 0.24→0.30.0; branches deleted, PRs #20/#21 closed — remote has ONLY `main` | ✅ | fmt/clippy clean, **111/111 tests**, E2E **30/30** incl. 1 GB download, merges `e761928`/`23e5b93` |
 
 ---
 
@@ -262,6 +263,7 @@ tracker / Backlog.
 | B3 | ~~Double-spawn race in queue pump → spurious `removed` states~~ | ✅ fixed (4.3) | audit 2026-09-28 |
 | B4 | Remote mutated *mid-download* (no validator change timing) | 🐛 open | inherent HTTP limitation; mitigations: ETag/If-Range honest servers; candidate: post-download length+validator re-probe |
 | B5 | 200-response acceptance when server starts ignoring Range mid-task (multi-segment) errors the task instead of degrading gracefully | 🐛 open | rare; retry re-probes and single-segments it |
+| B6 | ~~Resume immediately after pause strands task in `downloading` forever (route pre-flipped state + engine.start rejected it + error swallowed)~~ | ✅ fixed | engine accepts stranded `downloading` rows; resume route retries then rolls back to paused + 409; regression test `resume_immediately_after_pause_does_not_strand_task` — found by live E2E 2026-09-28 |
 
 ## Backlog (future ideas, not designed)
 
