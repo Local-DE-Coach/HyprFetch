@@ -32,6 +32,32 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-29] Feature-research comparison doc + v0.3.0 roadmap (run modes, in-app updater) — Super Z sandbox
+- **Commit(s):** (this commit).
+- **Did:**
+  - Owner uploaded `Linux-Download-Manager-Research.md` +
+    `Feature-Tree-Diagram.png` and asked for a docs checklist marking each
+    feature HyprFetch already has vs the ones still missing ("without
+    change"), plus a next-version plan for Node.js-style run modes and an
+    in-app updater.
+  - **Upload never reached the sandbox** (upload dir empty; web search found
+    no public copy) — documented transparently in the doc's source note;
+    rebuilt the feature list from the standard Linux-DM research dimensions
+    and verified every line against code/tests/E2E (commit `ddfdd41`).
+  - New `docs/feature-research.md`: 12 areas, ✅/🟨/⬜ per feature with
+    concrete proofs; snapshot count table; roadmap section.
+  - Roadmap recorded: **R1 run modes** (`dev` console-debug mode, `--daemon`
+    + PID/log files, `logs/status/stop/restart` subcommands) and **R2
+    in-app updater** (release/clone check → apply from source or binary →
+    sha256 verify → drain-pause restart → auto-resume).
+  - `worktasks.md` §15 rows 15.1–15.5 (all ⬜, nothing implemented);
+    `CHANGELOG.md` Docs + Planned entries.
+- **Proof:** `docs/feature-research.md` snapshot table; absence checks in
+  code for proxy/cookie/torrent/metalink/checksum/notifications (0 hits).
+- **Notes for next sandbox:** the owner may re-upload the original research
+  file — merge its exact wording into `docs/feature-research.md` without
+  altering the status marks; the PNG diagram also never arrived.
+
 ### [2026-09-29] Desktop integration + default dir ~/Desktop; full E2E re-run green; v0.2.0 re-cut — Super Z sandbox
 - **Commit(s):** `4a6de25` feat(desktop) + this docs commit; tag `v0.2.0`
   re-cut at the feat commit (see below).

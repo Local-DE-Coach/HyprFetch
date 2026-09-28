@@ -8,6 +8,30 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+### Docs (2026-09-29)
+- **New `docs/feature-research.md`** — Linux download-manager feature
+  research checklist compared against HyprFetch, area by area: every shipped
+  feature is marked ✅ with its concrete proof (test name / E2E check /
+  release asset), and every not-yet-implemented feature is listed ⬜ unchanged
+  from the research. Note: the owner's uploaded research file did not reach
+  the build sandbox, so the list was rebuilt from the standard research
+  dimensions and verified line-by-line against the code (see the doc's
+  source note).
+- **Roadmap for v0.3.0 recorded** (owner request): Node.js-style run modes
+  (dev mode with console debug logs; `--daemon` prod mode with file logs +
+  `logs/status/stop/restart` subcommands) and an in-app updater (check →
+  pull/download → verify → apply → restart with auto-resume). Tracked as
+  `worktasks.md` §15 rows 15.1–15.5.
+
+### Planned — targeted for v0.3.0 (no code yet)
+- **Run modes:** `hyprfetch dev` / `serve --mode dev` (verbose console logs),
+  `serve --daemon` (PID file + rotating file logs), `hyprfetch logs/status/
+  stop/restart` lifecycle commands.
+- **Self-update:** release check surfaced in UI + CLI; apply from a source
+  clone (`git pull` → build → swap → restart) or from release tarballs
+  (sha256-verified replace → restart); drain-pause → auto-resume around the
+  restart.
+
 ### Added (2026-09-29 — desktop integration for the v0.2.0 re-release)
 - **Desktop entry** (`packaging/desktop/hyprfetch.desktop`) so HyprFetch
   appears in Linux desktop menus / app launchers. Installed at the standard

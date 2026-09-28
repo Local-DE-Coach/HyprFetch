@@ -256,6 +256,24 @@ tracker / Backlog.
 
 ---
 
+## 15. Run modes & self-update (planned for v0.3.0 — owner request, 2026-09-29)
+
+Design sketch: `docs/feature-research.md` → "Roadmap — next version".
+Nothing implemented yet — every row ⬜ by definition.
+
+| # | Task | Status | Tests / Proof |
+|---|---|---|---|
+| 15.1 | Dev mode: `serve --mode dev` / `hyprfetch dev` — debug tracing to console, pretty format, git-clone workflow | ⬜ | — |
+| 15.2 | Prod daemon mode: `--daemon` with PID file + rotating log files under `~/.local/share/hyprfetch/logs/` | ⬜ | — |
+| 15.3 | Lifecycle subcommands: `hyprfetch logs [-f]` / `status` / `stop` / `restart` (pm2-style UX) | ⬜ | — |
+| 15.4 | Updater check: GitHub release query (PAT, private repo) + local-clone `git pull` check; "new version" surfaced in UI settings + `status` | ⬜ | — |
+| 15.5 | Updater apply: source mode (pull → build → swap → restart) and binary mode (tarball → sha256 verify → replace → restart), with drain-pause → restart → auto-resume | ⬜ | — |
+
+**Verify (when done):** `hyprfetch dev` shows debug logs; `--daemon` + `logs -f`
++ `stop` round-trip; updater dry-run against a mock release.
+
+---
+
 ## Bug tracker (open)
 
 | ID | Bug | Status | Notes |
