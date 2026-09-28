@@ -161,7 +161,9 @@ pub async fn create_task(
             .flatten()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| {
-                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()) + "/Downloads"
+                // Built-in default on Linux desktops: save onto the user's
+                // Desktop so finished downloads are immediately visible.
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()) + "/Desktop"
             })
     });
 

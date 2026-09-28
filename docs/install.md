@@ -96,12 +96,22 @@ containers and servers without glibc.
 Requires Rust 1.85+ (`rustup`) and pkg-config; SQLite is bundled, and the
 committed `ui/dist` means **no Node toolchain is needed** for a normal build.
 
+The repo is private, so cloning needs a GitHub fine-grained PAT.
+**The only thing you have to change below is `<YOUR_PAT>`** — everything
+else is copy-paste. On Arch:
+
 ```bash
-git clone https://github.com/Local-DE-Coach/HyprFetch.git
-cd HyprFetch
-cargo build --release --locked
+sudo pacman -S --needed base-devel rust git
+git clone https://<YOUR_PAT>@github.com/Local-DE-Coach/HyprFetch.git
+cd HyprFetch && cargo build --release --locked
 sudo install -Dm755 target/release/hyprfetch /usr/local/bin/hyprfetch
+hyprfetch --version   # → hyprfetch 0.2.0
 ```
+
+This also installs a desktop entry when you use the release `PKGBUILD`
+(`/usr/share/applications/hyprfetch.desktop`), so "HyprFetch" shows up in
+your desktop menu; the default download directory is `~/Desktop` (override
+with `--download-dir`, the config file, or the UI settings).
 
 See [`development.md`](development.md) for frontend development, tests, and
 code style.
@@ -119,7 +129,7 @@ Useful flags (all have `HYPRFETCH_*` env equivalents — see `--help`):
 | Flag | Default | Meaning |
 |---|---|---|
 | `--bind` | `127.0.0.1:7780` | listen address (keep loopback unless you add auth) |
-| `--download-dir` | `~/Downloads` | where downloads land |
+| `--download-dir` | `~/Desktop` | where downloads land |
 | `--segments` | `8` | default segments per task |
 | `--db-path` | `~/.local/share/hyprfetch/hyprfetch.db` | SQLite state file |
 

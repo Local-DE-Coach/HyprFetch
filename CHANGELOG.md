@@ -8,6 +8,23 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+### Added (2026-09-29 — desktop integration for the v0.2.0 re-release)
+- **Desktop entry** (`packaging/desktop/hyprfetch.desktop`) so HyprFetch
+  appears in Linux desktop menus / app launchers. Installed at the standard
+  applications path `/usr/share/applications/hyprfetch.desktop` by every
+  packaging channel: the release tarball now ships the file, and the Arch
+  PKGBUILD, the .rpm spec, and the .deb (`cargo-deb` assets) all install it.
+  Launching the entry runs `hyprfetch serve` (web UI at
+  `http://127.0.0.1:7780`).
+
+### Changed (2026-09-29 — default download directory)
+- **Default download dir is now `~/Desktop`** (was `~/Downloads`): finished
+  downloads land right on the user's desktop where they are immediately
+  visible. Still overridable per request (`save_dir`), via the
+  `download_dir` setting / config file / `--download-dir`, and falls back to
+  `/tmp/Desktop` when `HOME` is unset. Docs (`README.md`,
+  `docs/install.md`) updated to match.
+
 ### Fixed (found by the 2026-09-28 E2E re-run after the axum 0.8 upgrade)
 - **Resume-after-pause race could strand a task in `downloading` forever.**
   Pausing is asynchronous; the resume route flipped the DB row straight to

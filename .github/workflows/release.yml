@@ -76,6 +76,9 @@ jobs:
           mkdir -p "$ARCHIVE"
           cp target/${{ matrix.target }}/release/hyprfetch "$ARCHIVE/"
           cp README.md LICENSE CHANGELOG.md "$ARCHIVE/"
+          # Desktop entry so Linux packages can register HyprFetch in
+          # desktop menus at the standard /usr/share/applications path.
+          cp packaging/desktop/hyprfetch.desktop "$ARCHIVE/"
           tar czf "$ARCHIVE.tar.gz" "$ARCHIVE"
           sha256sum "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
           ls -la "$ARCHIVE.tar.gz" "$ARCHIVE.tar.gz.sha256"

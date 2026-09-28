@@ -22,6 +22,9 @@ package() {
     install -Dm644 "${_srcdir}/README.md"   "${pkgdir}/usr/share/doc/hyprfetch/README.md"
     install -Dm644 "${_srcdir}/CHANGELOG.md" "${pkgdir}/usr/share/doc/hyprfetch/CHANGELOG.md"
     install -Dm644 "${_srcdir}/LICENSE"     "${pkgdir}/usr/share/licenses/hyprfetch-bin/LICENSE"
+    # Desktop entry at the standard Linux applications path so
+    # "HyprFetch" shows up in desktop menus / app launchers.
+    install -Dm644 "${_srcdir}/hyprfetch.desktop" "${pkgdir}/usr/share/applications/hyprfetch.desktop"
 }
 
 # vim: set ft=sh:

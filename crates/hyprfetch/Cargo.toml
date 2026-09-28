@@ -46,4 +46,5 @@ assets = [
     ["../../README.md", "usr/share/doc/hyprfetch/README", "644"],
     ["../../CHANGELOG.md", "usr/share/doc/hyprfetch/CHANGELOG", "644"],
     ["../../LICENSE", "usr/share/doc/hyprfetch/copyright", "644"],
+    ["../../packaging/desktop/hyprfetch.desktop", "usr/share/applications/hyprfetch.desktop", "644"],
 ]

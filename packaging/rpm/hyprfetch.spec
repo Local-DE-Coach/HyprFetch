@@ -25,9 +25,11 @@ install -Dm755 hyprfetch                 %{buildroot}%{_bindir}/hyprfetch
 install -Dm644 README.md                 %{buildroot}%{_docdir}/hyprfetch/README.md
 install -Dm644 CHANGELOG.md              %{buildroot}%{_docdir}/hyprfetch/CHANGELOG.md
 install -Dm644 LICENSE                   %{buildroot}%{_licensedir}/hyprfetch/LICENSE
+install -Dm644 hyprfetch.desktop         %{buildroot}%{_datadir}/applications/hyprfetch.desktop
 
 %files
 %{_bindir}/hyprfetch
+%{_datadir}/applications/hyprfetch.desktop
 %doc %{_docdir}/hyprfetch/README.md
 %doc %{_docdir}/hyprfetch/CHANGELOG.md
 %license %{_licensedir}/hyprfetch/LICENSE
