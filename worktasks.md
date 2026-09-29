@@ -475,3 +475,22 @@ containing the [0.4.1] changelog; https://istias.tech/hyprfetch/updates/
 latest.json serves version 0.4.1; 0.4.1/PKGBUILD 200 with server-only
 source; channel-root install.sh 200. v0.4.0 release left untouched on its
 old tag (history preserved).
+
+## 23 · Session 9 — run/stop/update commands on the release page + README as release asset (2026-09-30)
+
+**User report:** the release page showed install + update commands but not how
+to RUN or STOP the app after installing, and the README file was not attached
+to the release. Requirement: every release page answers "run / stop / update"
+and ships the README file.
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 23.1 | release.yml release-notes template: new "🚀 Run & use (after install)" section — serve / daemon start / status / stop / restart / logs -f / update --check / update — inserted between install block and what's-changed | ✅ | yaml.safe_load OK; section present in template |
+| 23.2 | release.yml publish job: `README.md` added to the release `files:` list → every future release attaches the README as an asset | ✅ | files: list in workflow |
+| 23.3 | README.md: "Quick commands" table at the top (run fg/bg, open UI, status, stop, restart, logs, update --check, update, uninstall) before the detailed Install/Run modes/Self-update sections | ✅ | README render check |
+| 23.4 | Live v0.4.1 release patched in place via API: Run & use section inserted into the published body + README.md uploaded as asset (no re-release, no tag churn — old-tag rule respected; body/asset update only) | ✅ | GET releases/tags/v0.4.1 shows section + README.md asset |
+| 23.5 | CHANGELOG.md [Unreleased] documents the three additions | ✅ | changelog diff |
+
+**Measured:** workflow YAML parses; v0.4.1 body contains "Run & use (after
+install)" with the 8 commands; assets list includes README.md; tag untouched
+(still peels to 8d8deaa); no new run triggered (docs+workflow change only).

@@ -338,6 +338,24 @@ jobs:
 
           Full walkthroughs: <{product_page}> (install + test steps) · <{updates_page}> (update steps)
 
+          ## 🚀 Run & use (after install)
+
+          ```bash
+          hyprfetch serve            # run in the foreground (logs stream in the terminal)
+          hyprfetch daemon start     # run detached in the background (close the terminal freely)
+          hyprfetch daemon status    # running? → pid, uptime, version, active tasks
+          hyprfetch daemon stop      # stop the background app (Ctrl+C stops the foreground one)
+          hyprfetch daemon restart   # stop + start again
+          hyprfetch logs -f          # follow the daemon log (like tail -f)
+          hyprfetch update --check   # check this server for a newer release
+          hyprfetch update           # update: download → sha256 → atomic swap → restart
+          ```
+
+          Then open **http://127.0.0.1:7780** — the browser control panel. Add URLs,
+          pause/resume, watch speeds; the UI is embedded in the binary, nothing
+          else to install. Files land in `~/Downloads` by default (paused tasks
+          survive restarts). Every command accepts `-h` for its options.
+
           ## ✨ What's changed in v{version}
 
           {section_md}
@@ -382,6 +400,7 @@ jobs:
             artifacts/hyprfetch_*.deb
             artifacts/hyprfetch-*.rpm
             PKGBUILD
+            README.md
 
   # ---------------------------------------------------------------------
   # Mirror the release artifacts to the self-hosted update channel so

@@ -8,6 +8,18 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+### Added
+- **Run & use section on every GitHub release** (`release.yml`): the
+  generated release notes now include the day-to-day commands — run
+  foreground/detached, status, stop, restart, logs, update — right between
+  the install block and the changelog, so "how do I run/stop/update this"
+  is answered on the release page itself.
+- **README.md ships as a release asset**: the publish job now attaches the
+  README to every release next to the binaries, so the full command
+  reference is downloadable without cloning the (private) repo.
+- **Quick commands table in README.md**: install → run → stop → update →
+  uninstall cheat sheet at the top, before the detailed sections.
+
 ## [0.4.1] — 2026-09-30 (install/uninstall hardening + tag-per-release flow)
 
 ### Added

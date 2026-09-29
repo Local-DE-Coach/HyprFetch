@@ -67,6 +67,27 @@ See [`docs/architecture.md`](docs/architecture.md) for what the system is,
 └── .github/               # CI: fmt + clippy + test + audit; release builds packages
 ```
 
+## Quick commands
+
+Already installed? This is the whole day-to-day:
+
+| What | Command |
+|---|---|
+| Run (foreground, logs in terminal) | `hyprfetch serve` |
+| Run (background, survives terminal close) | `hyprfetch daemon start` |
+| Open the control panel | <http://127.0.0.1:7780> |
+| Is it running? | `hyprfetch daemon status` |
+| Stop | `hyprfetch daemon stop` (foreground: `Ctrl+C`) |
+| Restart | `hyprfetch daemon restart` |
+| Follow the log | `hyprfetch logs -f` |
+| Check for a new release | `hyprfetch update --check` |
+| Update to the latest release | `hyprfetch update` |
+| Uninstall | `curl -fsSL https://istias.tech/hyprfetch/updates/install.sh \| sh -s -- --uninstall` |
+
+Downloads land in `~/Downloads` by default; paused tasks survive restarts.
+Every command accepts `-h`. Details: [Run modes](#run-modes-nodejs-style)
+and [Self-update](#self-update) below.
+
 ## Install
 
 Fast paths per distribution (see [`docs/install.md`](docs/install.md) for all
