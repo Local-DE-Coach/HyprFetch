@@ -304,6 +304,7 @@ jobs:
   deploy-update-channel:
     name: Deploy update channel (istias.tech)
     needs: release
+    runs-on: ubuntu-latest
     # Direct-SSH mirror: needs DEPLOY_SSH_KEY authorized for the DEPLOY_USER
     # on the server. When the key/user combination isn't right (or org
     # secrets aren't shared with this repo), the job reports a NOTICE and
