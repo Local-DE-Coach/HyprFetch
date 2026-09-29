@@ -118,6 +118,49 @@ Returns the full task object including per-segment progress:
 
 All return `200 OK` with the updated task object, or `409 Conflict` if the state transition is invalid (e.g. pausing an already-completed task).
 
+### Desktop file actions
+
+- `POST /api/tasks/:id/reveal` — open the file's folder in the system file
+  manager (the WebUI **GO** button). The file itself is not launched. Works
+  for any task whose save folder exists on disk.
+- `POST /api/tasks/:id/open` — open the downloaded file with the system's
+  default application (the WebUI **Open** button). Only **finished**
+  downloads qualify (`409 Conflict` otherwise).
+
+Both return `200 OK` with `{"opened": true, "what": "file"|"folder",
+"path": "…", "opener": "…"}`, `404` for a missing task, and `400` when the
+path no longer exists on disk. The opener program is `xdg-open`, override
+with the `HYPRFETCH_FILE_OPENER` environment variable (used by tests); the
+process is spawned detached, so the HTTP call never blocks on a GUI app.
+
+### Inspect a URL (confirm dialog)
+
+`POST /api/inspect`:
+```json
+{ "url": "https://example.com/movie.mkv", "category": "auto" }
+```
+→
+```json
+{
+  "url": "https://example.com/movie.mkv",
+  "final_url": "https://cdn.example.com/movie.mkv",
+  "filename": "movie.mkv",
+  "total_bytes": 1468006400,
+  "accept_ranges": true,
+  "category": "video",
+  "save_dir": "/home/user/Downloads/video",
+  "save_path": "/home/user/Downloads/video/movie.mkv"
+}
+```
+
+Probes the URL with a HEAD request using the same SSRF policy, redirect
+handling and user agent as real downloads, and resolves where the file
+would land (same precedence as `POST /api/tasks`: `save_dir` → `category` —
+including `"auto"`, i.e. extension sorting — → auto-detect). **Creates
+nothing**: no task row, no directories. Probe failures return `400`
+(`403` when SSRF protection blocks the host); the WebUI falls back to a
+local guess and lets the download proceed.
+
 ### Remove task
 
 `DELETE /api/tasks/:id?delete_file=false`

@@ -26,6 +26,7 @@ export default [
         navigator: 'readonly', WebSocket: 'readonly', fetch: 'readonly',
         console: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly',
         setInterval: 'readonly', clearInterval: 'readonly',
+        localStorage: 'readonly', requestAnimationFrame: 'readonly',
       },
     },
     rules: {

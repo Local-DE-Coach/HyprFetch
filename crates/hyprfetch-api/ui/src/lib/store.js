@@ -18,6 +18,8 @@ import {
   patchSettings,
   getCategories,
   connectEvents,
+  openTaskFile,
+  revealTaskFolder,
 } from '../api.js'
 
 // ---- live state ----------------------------------------------------------
@@ -31,6 +33,22 @@ export const settings = writable({})
 export const categories = writable({ base: '', categorize: true, categories: [] })
 export const toast = writable('')
 export const showAdd = writable(false)
+
+// Floating download progress panel (IDM-style transfer monitor).
+// 'show' | 'min' (bubble) | 'hide' — persisted so the choice survives reloads.
+const FLOAT_KEY = 'hf_floatbar'
+function initialFloat() {
+  try {
+    const v = localStorage.getItem(FLOAT_KEY)
+    if (v === 'show' || v === 'hide' || v === 'min') return v
+  } catch (_) { /* storage unavailable */ }
+  return 'show'
+}
+export const floatPanel = writable(initialFloat())
+export function setFloatPanel(v) {
+  floatPanel.set(v)
+  try { localStorage.setItem(FLOAT_KEY, v) } catch (_) { /* ignore */ }
+}
 
 let toastTimer
 export function notify(msg) {
@@ -87,6 +105,25 @@ export async function doTaskAction(task, action) {
     await refreshServer()
   } catch (e) {
     notify(`${action} failed: ${e.message}`)
+  }
+}
+
+// ---- file actions (desktop integration) ----------------------------------
+export async function openFile(task) {
+  try {
+    await openTaskFile(task.id)
+    notify(`opening ${task.filename}…`)
+  } catch (e) {
+    notify(`open failed: ${e.message}`)
+  }
+}
+
+export async function revealFile(task) {
+  try {
+    await revealTaskFolder(task.id)
+    notify(`showing folder of ${task.filename}…`)
+  } catch (e) {
+    notify(`go failed: ${e.message}`)
   }
 }
 

@@ -1,10 +1,11 @@
 <script>
   // Settings — save folders (base + per-category overrides), auto-sort,
-  // concurrency, QoS bandwidth cap, security and the update channel that
-  // powers the in-app updater.
+  // concurrency, QoS bandwidth cap, security, appearance (5 theme styles ×
+  // dark/light) and the update channel that powers the in-app updater.
   import { onMount } from 'svelte'
   import { fmtBytes } from '../lib/format.js'
   import { settings, categories, saveSettings, getQos, setQos, notify } from '../lib/store.js'
+  import { THEME_STYLES, themeStyle, themeMode, setThemeStyle, setThemeMode } from '../lib/theme.js'
 
   // ---- save folders ----
   let baseDir = ''
@@ -119,6 +120,17 @@
       savingSec = false
     }
   }
+  // ---- appearance (themes) ----
+  // 5 styles × dark/light, all static CSS — switching costs nothing.
+
+  // Representative daisyUI colors per style for the picker swatches.
+  const SWATCH = {
+    slate: { primary: '#22c55e', base: '#1d232a', accent: '#71ccdf' },
+    ocean: { primary: '#38bdf8', base: '#0f172a', accent: '#60a5fa' },
+    forest: { primary: '#4ade80', base: '#171d1a', accent: '#2f7461' },
+    coffee: { primary: '#fbbd23', base: '#291c16', accent: '#d19a66' },
+    cyber: { primary: '#e879f9', base: '#1a1032', accent: '#7c3aed' },
+  }
 
 </script>
 
@@ -206,6 +218,46 @@
           {savingSec ? 'Saving…' : 'Save security'}
         </button>
       </div>
+    </div>
+  </section>
+
+  <!-- Appearance: 5 theme styles × dark/light -->
+  <section class="card border border-base-300 bg-base-200 shadow-sm lg:col-span-2">
+    <div class="card-body gap-3 p-5">
+      <h2 class="card-title text-base">Appearance <span class="badge badge-sm badge-ghost">5 styles · dark &amp; light</span></h2>
+      <p class="text-xs opacity-60">
+        Pick a color style, then switch between dark and light mode (the ☀️/🌙
+        button in the header does the same). Themes are plain CSS variables —
+        switching costs zero extra RAM and your choice is remembered in this browser.
+      </p>
+
+      <div class="flex flex-wrap items-center gap-2">
+        {#each THEME_STYLES as t (t.id)}
+          <button
+            class="btn btn-outline btn-sm gap-2 {$themeStyle === t.id ? 'btn-primary' : ''}"
+            on:click={() => setThemeStyle(t.id)}
+            title="{t.desc} — dark: {t.dark}, light: {t.light}"
+          >
+            <span class="flex items-center -space-x-1">
+              <span class="h-4 w-4 rounded-full border border-base-300" style="background:{SWATCH[t.id].base}" />
+              <span class="h-4 w-4 rounded-full border border-base-300" style="background:{SWATCH[t.id].primary}" />
+              <span class="h-4 w-4 rounded-full border border-base-300" style="background:{SWATCH[t.id].accent}" />
+            </span>
+            {t.label}
+            {#if $themeStyle === t.id}<span class="text-xs opacity-60">· active</span>{/if}
+          </button>
+        {/each}
+      </div>
+
+      <label class="flex w-fit cursor-pointer items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          class="toggle toggle-primary"
+          checked={$themeMode === 'light'}
+          on:change={(e) => setThemeMode(e.currentTarget.checked ? 'light' : 'dark')}
+        />
+        Light mode {$themeMode === 'light' ? '(on — bright)' : '(off — dark)'}
+      </label>
     </div>
   </section>
 

@@ -125,6 +125,8 @@ tracker / Backlog.
 | 5.6 | Task filtering: `?state=active|completed|all` | ✅ | list tests |
 | 5.7 | Pagination for large task lists | ⬜ | — |
 | 5.8 | OpenAPI spec generation | 💭 | — |
+| 5.9 | **`POST /api/inspect`** — IDM-style confirm probe: HEAD with SSRF/redirect checks → filename, size, accept-ranges, resolved save path; creates nothing. Also accepts `category:"auto"` (which 0.4.3 wrongly rejected with 400) | ✅ (v0.4.4) | `inspect_rejects_non_http_scheme`, `inspect_blocks_private_hosts_by_default`, `inspect_resolves_save_path_without_creating_task` + battery app3 |
+| 5.10 | **`POST /api/tasks/:id/reveal`** — open containing folder in the file manager (GO button); `POST /api/tasks/:id/open` — default app (Open button, finished only); `HYPRFETCH_FILE_OPENER` override; detached spawn + async reap | ✅ (v0.4.4) | `open_and_reveal_*` (4 tests) + battery app3 real download → GO/Open |
 
 **Verify:** `cargo test -p hyprfetch-api`
 
@@ -151,6 +153,11 @@ tracker / Backlog.
 | 7.7 | Per-segment mini-bars (expandable) | ⬜ | — |
 | 7.8 | Auth-aware UI (token prompt when daemon is non-loopback) | ⬜ | — |
 | 7.9 | Pause-all / resume-all buttons | ⬜ | — |
+| 7.10 | **IDM-style 2-step Add dialog**: step 2 confirm panel shows probed name/size/stream-type + exact save path before anything starts | ✅ (v0.4.4) | App.svelte confirm step; browser-verified (shot-confirm) |
+| 7.11 | **Floating download monitor**: bottom-right per-task streaming progress (bar/%/bytes/speed/totals); ⇣N bubble, hide + navbar toggle, persists in localStorage, zero extra connections | ✅ (v0.4.4) | FloatBar.svelte; browser-verified with QoS-throttled download |
+| 7.12 | **GO / Open buttons** next to finished files (Tasks rows + Dashboard recent), hover-reveal, touch-visible | ✅ (v0.4.4) | FileActions.svelte; battery app3 |
+| 7.13 | **5 theme styles × dark/light** (Slate/Ocean/Forest/Coffee/Cyber → 10 daisyUI themes, pure CSS vars, bundle ~45 KiB gz); Settings → Appearance card + header ☀️/🌙; first visit follows OS preference; persisted | ✅ (v0.4.4) | theme.js + tailwind.config; 10 theme CSS sets asserted in battery app3 |
+| 7.14 | **Tasks page redesign**: responsive rows replace the unreadable squeezed table (last columns were illegible); navbar collapses to icons on narrow screens; modal scrolls; zero horizontal overflow at 390 px | ✅ (v0.4.4) | Tasks.svelte/App.svelte; browser overflow checks |
 
 **Verify:** `cd crates/hyprfetch-api/ui && npm run build` then serve + click through.
 
@@ -536,3 +543,28 @@ old install instructions.
 | 25.5 | Standard Linux layout: new `packaging/icons/hyprfetch.svg` + `Icon=hyprfetch`; tarball ships desktop entry + icon; PKGBUILD/.rpm/.deb/install.sh install icon into hicolor paths; install.sh warns on pacman shadowing; uninstall removes icon too | ✅ | packaging/ + Docs/hyprfetch/install.sh |
 | 25.6 | Desktop-litter fix at the source: all Arch instructions (docs, release notes template, istias.tech pages) now build in a `mktemp -d` scratch dir; product page gained a "clean your Desktop leftovers" box | ✅ | docs/install.md, release.yml, Docs pages |
 | 25.7 | Bump 0.4.3, CHANGELOG, release cut via tag-per-release workflow, channel + Docs mirror verified | ✅ | see session log |
+
+## 26 · Session 11 — v0.4.4 Web UI: IDM confirm dialog, GO/Open desktop actions, 5 themes, responsive layout (owner request, APPLIED 2026-09-30)
+
+Owner asked (after 0.4.3 settled): keep the updater fast/working; build an
+IDM-like confirm popup (confirm download + confirm the save path), show
+streaming per-download progress in a show/hide floating panel; on finished
+downloads show a **GO** button (open the Linux file manager at the file's
+location, without opening the app) and an **Open** button (default app);
+fix the WebUI layout being "locked" for different screen sizes; add theme
+styles + dark/light support; fix the Tasks page's unreadable last columns
+by replacing them with correct buttons; record it all under the Web UI &
+API sections; ship as 0.4.4.
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 26.1 | `POST /api/inspect` + `Engine::inspect_url` (reuse download-path SSRF/UA) | ✅ | routes.rs; 3 unit tests; battery app3 B |
+| 26.2 | `POST /api/tasks/:id/reveal` + `/open` with existence/state guards, detached `xdg-open` spawn (`HYPRFETCH_FILE_OPENER` override) | ✅ | routes.rs `spawn_opener`; 5 unit tests |
+| 26.3 | Two-step Add modal (source → confirm: name, size, stream type, resolved path per URL; probe failure degrades gracefully) | ✅ | App.svelte; browser-verified |
+| 26.4 | FloatBar.svelte: streaming per-task panel + ⇣N bubble + hide + navbar toggle, localStorage-persisted, reuses WS stores | ✅ | browser-verified expand/collapse/hide cycle |
+| 26.5 | FileActions.svelte (GO/Open) in Tasks rows + Dashboard recent; `notify()` error path | ✅ | battery app3; hover screenshots |
+| 26.6 | Themes: 10 daisyUI themes (5 styles × dark/light), Settings → Appearance card, header ☀️/🌙, OS-preference default, localStorage persistence | ✅ | theme.js; 10 CSS sets asserted; coffee/synthwave/garden screenshots |
+| 26.7 | Tasks rows replace table (no more unreadable columns); navbar icon-collapse; fluid container; scrollable modal + tabs; 390 px zero-overflow | ✅ | Tasks.svelte/App.svelte; overflow checks on 4 pages |
+| 26.8 | **Bug found & fixed en route:** `category:"auto"` → 400 (the Add dialog's default option could never start a download in 0.4.2/0.4.3); `resolve_save_dir` now treats `"auto"` as extension sorting | ✅ | regression test `create_task_accepts_explicit_auto_category` |
+| 26.9 | Full test pass: cargo test 150 green, clippy clean, batteries 38+13+25, updater e2e 33/33, real-browser tour (themes/dialog/floatbar/mobile) | ✅ | scripts/test_hyprfetch_app3.sh + worklog |
+| 26.10 | Bump 0.4.4 + CHANGELOG [0.4.4] + docs/api.md (inspect, reveal, open) + release cut via tag-per-release; channel + Docs mirror verified | ✅ | session log |

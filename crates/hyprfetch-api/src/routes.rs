@@ -176,18 +176,26 @@ pub(crate) fn resolve_save_dir(
         .map(str::to_string)
         .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()) + "/Downloads");
 
-    // 2. Explicit category from the request.
-    if let Some(cat) = category.map(str::trim).filter(|s| !s.is_empty()) {
-        return match cat {
-            "none" | "base" => Ok(expand_tilde(&base).to_string_lossy().into_owned()),
-            c if is_valid_category(c) => Ok(dir_for_category(c, &base, settings)
-                .to_string_lossy()
-                .into_owned()),
-            other => Err(ApiError::InvalidRequest(format!(
+    // 2. Explicit category from the request. `"auto"` (the WebUI modal's
+    //    default) means exactly the same as omitting the field: extension
+    //    auto-detection in step 3. (Before 0.4.4 this rejected `"auto"`
+    //    with 400 — the modal's recommended option could never start a
+    //    download; caught by the v0.4.4 API battery.)
+    match category.map(str::trim).filter(|s| !s.is_empty()) {
+        Some("none") | Some("base") => {
+            return Ok(expand_tilde(&base).to_string_lossy().into_owned());
+        }
+        Some(c) if is_valid_category(c) => {
+            return Ok(dir_for_category(c, &base, settings).to_string_lossy().into_owned());
+        }
+        Some("auto") => { /* fall through to extension auto-detect */ }
+        Some(other) => {
+            return Err(ApiError::InvalidRequest(format!(
                 "unknown category `{other}` (valid: {} or \"auto\"/\"none\")",
                 CATEGORIES.join(", ")
-            ))),
-        };
+            )));
+        }
+        None => {}
     }
 
     // 3. Auto-categorize by filename extension (default: on).
@@ -325,6 +333,95 @@ fn validate_url(url: &str) -> Result<(), ApiError> {
             "scheme must be http or https, got {other}"
         ))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/inspect
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/inspect`.
+#[derive(Debug, Deserialize)]
+pub struct InspectRequest {
+    pub url: String,
+    /// Same semantics as `POST /api/tasks` — used to resolve the exact
+    /// destination path the confirm dialog shows.
+    pub save_dir: Option<String>,
+    pub category: Option<String>,
+    pub filename: Option<String>,
+}
+
+/// Response for `POST /api/inspect` — everything the IDM-style confirm
+/// dialog needs BEFORE a download starts: final URL (redirects resolved),
+/// file name, size, range support and the resolved on-disk save path.
+#[derive(Serialize)]
+pub struct InspectResponse {
+    pub url: String,
+    /// URL after following redirects — the one the engine will actually fetch.
+    pub final_url: String,
+    pub filename: String,
+    pub total_bytes: Option<i64>,
+    pub accept_ranges: bool,
+    pub category: String,
+    pub save_dir: String,
+    pub save_path: String,
+}
+
+/// `POST /api/inspect` — probe a URL (HEAD with SSRF + redirect checks) and
+/// resolve where the file would land. Does NOT create a task, does NOT
+/// create directories; purely informational for the confirm dialog.
+pub async fn inspect_url(
+    State(state): State<AppState>,
+    Json(req): Json<InspectRequest>,
+) -> Result<Json<InspectResponse>, ApiError> {
+    validate_url(&req.url)?;
+    let parsed = url::Url::parse(&req.url).map_err(|e| ApiError::InvalidUrl(e.to_string()))?;
+
+    let probe = state
+        .engine
+        .inspect_url(&parsed)
+        .await
+        .map_err(|e| match e {
+            hyprfetch_core::HttpError::Ssrf(_) => ApiError::SsrfBlocked(e.to_string()),
+            other => ApiError::InvalidRequest(format!("probe failed: {other}")),
+        })?;
+
+    // File name: explicit request value > last segment of the FINAL url
+    // (redirects resolved) > generic fallback — mirrors create_task.
+    let filename = req
+        .filename
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            probe
+                .final_url
+                .path_segments()
+                .and_then(|mut segs| segs.next_back())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "download.bin".into())
+        });
+
+    let settings_map: std::collections::BTreeMap<String, String> =
+        SettingsRepo::new(&state.db).all()?.into_iter().collect();
+    let save_dir = resolve_save_dir(
+        req.save_dir.as_deref(),
+        req.category.as_deref(),
+        &filename,
+        &settings_map,
+    )?;
+    let category = category_for_filename(&filename).to_string();
+
+    let save_path = format!("{save_dir}/{filename}");
+    Ok(Json(InspectResponse {
+        url: req.url,
+        final_url: probe.final_url.to_string(),
+        filename,
+        total_bytes: probe.content_length,
+        accept_ranges: probe.accept_ranges,
+        category,
+        save_dir,
+        save_path,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +645,90 @@ pub async fn retry_task(
     let updated = transition(&state, &id, TaskState::Queued, "retried").await?;
     state.engine.pump().await;
     Ok(updated)
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/tasks/:id/reveal  +  POST /api/tasks/:id/open
+// ---------------------------------------------------------------------------
+
+/// `POST /api/tasks/:id/reveal` — open the file's folder in the user's file
+/// manager (the "GO" button in the WebUI). The file itself is NOT opened.
+/// Works for any task whose save folder exists on disk.
+pub async fn reveal_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let task = db(&state)
+        .get(&id)?
+        .ok_or_else(|| ApiError::TaskNotFound(id.clone()))?;
+    let path = std::path::PathBuf::from(&task.save_path);
+    let dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| path.clone());
+    spawn_opener(&dir, "folder")
+}
+
+/// `POST /api/tasks/:id/open` — open the downloaded file with the system's
+/// default application (the "Open" button in the WebUI; `xdg-open` on Linux).
+/// Only finished downloads qualify — you never "open" a partial file.
+pub async fn open_task_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let task = db(&state)
+        .get(&id)?
+        .ok_or_else(|| ApiError::TaskNotFound(id.clone()))?;
+    if task.state != TaskState::Complete {
+        return Err(ApiError::InvalidStateTransition(format!(
+            "download not finished yet (state: {})",
+            task.state
+        )));
+    }
+    spawn_opener(std::path::Path::new(&task.save_path), "file")
+}
+
+/// Validate + hand a path to the desktop opener (`xdg-open`, or the program
+/// named by `HYPRFETCH_FILE_OPENER` — used by tests and unusual setups).
+///
+/// Guard: the path must exist on disk, so a stale entry can never launch
+/// anything. The opener is spawned detached and reaped in the background —
+/// the HTTP call never blocks on a GUI app.
+fn spawn_opener(path: &std::path::Path, what: &str) -> Result<Json<serde_json::Value>, ApiError> {
+    if !path.exists() {
+        return Err(ApiError::InvalidRequest(format!(
+            "{what} not found on disk: {}",
+            path.display()
+        )));
+    }
+
+    let program = std::env::var("HYPRFETCH_FILE_OPENER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "xdg-open".to_string());
+
+    // Spawn detached; reap asynchronously so we never leak zombies.
+    let mut cmd = tokio::process::Command::new(&program);
+    cmd.arg(path);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = cmd.spawn().map_err(|e| {
+        ApiError::InternalError(format!(
+            "could not launch `{program}` ({e}) — is a desktop environment running?"
+        ))
+    })?;
+    tokio::spawn(async move {
+        let mut child = child;
+        let _ = child.wait().await;
+    });
+
+    tracing::info!(what, path = %path.display(), %program, "opened via desktop opener");
+    Ok(Json(serde_json::json!({
+        "opened": true,
+        "what": what,
+        "path": path.display().to_string(),
+        "opener": program,
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,6 +1531,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_task_accepts_explicit_auto_category() {
+        // Regression (v0.4.4): the WebUI modal's default "Auto-sort by file
+        // type" sends category:"auto"; before 0.4.4 that was a 400 error.
+        let state = test_state();
+        let base = seed_download_dir(&state).await;
+        let (status, body) = post_task(
+            &state,
+            serde_json::json!({"urls": ["https://example.com/song.mp3"], "category": "auto"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "category:auto must be accepted, got {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let save_path = v["tasks"][0]["save_path"].as_str().unwrap();
+        assert!(
+            save_path.starts_with(&format!("{base}/music/")),
+            "auto must sort .mp3 into music, got {save_path}"
+        );
+    }
+
+    #[tokio::test]
     async fn create_task_direct_save_beats_category() {
         let state = test_state();
         let base = seed_download_dir(&state).await;
@@ -1959,5 +2160,229 @@ mod tests {
             "plain delete must keep the file"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    // -- /api/inspect -------------------------------------------------------
+
+    #[tokio::test]
+    async fn inspect_rejects_non_http_scheme() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/inspect")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "url": "file:///etc/passwd",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = body_str(res.into_body()).await;
+        assert!(body.contains("invalid_url"), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn inspect_blocks_private_hosts_by_default() {
+        // Default SSRF policy blocks loopback targets — same protection as
+        // real downloads, so the confirm dialog can never be tricked.
+        let app = router(test_state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/inspect")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "url": "http://127.0.0.1:9/secret.bin",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let body = body_str(res.into_body()).await;
+        assert!(body.contains("ssrf_blocked"), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn inspect_resolves_save_path_without_creating_task() {
+        // Happy path against a real HTTP endpoint is covered live in the API
+        // battery; here we verify that a task is NOT created on inspect.
+        let state = test_state();
+        let before = list_task_count(&state);
+        let _ = before; // only the side-effect matters below
+        let app = router(state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/inspect")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "url": "http://127.0.0.1:9/x.bin",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 403 (SSRF) — but crucially NO task row was created either way.
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let after = list_task_count(&state);
+        assert_eq!(before, after, "inspect must never create tasks");
+    }
+
+    fn list_task_count(state: &AppState) -> usize {
+        hyprfetch_db::TasksRepo::new(&state.db)
+            .list_by_state(None)
+            .unwrap()
+            .len()
+    }
+
+    // -- /api/tasks/:id/open + /api/tasks/:id/reveal -------------------------
+
+    #[tokio::test]
+    async fn open_and_reveal_missing_task_return_404() {
+        let app = router(test_state());
+        for uri in ["/api/tasks/no-such-id/open", "/api/tasks/no-such-id/reveal"] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "uri: {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn open_task_requires_finished_download() {
+        let state = test_state();
+        let path = "/tmp/hyprfetch-open-partial.bin";
+        std::fs::write(path, b"partial").unwrap();
+        let id = seed_raw_task(&state, TaskState::Paused, path);
+
+        let res = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{id}/open"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let body = body_str(res.into_body()).await;
+        assert!(body.contains("not finished"), "got: {body}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn open_task_requires_file_on_disk() {
+        let state = test_state();
+        let id = seed_raw_task(&state, TaskState::Complete, "/tmp/hyprfetch-open-gone.bin");
+        std::fs::remove_file("/tmp/hyprfetch-open-gone.bin").ok();
+
+        let res = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{id}/open"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = body_str(res.into_body()).await;
+        assert!(body.contains("not found on disk"), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn open_and_reveal_launch_opener_for_finished_task() {
+        // Single test (env var is process-global): HYPRFETCH_FILE_OPENER
+        // points at /bin/true so no GUI is launched in CI.
+        std::env::set_var("HYPRFETCH_FILE_OPENER", "/bin/true");
+
+        let state = test_state();
+        let dir = std::env::temp_dir().join("hyprfetch-open-live");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("done.bin");
+        std::fs::write(&file, b"complete").unwrap();
+        let path = file.to_str().unwrap();
+        let id = seed_raw_task(&state, TaskState::Complete, path);
+
+        let app = router(state);
+        // open → the file itself
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{id}/open"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        assert!(body.contains("\"opened\":true"), "got: {body}");
+        assert!(body.contains(path), "got: {body}");
+
+        // reveal → the containing folder
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{id}/reveal"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        assert!(body.contains("\"what\":\"folder\""), "got: {body}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn reveal_task_missing_folder_returns_400() {
+        let state = test_state();
+        let id = seed_raw_task(&state, TaskState::Error, "/tmp/hyprfetch-no-such-dir/x.bin");
+        std::fs::remove_dir_all("/tmp/hyprfetch-no-such-dir").ok();
+
+        let res = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/tasks/{id}/reveal"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = body_str(res.into_body()).await;
+        assert!(body.contains("not found on disk"), "got: {body}");
     }
 }

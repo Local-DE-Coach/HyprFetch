@@ -62,6 +62,36 @@ export async function deleteTaskWithFile(id) {
   return handle(await fetch(`/api/tasks/${id}?delete_file=true`, { method: 'DELETE' }))
 }
 
+// ---- file actions (desktop integration) ----------------------------------
+
+/// Open the downloaded file with the system default app ("Open" button).
+export async function openTaskFile(id) {
+  return handle(await fetch(`/api/tasks/${id}/open`, { method: 'POST' }))
+}
+
+/// Open the containing folder in the system file manager ("GO" button).
+export async function revealTaskFolder(id) {
+  return handle(await fetch(`/api/tasks/${id}/reveal`, { method: 'POST' }))
+}
+
+// ---- download info probe (confirm dialog) --------------------------------
+
+/// Probe a URL before creating a task: final URL, size, accept-ranges and
+/// the resolved save path. Powers the IDM-style confirm popup.
+export async function inspectUrl({ url, category, saveDir, filename }) {
+  const res = await fetch('/api/inspect', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      url,
+      category: category || undefined,
+      save_dir: saveDir || undefined,
+      filename: filename || undefined,
+    }),
+  })
+  return handle(res)
+}
+
 export async function getQos() {
   return handle(await fetch('/api/qos'))
 }

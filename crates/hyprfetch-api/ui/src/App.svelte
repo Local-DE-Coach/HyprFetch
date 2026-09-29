@@ -1,17 +1,22 @@
 <script>
-  // HyprFetch shell: navbar with hash routing, global toast + Add modal.
+  // HyprFetch shell: navbar with hash routing, global toast, IDM-style
+  // two-step "Add download" confirm popup and the floating progress panel.
   // Pages: Dashboard / Tasks / Settings / Updates (see lib/router.js).
   import { onMount, onDestroy } from 'svelte'
   import { page, PAGES, nav } from './lib/router.js'
   import { fmtBytes, fmtSpeed, fmtUptime } from './lib/format.js'
+  import { themeMode, setThemeMode } from './lib/theme.js'
   import {
     active, finished, globalSpeed, activeCount, serverInfo, wsConnected,
     toast, showAdd, initApp, addDownload, refreshServer, categories,
+    floatPanel, setFloatPanel, notify,
   } from './lib/store.js'
+  import { inspectUrl } from './api.js'
   import Dashboard from './pages/Dashboard.svelte'
   import Tasks from './pages/Tasks.svelte'
   import Settings from './pages/Settings.svelte'
   import Updates from './pages/Updates.svelte'
+  import FloatBar from './lib/FloatBar.svelte'
 
   let ws
   onMount(() => {
@@ -21,7 +26,10 @@
   })
   onDestroy(() => { try { ws?.close() } catch (_) {} })
 
-  // ---- Add modal state ----
+  // ---- Add modal state (two steps, IDM-style) ----
+  // step 1: source (urls + destination + options)
+  // step 2: confirm (probed size + resolved save path per URL)
+  let step = 1
   let urlText = ''
   let category = 'auto'
   let saveDir = ''
@@ -29,28 +37,69 @@
   let segments = 8
   let addError = ''
   let adding = false
+  let inspecting = false
+  let confirmed = []   // inspect results for the confirm step
 
-  async function submitAdd() {
+  function resetAdd() {
+    step = 1
+    urlText = ''
+    saveDir = ''
+    filename = ''
+    category = 'auto'
     addError = ''
-    const urls = urlText.split('\n').map((s) => s.trim()).filter(Boolean)
+    adding = false
+    inspecting = false
+    confirmed = []
+  }
+
+  function urlsList() {
+    return urlText.split('\n').map((s) => s.trim()).filter(Boolean)
+  }
+
+  async function goConfirm() {
+    addError = ''
+    const urls = urlsList()
     if (urls.length === 0) {
       addError = 'enter at least one URL'
       return
     }
+    inspecting = true
+    try {
+      // Probe each URL (final name, size, resolved save path). A failed
+      // probe never blocks the download — we fall back to what we know.
+      const results = await Promise.all(urls.slice(0, 20).map(async (url) => {
+        try {
+          return await inspectUrl({
+            url,
+            category: category === 'auto' ? undefined : category,
+            saveDir: saveDir.trim() || undefined,
+            filename: filename.trim() || undefined,
+          })
+        } catch (e) {
+          return { url, probe_error: e.message }
+        }
+      }))
+      confirmed = results
+      step = 2
+    } finally {
+      inspecting = false
+    }
+  }
+
+  async function submitAdd() {
+    addError = ''
     adding = true
     try {
       await addDownload({
-        urls,
-        category: category || undefined,
+        urls: urlsList(),
+        category: category === 'auto' ? undefined : category,
         saveDir: saveDir.trim() || undefined,
         filename: filename.trim() || undefined,
         segments,
       })
       showAdd.set(false)
-      urlText = ''
-      saveDir = ''
-      filename = ''
-      category = 'auto'
+      resetAdd()
+      notify('download started ✓')
     } catch (e) {
       addError = e.message
     } finally {
@@ -61,30 +110,48 @@
   const catIcons = { video: '🎬', pictures: '🖼', music: '🎵', compress: '📦', documents: '📄', apps: '💽', other: '📁' }
 </script>
 
-<header class="navbar sticky top-0 z-20 h-14 min-h-0 border-b border-base-300 bg-base-100/90 backdrop-blur">
-  <div class="flex items-center gap-2 px-2">
+<header class="navbar sticky top-0 z-20 h-14 min-h-0 border-b border-base-300 bg-base-100/90 px-2 backdrop-blur">
+  <div class="flex min-w-0 items-center gap-1.5">
     <span class="text-xl text-primary">⇣</span>
-    <h1 class="text-base font-semibold tracking-wide">HyprFetch</h1>
+    <h1 class="hidden min-[420px]:inline text-base font-semibold tracking-wide">HyprFetch</h1>
     <span
       class="badge badge-sm {wsConnected ? 'badge-success' : 'badge-ghost'} uppercase"
       title="websocket status"
-    >{wsConnected ? 'live' : 'offline'}</span>
+    >{wsConnected ? 'live' : 'off'}</span>
   </div>
 
-  <!-- page nav -->
-  <nav class="flex items-center gap-1 px-2">
+  <!-- page nav: icons only on narrow screens -->
+  <nav class="flex items-center gap-0.5 overflow-x-auto px-1 sm:gap-1 sm:px-2">
     {#each PAGES as p (p.id)}
       <button
-        class="btn btn-ghost btn-sm {$page === p.id ? 'btn-active' : ''}"
+        class="btn btn-ghost btn-sm px-2 {$page === p.id ? 'btn-active' : ''}"
+        title={p.label}
         on:click={() => nav(p.id)}
-      >{p.icon} {p.label}</button>
+      >{p.icon} <span class="hidden md:inline">{p.label}</span></button>
     {/each}
   </nav>
 
-  <div class="flex items-center gap-3 px-2">
-    <span class="font-mono text-sm text-secondary" title="aggregate download speed">{fmtSpeed($globalSpeed)}</span>
-    <span class="text-xs opacity-60">{$activeCount} active</span>
-    <button class="btn btn-primary btn-sm" on:click={() => showAdd.set(true)}>+ Add</button>
+  <div class="flex items-center gap-1.5 sm:gap-3">
+    <span class="hidden font-mono text-sm text-secondary md:inline" title="aggregate download speed">{fmtSpeed($globalSpeed)}</span>
+    <span class="hidden text-xs opacity-60 sm:inline">{$activeCount} active</span>
+
+    <!-- floating progress panel quick toggle -->
+    {#if $active.length > 0}
+      <button
+        class="btn btn-ghost btn-sm px-2"
+        title={$floatPanel === 'hide' ? 'Show download progress panel' : 'Hide download progress panel'}
+        on:click={() => setFloatPanel($floatPanel === 'hide' ? 'show' : 'hide')}
+      >⇣<span class="badge badge-sm badge-primary">{$active.length}</span></button>
+    {/if}
+
+    <!-- dark / light quick toggle -->
+    <button
+      class="btn btn-ghost btn-sm px-2"
+      title={$themeMode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+      on:click={() => setThemeMode($themeMode === 'dark' ? 'light' : 'dark')}
+    >{$themeMode === 'dark' ? '☀️' : '🌙'}</button>
+
+    <button class="btn btn-primary btn-sm" on:click={() => { resetAdd(); showAdd.set(true) }}>+ Add</button>
   </div>
 </header>
 
@@ -94,7 +161,7 @@
   </div>
 {/if}
 
-<main class="mx-auto max-w-5xl px-5 pb-16 pt-4">
+<main class="mx-auto w-full max-w-6xl px-3 pb-16 pt-4 sm:px-5">
   {#if $page === 'dashboard'}
     <Dashboard />
   {:else if $page === 'tasks'}
@@ -111,45 +178,91 @@
   uptime {fmtUptime($serverInfo.uptime_secs)}
 </footer>
 
+<!-- floating per-download progress (IDM-style transfer monitor) -->
+<FloatBar />
+
 {#if $showAdd}
   <div class="modal modal-open" on:click|self={() => showAdd.set(false)}>
-    <form class="modal-box max-w-md" on:submit|preventDefault={submitAdd}>
-      <h3 class="mb-3 text-lg font-semibold">Add download</h3>
-      <div class="grid gap-3">
-        <label class="grid gap-1.5 text-sm">
-          <span>URLs <span class="opacity-50">(one per line)</span></span>
-          <textarea rows="4" class="textarea textarea-bordered" bind:value={urlText} placeholder="https://example.com/movie.mkv" />
-        </label>
-        <label class="grid gap-1.5 text-sm">
-          <span>Save into</span>
-          <select class="select select-bordered" bind:value={category}>
-            <option value="auto">Auto-sort by file type (recommended)</option>
-            <option value="none">Base folder only (no subfolder)</option>
-            {#each $categories.categories as c (c.name)}
-              <option value={c.name}>{catIcons[c.name]} {c.name} — {c.dir}</option>
+    <div class="modal-box max-h-[92vh] max-w-lg overflow-y-auto">
+      {#if step === 1}
+        <form on:submit|preventDefault={goConfirm}>
+          <h3 class="mb-3 text-lg font-semibold">Add download</h3>
+          <div class="grid gap-3">
+            <label class="grid gap-1.5 text-sm">
+              <span>URLs <span class="opacity-50">(one per line)</span></span>
+              <textarea rows="4" class="textarea textarea-bordered" bind:value={urlText} placeholder="https://example.com/movie.mkv" />
+            </label>
+            <label class="grid gap-1.5 text-sm">
+              <span>Save into</span>
+              <select class="select select-bordered" bind:value={category}>
+                <option value="auto">Auto-sort by file type (recommended)</option>
+                <option value="none">Base folder only (no subfolder)</option>
+                {#each $categories.categories as c (c.name)}
+                  <option value={c.name}>{catIcons[c.name]} {c.name} — {c.dir}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="grid gap-1.5 text-sm">
+              <span>Direct save folder <span class="opacity-50">(optional — overrides the category above)</span></span>
+              <input type="text" class="input input-bordered font-mono" bind:value={saveDir} placeholder="~/Downloads" />
+            </label>
+            <label class="grid gap-1.5 text-sm">
+              <span>Filename <span class="opacity-50">(optional)</span></span>
+              <input type="text" class="input input-bordered" bind:value={filename} placeholder="from the URL" />
+            </label>
+            <label class="grid gap-1.5 text-sm">
+              <span>Segments</span>
+              <input type="number" min="1" max="32" class="input input-bordered w-28" bind:value={segments} />
+            </label>
+            {#if addError}<p class="text-sm text-error">{addError}</p>{/if}
+          </div>
+          <div class="modal-action">
+            <button type="button" class="btn btn-sm" on:click={() => showAdd.set(false)}>Cancel</button>
+            <button type="submit" class="btn btn-primary btn-sm" disabled={inspecting}>
+              {inspecting ? 'Checking…' : 'Next — confirm ▸'}
+            </button>
+          </div>
+        </form>
+      {:else}
+        <!-- STEP 2: confirm before anything starts (like IDM's file-info dialog) -->
+        <div>
+          <h3 class="mb-1 text-lg font-semibold">Confirm download</h3>
+          <p class="mb-3 text-xs opacity-60">
+            {confirmed.length} file{confirmed.length === 1 ? '' : 's'} · check the name, size and exact save path, then start.
+          </p>
+          <div class="grid gap-2">
+            {#each confirmed as c, i (i)}
+              <div class="rounded-box border border-base-300 bg-base-200/60 p-3 text-sm">
+                {#if c.probe_error}
+                  <div class="mb-1 truncate font-medium" title={c.url}>{c.url}</div>
+                  <div class="text-xs text-warning">couldn't probe: {c.probe_error} — it will still download normally</div>
+                {:else}
+                  <div class="mb-1 flex items-center gap-2">
+                    <span class="text-base">{catIcons[c.category] ?? '📁'}</span>
+                    <span class="min-w-0 flex-1 truncate font-medium" title={c.filename}>{c.filename}</span>
+                    <span class="badge badge-sm badge-ghost">{c.category}</span>
+                  </div>
+                  <div class="grid gap-0.5 font-mono text-xs opacity-70">
+                    <div class="truncate" title={c.url}>from {c.final_url}</div>
+                    <div class="truncate" title={c.save_path}>to&nbsp;&nbsp;{c.save_path}</div>
+                    <div>
+                      size {c.total_bytes != null ? fmtBytes(c.total_bytes) : 'unknown'}
+                      · {c.accept_ranges ? 'multi-segment ✓' : 'single stream'}
+                    </div>
+                  </div>
+                {/if}
+              </div>
             {/each}
-          </select>
-        </label>
-        <label class="grid gap-1.5 text-sm">
-          <span>Direct save folder <span class="opacity-50">(optional — overrides the category above)</span></span>
-          <input type="text" class="input input-bordered font-mono" bind:value={saveDir} placeholder="~/Downloads" />
-        </label>
-        <label class="grid gap-1.5 text-sm">
-          <span>Filename <span class="opacity-50">(optional)</span></span>
-          <input type="text" class="input input-bordered" bind:value={filename} placeholder="from the URL" />
-        </label>
-        <label class="grid gap-1.5 text-sm">
-          <span>Segments</span>
-          <input type="number" min="1" max="32" class="input input-bordered w-28" bind:value={segments} />
-        </label>
-        {#if addError}<p class="text-sm text-error">{addError}</p>{/if}
-      </div>
-      <div class="modal-action">
-        <button type="button" class="btn btn-sm" on:click={() => showAdd.set(false)}>Cancel</button>
-        <button type="submit" class="btn btn-primary btn-sm" disabled={adding}>
-          {adding ? 'Adding…' : 'Download'}
-        </button>
-      </div>
-    </form>
+            {#if addError}<p class="text-sm text-error">{addError}</p>{/if}
+          </div>
+          <div class="modal-action">
+            <button type="button" class="btn btn-sm" on:click={() => (step = 1)} disabled={adding}>◂ Back</button>
+            <button type="button" class="btn btn-primary btn-sm" disabled={adding} on:click={submitAdd}>
+              {adding ? 'Starting…' : 'Start download ▶'}
+            </button>
+          </div>
+        </div>
+      {/if}
+    </div>
   </div>
 {/if}

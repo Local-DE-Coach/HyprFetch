@@ -8,6 +8,68 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-09-30 (Web UI: confirm-before-download, desktop GO/Open actions, themes)
+
+### Added — Web UI & API (owner request, "like IDM on Windows")
+- **IDM-style confirm popup before every download.** The Add dialog is now
+  two steps: enter the URL(s), then a **Confirm download** panel shows, per
+  file, the probed file name, real size (HTTP HEAD with SSRF + redirect
+  checks), single- vs multi-segment support and the **exact resolved save
+  path** — nothing starts until you press *Start download*. Powered by the
+  new `POST /api/inspect` endpoint (uses the same SSRF policy and user agent
+  as real downloads; probe failure never blocks the download).
+- **Floating download monitor (per-download streaming progress).** A compact
+  bottom-right panel streams live progress for every active download (bar,
+  percent, bytes, per-task speed, totals) — collapsed to a `⇣N` bubble, and
+  can be hidden entirely from the panel or the header `⇣N` button. The
+  choice persists in localStorage; it reuses the existing WebSocket stores
+  (zero extra connections, zero extra RAM).
+- **GO / Open desktop actions on downloaded files** (browser control panel
+  meets the Linux desktop):
+  - **GO** — opens the file's folder in your file manager at the right
+    location, *without* launching the file (`POST /api/tasks/:id/reveal`);
+  - **Open** — opens the file with its default Linux application via
+    `xdg-open` (`POST /api/tasks/:id/open`, finished downloads only).
+    Buttons appear next to the filename on hover in the Tasks rows and the
+    Dashboard's recent list (always visible on touch screens). Override the
+    opener program with `HYPRFETCH_FILE_OPENER`.
+- **5 theme styles × dark & light mode.** Slate (the classic look), Ocean,
+  Forest, Coffee and Cyber — each with a dark and a light variant, chosen on
+  the new Settings → Appearance card (color swatches) or the header ☀️/🌙
+  button; first visit follows the browser preference and the choice is
+  remembered per browser. Themes are plain CSS variables compiled once —
+  switching costs zero extra RAM (bundle stays ~45 KiB gzipped).
+
+### Fixed
+- **Tasks page columns were unreadable on smaller/odd screen sizes** (the
+  wide table squeezed its last columns into an unusable smear). The page now
+  uses responsive rows: filename + badges on line one, save path + date as a
+  secondary mono line, progress + size + speed below — plus the new GO/Open
+  and lifecycle buttons. Nothing is cut off at any width.
+- **The layout no longer feels "locked" on different screen sizes**: the
+  navbar collapses to icons on narrow screens (speed/count hidden, full
+  labels from `md` up), the main container fluidly resizes, the Add modal
+  scrolls instead of clipping, and the Tasks filter tabs scroll instead of
+  overflowing. Verified: zero horizontal overflow at 390 px.
+- **`category: "auto"` was rejected with 400** when a task was created with
+  the Add dialog's default option (the *recommended* "Auto-sort by file
+  type") — `resolve_save_dir` forgot to treat `"auto"` like an omitted
+  category, so the modal's default could never start a download. Caught by
+  the v0.4.4 API battery; `POST /api/tasks` and `POST /api/inspect` both
+  accept it now.
+
+### Tests
+- 8 new handler tests (inspect scheme/SSRF/no-side-effect; open/reveal 404,
+  409 unfinished, missing file, real spawn via `HYPRFETCH_FILE_OPENER`);
+  `category:"auto"` regression test. `cargo test --workspace`: 150 green.
+- New live battery `scripts/test_hyprfetch_app3.sh` — 25 checks (fresh
+  bundle, 10 theme CSS sets, inspect fields, auto fix, real download →
+  GO/Open, WS upgrade). Legacy batteries refreshed to dynamic asset names:
+  38 + 13 + 25 = 76 checks green; updater e2e still 33/33.
+- Real-browser verification: every page rendered error-free; themes,
+  confirm dialog, floatbar hide/show cycle and mobile layout (390 px)
+  screenshot-verified.
+
 ## [0.4.3] — 2026-09-30 (system installs update cleanly — no more "permission denied")
 
 ### Fixed

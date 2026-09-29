@@ -150,6 +150,15 @@ pub fn router_with_token(state: AppState, token: impl Into<Option<String>>) -> R
             axum::routing::post(routes::retry_task),
         )
         .route(
+            "/api/tasks/{id}/open",
+            axum::routing::post(routes::open_task_file),
+        )
+        .route(
+            "/api/tasks/{id}/reveal",
+            axum::routing::post(routes::reveal_task),
+        )
+        .route("/api/inspect", axum::routing::post(routes::inspect_url))
+        .route(
             "/api/qos",
             axum::routing::get(routes::get_qos).put(routes::set_qos),
         )

@@ -153,6 +153,17 @@ impl Engine {
         }
     }
 
+    /// Probe a URL for download metadata without creating a task — powers
+    /// the WebUI "confirm download" dialog (IDM-style file-info popup).
+    /// Uses the same SSRF policy, redirect handling and user agent as real
+    /// downloads, so what you confirm is exactly what the engine will fetch.
+    pub async fn inspect_url(
+        &self,
+        url: &url::Url,
+    ) -> Result<crate::http_client::ProbeResult, crate::http_client::HttpError> {
+        self.http.probe(url, None).await
+    }
+
     /// Subscribe to the engine event bus (`task:progress`, `task:state`,
     /// `global:speed`). Each subscriber gets its own live stream.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EngineEvent> {

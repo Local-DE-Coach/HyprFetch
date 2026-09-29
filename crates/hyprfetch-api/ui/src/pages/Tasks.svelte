@@ -1,8 +1,13 @@
 <script>
   // Tasks — every download task with status filters, search and per-task
-  // controls (pause / resume / retry / cancel / remove).
+  // controls. Responsive rows (not a wide table) so nothing is ever cut
+  // off or unreadable on any screen size:
+  //   row line 1: icon + filename + [GO] [Open] + category/state + actions
+  //   row line 2: save path + added date (mono, truncated, full text on hover)
+  //   row line 3: progress + size + speed
   import { fmtBytes, fmtSpeed, fmtPct, fmtDate, stateLabel, badgeClass, categoryIcon } from '../lib/format.js'
   import { active, finished, doTaskAction, showAdd } from '../lib/store.js'
+  import FileActions from '../lib/FileActions.svelte'
 
   const FILTERS = [
     { id: 'all', label: 'All' },
@@ -38,7 +43,7 @@
 </script>
 
 <div class="mb-3 flex flex-wrap items-center gap-2">
-  <div class="tabs tabs-boxed bg-base-200">
+  <div class="tabs tabs-boxed max-w-full overflow-x-auto bg-base-200">
     {#each FILTERS as f (f.id)}
       <button class="tab {filter === f.id ? 'tab-active' : ''}" on:click={() => (filter = f.id)}>
         {f.label}
@@ -48,7 +53,7 @@
   </div>
   <input
     type="search"
-    class="input input-bordered input-sm w-44"
+    class="input input-bordered input-sm w-40 sm:w-44"
     placeholder="Search name or URL…"
     bind:value={query}
   />
@@ -61,66 +66,67 @@
     No tasks {filter === 'all' ? 'yet' : `in “${FILTERS.find((f) => f.id === filter)?.label}”`}.
   </p>
 {:else}
-  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-200 shadow-sm">
-    <table class="table table-zebra table-sm">
-      <thead>
-        <tr>
-          <th>File</th>
-          <th class="hidden md:table-cell">Category</th>
-          <th>Status</th>
-          <th class="hidden sm:table-cell">Progress</th>
-          <th class="text-right">Speed</th>
-          <th class="hidden lg:table-cell">Saved to</th>
-          <th class="hidden xl:table-cell text-right">Added</th>
-          <th class="text-right">Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each filtered as t (t.id)}
-          <tr>
-            <td>
-              <div class="max-w-[180px] truncate font-medium" title={t.url}>{t.filename}</div>
-              {#if t.error}<div class="max-w-[180px] truncate text-xs text-error" title={t.error}>{t.error}</div>{/if}
-            </td>
-            <td class="hidden md:table-cell">
-              <span class="badge badge-sm badge-ghost">{categoryIcon(t.category)} {t.category}</span>
-            </td>
-            <td><span class="badge badge-sm {badgeClass(t.state)} uppercase">{stateLabel(t.state)}</span></td>
-            <td class="hidden sm:table-cell">
-              <div class="flex items-center gap-2">
-                <progress
-                  class="progress {t.state === 'error' ? 'progress-error' : t.state === 'paused' ? 'progress-warning' : t.state === 'complete' ? 'progress-success' : 'progress-primary'} h-1.5 w-24"
-                  value={fmtPct(t)} max="100" />
-                <span class="font-mono text-xs opacity-60">{fmtPct(t)}%</span>
-              </div>
-              <div class="font-mono text-xs opacity-50">{fmtBytes(t.downloaded_bytes)} / {fmtBytes(t.total_bytes)}</div>
-            </td>
-            <td class="text-right font-mono text-xs text-secondary">{t.state === 'downloading' ? fmtSpeed(t._speed) : '—'}</td>
-            <td class="hidden max-w-[220px] lg:table-cell">
-              <span class="truncate font-mono text-xs opacity-50" title={t.save_path}>{t.save_path}</span>
-            </td>
-            <td class="hidden xl:table-cell text-right font-mono text-xs opacity-50">{fmtDate(t.created_at)}</td>
-            <td class="text-right">
-              <div class="flex justify-end gap-1">
-                {#if t.state === 'downloading' || t.state === 'queued'}
-                  <button class="btn btn-xs" on:click={() => doTaskAction(t, 'pause')}>Pause</button>
-                {:else if t.state === 'paused'}
-                  <button class="btn btn-xs btn-primary" on:click={() => doTaskAction(t, 'resume')}>Resume</button>
-                {:else if t.state === 'error'}
-                  <button class="btn btn-xs" on:click={() => doTaskAction(t, 'retry')}>Retry</button>
-                {/if}
-                {#if t.state !== 'complete'}
-                  <button class="btn btn-xs btn-ghost" title="cancel" on:click={() => doTaskAction(t, 'cancel')}>✗</button>
-                {/if}
-                <button
-                  class="btn btn-xs btn-ghost text-error"
-                  title="remove task + file"
-                  on:click={() => doTaskAction(t, 'delete-file')}>🗑</button>
-              </div>
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
+  <div class="divide-y divide-base-300 rounded-box border border-base-300 bg-base-200 shadow-sm">
+    {#each filtered as t (t.id)}
+      <div class="group p-3 transition-colors hover:bg-base-300/40">
+        <!-- line 1: file + hover file-actions + lifecycle actions -->
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-base" title={t.category}>{categoryIcon(t.category)}</span>
+          <span class="max-w-[16rem] truncate text-sm font-semibold sm:max-w-[22rem]" title={t.url}>{t.filename}</span>
+
+          <!-- GO / Open — next to the file, appear on hover -->
+          <FileActions task={t} show={t.state === 'complete'} />
+
+          <span class="badge badge-sm badge-ghost max-sm:hidden">{categoryIcon(t.category)} {t.category}</span>
+          <span class="badge badge-sm {badgeClass(t.state)} uppercase">{stateLabel(t.state)}</span>
+          <span class="grow" />
+
+          <div class="flex items-center gap-1">
+            {#if t.state === 'downloading' || t.state === 'queued'}
+              <button class="btn btn-xs" on:click={() => doTaskAction(t, 'pause')}>Pause</button>
+            {:else if t.state === 'paused'}
+              <button class="btn btn-xs btn-primary" on:click={() => doTaskAction(t, 'resume')}>Resume</button>
+            {:else if t.state === 'error'}
+              <button class="btn btn-xs btn-primary" on:click={() => doTaskAction(t, 'retry')}>Retry</button>
+            {:else if t.state === 'complete'}
+              <!-- space holder: GO/Open already sit next to the filename -->
+            {/if}
+            {#if t.state !== 'complete'}
+              <button class="btn btn-ghost btn-xs" title="cancel" on:click={() => doTaskAction(t, 'cancel')}>✗</button>
+            {/if}
+            <button
+              class="btn btn-ghost btn-xs text-error"
+              title="remove task + file"
+              on:click={() => doTaskAction(t, 'delete-file')}>🗑</button>
+          </div>
+        </div>
+
+        <!-- line 2: where + when (full values on hover / tap) -->
+        <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-xs opacity-50">
+          <span class="min-w-0 max-w-full truncate" title={t.save_path}>→ {t.save_path}</span>
+          <span title="added {fmtDate(t.created_at)}">added {fmtDate(t.created_at)}</span>
+        </div>
+
+        <!-- line 3: progress -->
+        {#if t.state === 'downloading' || t.state === 'queued' || t.state === 'paused'}
+          <div class="mt-1.5 flex items-center gap-2">
+            <progress
+              class="progress {t.state === 'paused' ? 'progress-warning' : 'progress-primary'} h-1.5 grow"
+              value={fmtPct(t)} max="100" />
+            <span class="font-mono text-xs opacity-60">{fmtPct(t)}%</span>
+          </div>
+          <div class="mt-0.5 flex items-center gap-3 font-mono text-xs opacity-50">
+            <span>{fmtBytes(t.downloaded_bytes)} / {fmtBytes(t.total_bytes)}</span>
+            <span class="text-secondary">{t.state === 'downloading' && t._speed ? fmtSpeed(t._speed) : ''}</span>
+          </div>
+        {:else if t.state === 'complete'}
+          <div class="mt-1 font-mono text-xs opacity-50">{fmtBytes(t.downloaded_bytes)} on disk</div>
+        {/if}
+
+        {#if t.error}
+          <div class="mt-1 max-w-full truncate text-xs text-error" title={t.error}>{t.error}</div>
+        {/if}
+      </div>
+    {/each}
   </div>
 {/if}

@@ -7,6 +7,7 @@
     active, finished, globalSpeed, activeCount, categories, showAdd,
   } from '../lib/store.js'
   import TaskCard from '../lib/TaskCard.svelte'
+  import FileActions from '../lib/FileActions.svelte'
 
   $: stats = {
     downloading: $active.filter((t) => t.state === 'downloading').length,
@@ -110,15 +111,17 @@
     <p class="rounded-box bg-base-200/40 p-4 text-sm opacity-60">No finished downloads yet.</p>
   {:else}
     {#each recent as t (t.id)}
-      <article class="card mb-1.5 border border-base-300 bg-base-200/70 shadow-sm">
+      <article class="card group mb-1.5 border border-base-300 bg-base-200/70 shadow-sm">
         <div class="card-body flex-row items-center gap-2 p-3">
-          <span class="max-w-[35%] truncate text-sm font-medium" title={t.url}>{t.filename}</span>
-          <span class="badge badge-sm badge-ghost">{categoryIcon(t.category)} {t.category}</span>
+          <span class="max-w-[30%] truncate text-sm font-medium sm:max-w-[35%]" title={t.url}>{t.filename}</span>
+          <!-- GO / Open — hover reveals the desktop actions next to the file -->
+          <FileActions task={t} show={t.state === 'complete'} />
+          <span class="badge badge-sm badge-ghost max-sm:hidden">{categoryIcon(t.category)} {t.category}</span>
           <span class="badge badge-sm {badgeClass(t.state)} uppercase">{stateLabel(t.state)}</span>
           <span class="grow" />
           <span class="hidden font-mono text-xs opacity-50 sm:inline">{fmtDate(t.completed_at ?? t.updated_at)}</span>
           <span class="font-mono text-xs opacity-70">{fmtBytes(t.downloaded_bytes)}</span>
-          <progress class="progress progress-success h-1 w-16" value={fmtPct(t)} max="100" />
+          <progress class="progress progress-success h-1 w-16 max-sm:hidden" value={fmtPct(t)} max="100" />
         </div>
       </article>
     {/each}
