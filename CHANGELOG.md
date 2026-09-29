@@ -6,6 +6,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
+## [Unreleased] — install/uninstall hardening around the channel
+
+### Added
+- **One-line installer** (`https://istias.tech/hyprfetch/updates/install.sh`,
+  served by the Docs-side mirror): POSIX sh, detects CPU + libc, resolves
+  `latest.json`, sha256-verifies the tarball, installs to
+  `/usr/local/bin` (or `~/.local/bin` without root) and keeps the previous
+  binary as `.old`; `--uninstall [--purge]` stops the daemon and removes
+  binary/desktop entry (data only with `--purge`; downloads never touched).
+  E2E-tested against the live channel: install → `--version` →
+  `update --check` → uninstall round-trip.
+- istias.tech pages: "Four ways to get HyprFetch" (script / native package /
+  manual tarball / browser) and a per-platform **Uninstall** section; the
+  version panel now also lists the server-hosted `.deb`, `.rpm` and
+  `PKGBUILD`.
+
+### Changed
+- Every install/update command on the pages and in the release notes now
+  points at the istias.tech channel — the last GitHub download links are
+  gone (Arch PKGBUILD included).
+- `packaging/arch/PKGBUILD.bin.template`: fixed `_srcdir` to match the clean
+  `hyprfetch-<ver>-linux-x64` archive root (the old triple name made
+  `makepkg` fail) and moved `source=` from GitHub releases to the
+  sha256-verified channel; the Docs mirror generates the server-side
+  PKGBUILD from the same template + manifest, so the channel copy can never
+  regress.
+- `hyprfetch-mirror.yml` self-heals: it re-mirrors when the served version's
+  packages / PKGBUILD / install.sh are missing, instead of skipping whenever
+  `latest.json` matches.
+- v0.4.0 release assets and notes were regenerated in place (dispatched
+  re-run) so the existing release ships the fixed PKGBUILD and server links.
+
 ## [0.4.0] — 2026-09-29 (updates served only by our own server + new docs site)
 
 ### Changed — GitHub fully removed from the update flow (owner request)

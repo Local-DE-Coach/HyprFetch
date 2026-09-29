@@ -406,3 +406,24 @@ they exercised no longer exist (superseded by 19.1).
 - Wildcard/mirror URL sets (aria2-style multi-mirror)
 - Proxy support (HTTP/SOCKS5 per task or global)
 - Bandwidth scheduler (time-of-day QoS profiles)
+
+## 20 · Session 6 — install/uninstall hardening around the channel (2026-09-29)
+
+Owner feedback after the v0.4.0 deploy went green: the pages' Arch command
+still pointed at GitHub, there was no uninstall guidance, and users want
+several download paths (link / curl / one-line terminal install).
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 20.1 | `hyprfetch/install.sh` (Docs repo): POSIX one-line installer + `--uninstall [--purge]`; CPU+libc detection, sha256 verify, /usr/local/bin or ~/.local/bin, `.old` rollback | ✅ | live-channel round-trip in sandbox |
+| 20.2 | istias.tech/hyprfetch/updates: "Four ways to get HyprFetch" + per-platform Uninstall section + server .deb/.rpm/PKGBUILD rows in the version panel | ✅ | next build + deployed page |
+| 20.3 | istias.tech/hyprfetch: one-line install card first; Arch/deb/rpm commands rewritten to versioned server URLs (baked from the live manifest) | ✅ | page source |
+| 20.4 | Arch PKGBUILD template fixed: `_srcdir` = clean `linux-x64` archive root (makepkg previously failed) + `source=` moved to istias.tech | ✅ | scripts/test_release_generators.sh |
+| 20.5 | release.yml install table → server-only links + uninstall line; restored `runs-on` on deploy job lost in a half-applied edit (broke workflow parsing) | ✅ | YAML parse + dispatched run |
+| 20.6 | Docs mirror self-heals (re-mirrors when PKGBUILD/.deb/.rpm/install.sh missing for the served version), uploads install.sh, generates the channel PKGBUILD from template + manifest | ✅ | mirror workflow diff |
+| 20.7 | v0.4.0 release repaired in place: dispatched re-run replaced the broken PKGBUILD asset + rewrote the body with server links | ✅ | run 36589215269 |
+
+**Measured:** install.sh E2E (install → `--version` 0.4.0 → `update --check`
+"up to date" via live channel → uninstall leaves nothing behind);
+`test_release_generators.sh` green (renders notes + PKGBUILD, asserts no
+GitHub links); Docs `next build` green; mirror YAML validated.

@@ -651,3 +651,48 @@ server has only 500 MB RAM.
   until then the release workflow skips the server mirror with a notice.
 - Version bumped to **0.4.0**; tag `v0.4.0` → release CI builds + publishes
   + (once the secret lands) mirrors to istias.tech.
+
+---
+Task ID: 7 (session 6 — install/uninstall hardening)
+Agent: Super Z (main session)
+Task: Owner follow-ups after v0.4.0 went live — Arch command used a GitHub
+link, no uninstall instructions, and users need multiple download paths.
+
+Work Log:
+- Confirmed the owner fixed DEPLOY_SSH_KEY: re-run of the release workflow
+  shows "Deploy update channel (istias.tech)" green; latest.json serves
+  0.4.0; version panel works.
+- Found + fixed a real packaging bug: PKGBUILD.bin.template still pointed
+  `_srcdir` at the old `x86_64-unknown-linux-gnu` archive root (makepkg
+  would fail on the renamed clean tarballs) and sourced the tarball from
+  GitHub — moved to the istias.tech channel.
+- New hyprfetch/install.sh in the Docs repo (channel-owned): one-line
+  install `curl -fsSL https://istias.tech/hyprfetch/updates/install.sh | sh`,
+  POSIX sh, no jq; `--uninstall`, `--purge`, `--version`, `--channel`.
+  E2E'd against the LIVE channel in the sandbox: latest.json → linux-x64
+  pick → sha256 verify → /usr/local/bin install → `--version` 0.4.0 →
+  `update --check` "up to date" → `--uninstall --purge` leaves nothing.
+- istias.tech pages (Docs repo): new "Four ways to get HyprFetch" install
+  section (one-line script / native package / manual tarball / browser
+  download), per-platform Uninstall section with real paths
+  (~/.config/hyprfetch, ~/.local/share/hyprfetch, pacman/apt/dnf names),
+  server .deb/.rpm/PKGBUILD rows in the version panel; every GitHub
+  download link on both pages replaced with versioned istias.tech URLs.
+- hyprfetch-mirror.yml (Docs): self-healing check — re-mirrors when the
+  served version's PKGBUILD/.deb/.rpm/install.sh are missing; uploads
+  install.sh; generates the channel PKGBUILD from the repo template +
+  manifest sha256 (release-asset regressions can't reach the server).
+- release.yml: install table now server-only (+ uninstall line); restored
+  the `runs-on` on deploy-update-channel that a half-applied edit had
+  dropped (GitHub rejected workflow parsing with 422 until fixed).
+- Dispatched the Release workflow for tag v0.4.0 on the fixed main — the
+  run regenerates PKGBUILD + notes in place (asset replacement by
+  softprops/action-gh-release), so v0.4.0 needs no re-cut.
+- Docs: CHANGELOG [Unreleased], worktasks 20.1–20.7, this worklog.
+
+Stage Summary:
+- Owner-visible: one-line install + uninstall on the pages, server-only
+  commands everywhere, fixed Arch PKGBUILD (server-sourced, correct dir).
+- Pending at write time: release run 36589215269 finishing, then the Docs
+  mirror self-heals the server (PKGBUILD/deb/rpm/install.sh) within 30 min
+  (or on manual dispatch).
