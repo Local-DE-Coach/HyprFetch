@@ -356,6 +356,33 @@ E2E **20/20**. Side finding: the GitHub repo is **public** now
 against the real repo — scenarios that need the dead-end UX pin
 `--repo fake/nonexistent-repo` + `--channel ""` to stay hermetic.
 
+## 19. Server-only updater v0.4.0 + istias.tech docs pages (owner request, APPLIED 2026-09-29)
+
+Owner request: (1) remove GitHub from the update flow in ANY mode — only the
+own server; (2) GitHub Action ships every release to the server in a new
+path; (3) new pages in **Local-DE-Coach/Docs** (the repo that OWNS the
+istias.tech server webUI) at `/hyprfetch` + `/hyprfetch/updates`; (4) show
+the latest version on those pages; (5) clean asset names; (6) richer release
+notes; keep the 500 MB-RAM VPS budget.
+
+| ID | Item | Status | Proof |
+|---|---|---|---|
+| 19.1 | Updater stripped to ONE source: channel-only `update.rs` (API tier, git tier, token discovery, clone scan, `--from-git` all deleted; `UpdateConfig` = `{channel_url}`); unreachable → clear error + updates-page pointer, no fallback | ✅ | 9 core unit tests; E2E scenario 5 (asserts NO GitHub attempt in output) |
+| 19.2 | CLI: `--repo/--token/--from-git/--source-dir` removed; `--channel ""` disables with message; doctor prints channel; legacy `[update]` keys accepted-but-ignored | ✅ | helpers tests (precedence, disable, legacy TOML parse); E2E scenario 6 |
+| 19.3 | API: `/api/update/check` channel-only (error payload adds `updates_page`; legacy `via_*` fields gone); `/api/update/apply` channel-only | ✅ | E2E scenario 7 payload checks |
+| 19.4 | UI: Settings GitHub-token card → **Update channel** card; Updates card copy; dist rebuilt | ✅ | `ui/src/pages/{Updates,Settings}.svelte` diff + dist commit |
+| 19.5 | Clean asset names: `hyprfetch-<ver>-linux-{x64,arm64,musl-x64}.tar.gz`; manifest maps clean names → target triples; PKGBUILD + rpm spec repinned | ✅ | release.yml diff; packaging template diffs; docs tables |
+| 19.6 | Release notes auto-generated per release: CHANGELOG `## [X.Y.Z]` section + update/install commands + install table + downloads table + sha256 verify + page links (python3 assembly, injection-safe) | ✅ | `scripts/simulate_release_notes.sh` green (extracts the run block and runs it exactly like the runner) |
+| 19.7 | Docs repo: `/hyprfetch` product page + `/hyprfetch/updates` page (static prerender, client-side manifest fetch, graceful "channel warming up" state) | ✅ | build green (18 routes, both pages `○`); LIVE: `/hyprfetch` 200, `/hyprfetch/updates` 200 |
+| 19.8 | Docs deploy.yml self-heals the update channel: creates `/var/www/istias.tech/hyprfetch/updates` (world-readable) + nginx exact-match page proxy + `^~` static alias (CORS, max-age=60); also fixed the Sep-19 deploy breaker (raw `<60` in test-results JSX) | ✅ | Docs deploy run #2 success after fix; live checks above |
+| 19.9 | New E2E `scripts/e2e_update_channel.sh` COMMITTED — 8 scenarios / 23 checks (check, up-to-date, full install swap+backup, tampered-sha refusal, unreachable w/o GitHub, disabled, API payload, malformed manifest) | ✅ | RESULT: PASS 23 / FAIL 0 |
+| 19.10 | Docs synced: README Self-update (one source), update-channel.md rewritten (automated routing; only DEPLOY_SSH_KEY left for the owner), install.md, api.md, CHANGELOG 0.4.0 | ✅ | docs diffs |
+
+**Measured:** 133 workspace unit tests green (`CARGO_INCREMENTAL=0`);
+channel E2E 23/23; Docs portal build green; live pages verified. Note: the
+old `e2e_update_tiers.sh` and token-tier scenarios are OBSOLETE — the tiers
+they exercised no longer exist (superseded by 19.1).
+
 ## Bug tracker (open)
 
 | ID | Bug | Status | Notes |

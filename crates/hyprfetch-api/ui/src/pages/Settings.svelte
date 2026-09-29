@@ -1,6 +1,6 @@
 <script>
   // Settings — save folders (base + per-category overrides), auto-sort,
-  // concurrency, QoS bandwidth cap, security and the GitHub token that
+  // concurrency, QoS bandwidth cap, security and the update channel that
   // powers the in-app updater.
   import { onMount } from 'svelte'
   import { fmtBytes } from '../lib/format.js'
@@ -120,23 +120,6 @@
     }
   }
 
-  // ---- GitHub token (updater) ----
-  let ghToken = ''
-  let savingToken = false
-  $: tokenSet = $settings?.github_token_set === 'true'
-  async function saveToken() {
-    if (!ghToken.trim()) { notify('paste a token first (or leave to keep current)'); return }
-    savingToken = true
-    try {
-      await saveSettings({ github_token: ghToken.trim() })
-      ghToken = ''
-      notify('GitHub token saved ✓ — updates will use it')
-    } catch (e) {
-      notify(`save failed: ${e.message}`)
-    } finally {
-      savingToken = false
-    }
-  }
 </script>
 
 <div class="grid gap-5 lg:grid-cols-2">
@@ -226,31 +209,23 @@
     </div>
   </section>
 
-  <!-- GitHub token -->
+  <!-- Update channel -->
   <section class="card border border-base-300 bg-base-200 shadow-sm lg:col-span-2">
     <div class="card-body gap-3 p-5">
-      <h2 class="card-title text-base">GitHub token <span class="badge badge-sm badge-ghost">updates</span></h2>
+      <h2 class="card-title text-base">Update channel <span class="badge badge-sm badge-ghost">updates</span></h2>
       <p class="text-xs opacity-60">
-        HyprFetch is installed from a private repo. Updates already work if you
-        cloned with your PAT in the URL — the token is picked up from the clone.
-        You can also paste a fine-grained PAT here (stored locally in the app
-        database, never displayed again). Tokens set via
-        <code class="font-mono">HYPRFETCH_GITHUB_TOKEN</code> or the config file take precedence.
+        Updates are served exclusively by the project's own server —
+        <code class="font-mono">https://istias.tech/hyprfetch/updates/</code> — as
+        sha256-verified archives swapped in atomically. No GitHub account or
+        token is needed, and GitHub is never contacted. Override the URL via
+        <code class="font-mono">HYPRFETCH_UPDATE_CHANNEL</code>, the
+        <code class="font-mono">[update] channel</code> config key, or
+        <code class="font-mono">hyprfetch update --channel &lt;url&gt;</code>
+        (set it to <code class="font-mono">""</code> to disable the updater).
       </p>
-      <div class="flex flex-wrap items-end gap-3">
-        <label class="grid gap-1.5 text-sm">
-          <span>
-            Status:
-            {#if tokenSet}<span class="text-success">token configured</span>
-            {:else}<span class="opacity-60">no token in settings (env/clone may cover it)</span>{/if}
-          </span>
-          <input type="password" class="input input-bordered w-80 font-mono" bind:value={ghToken}
-            placeholder="github_pat_…" autocomplete="off" />
-        </label>
-        <button class="btn btn-primary btn-sm" disabled={savingToken} on:click={saveToken}>
-          {savingToken ? 'Saving…' : 'Save token'}
-        </button>
-      </div>
+      <a class="btn btn-ghost btn-sm w-fit" href="https://istias.tech/hyprfetch/updates" target="_blank" rel="noreferrer">
+        Update steps &amp; downloads ↗
+      </a>
     </div>
   </section>
 </div>

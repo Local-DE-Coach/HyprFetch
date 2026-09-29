@@ -575,3 +575,79 @@ which commit**.
   docs/update-channel.md), then set the `DEPLOY_SSH_KEY` secret — the
   v0.3.3 workflow run will skip the mirror step with a notice until then
   and the updater falls back to GitHub tiers automatically.
+
+## 2026-09-29 (session 5) — server-only updater v0.4.0 + istias.tech docs pages
+
+**Task:** owner: (1) remove GitHub from the update flow in ANY mode — only
+the own server; (2) GitHub Action sends every release to the server in a new
+path; (3) new pages in Local-DE-Coach/Docs (which OWNS the istias.tech
+server webUI) at /hyprfetch + /hyprfetch/updates; (4) show the latest
+version on those pages; (5) clean asset names; (6) richer release notes;
+server has only 500 MB RAM.
+
+- **Docs repo (deployed, live):** found the deploy had been BROKEN since
+  Sep 19 — raw `<60` in `test-results/page.tsx` JSX text failed the
+  Turbopack parse. Fixed (`&lt;60`). Added `web/src/app/hyprfetch/page.tsx`
+  (product page: hero + live version badge, features, per-platform install
+  commands with copy buttons, 4-step test & verify guide) and
+  `web/src/app/hyprfetch/updates/page.tsx` (live version panel fetched
+  client-side from `/hyprfetch/updates/latest.json`, CLI update commands,
+  manual per-platform steps, troubleshooting). Both are static prerender —
+  zero extra RAM on the 500 MB box. deploy.yml now self-heals the HyprFetch
+  update-channel route: creates `/var/www/istias.tech/hyprfetch/updates`
+  (world-readable) and injects nginx locations into the existing 443 block
+  (exact-match page proxy for `/hyprfetch/updates` + `^~` static alias for
+  `/hyprfetch/updates/` with CORS + max-age=60). One escaping bug found by
+  CI (bare `"` inside the ssh printf mangled the nginx header → `nginx -t`
+  refused the reload; site stayed on the old config) — fixed with `\"`
+  escaping like the existing `Connection "upgrade"` line. Verified live:
+  `/hyprfetch` → 200, `/hyprfetch/updates` → 200 (manifest 404 until the
+  first deploy lands — the pages degrade gracefully).
+- **Updater core (`crates/hyprfetch-core/src/update.rs` rewritten):**
+  channel-only. API tier, git tier, token discovery, clone scanning, PAT
+  parsing, `--from-git` — all deleted. `UpdateConfig` is now just
+  `{channel_url}`. `check()` = one GET of `latest.json`; `apply()` =
+  download → sha256-verify (manifest) → extract → atomic swap. `UpdateCheck`
+  dropped `via_git`/`via_channel`; `notes_url` now points at the updates
+  page. Unit tests rewritten (9 green).
+- **CLI (`update_cmd.rs`):** single-source flow. Unreachable channel → clear
+  error + pointer to https://istias.tech/hyprfetch/updates + `hyprfetch
+  doctor` hint; `--channel ""` disables the updater with a message. Removed
+  `--repo/--token/--from-git/--source-dir` flags. doctor prints the channel.
+- **helpers.rs:** `resolve_update_cfg_with_db` (token chain) replaced by
+  `resolve_update_cfg(channel_flag, cfg_update)`; legacy `[update]` keys are
+  accepted but ignored (serde ignores unknown fields); tests for precedence
+  + explicit disable + legacy-key parsing.
+- **API/UI:** `update_check` route channel-only (error payload carries
+  `updates_page`); `update_apply` channel-only; Settings GitHub-token card →
+  Update-channel card; Updates card copy updated; `ui/dist` rebuilt (npm).
+- **Workflow (release.yml):** clean asset names (`hyprfetch-<ver>-linux-x64`
+  / `-linux-arm64` / `-linux-musl-x64`; PKGBUILD + rpm templates repinned);
+  manifest generation maps clean names back to target triples and points
+  `notes_url` at the updates page; new "Generate release notes" step assembles
+  the body with python3 (CHANGELOG `## [X.Y.Z]` section + update/install
+  commands + per-platform install table + downloads table + sha256 verify +
+  page links) — no shell interpolation, so changelog backticks are safe.
+- **Testing:** 133 workspace unit tests green; new
+  `scripts/e2e_update_channel.sh` (COMMITTED this time) — 8 scenarios /
+  23 checks green against a local mock channel: check-available, up-to-date,
+  full install (swap + `.old` backup + no temp leftovers), tampered-manifest
+  refusal (binary untouched), unreachable-channel error (asserts NO GitHub
+  fallback attempt in output), disabled mode, `/api/update/check` payload
+  (channel echoed, no legacy fields), malformed manifest (no panic). Also
+  `scripts/simulate_release_notes.sh` — runs the release-notes step locally
+  (exact extraction of the run block from the workflow YAML) — green.
+  Disk-full on the sandbox caused two false failures mid-run (mktemp empty,
+  incremental compilation OOS) — cleaned target/debug + /tmp, reran with
+  `CARGO_INCREMENTAL=0`, all green.
+- **Docs:** README Self-update rewritten (one source, no tiers);
+  `docs/update-channel.md` rewritten (routing automated by the Docs repo
+  deploys; DEPLOY_SSH_KEY is the only remaining owner step); `docs/install.md`
+  + `docs/api.md` updated to one-source wording, clean asset names and the
+  new `/api/update/check` payload; CHANGELOG 0.4.0 section added (the
+  release-notes generator extracts it verbatim).
+- **Owner TODO (one-time):** add the `DEPLOY_SSH_KEY` secret to
+  Local-DE-Coach/HyprFetch (org secrets are not shared to this repo) —
+  until then the release workflow skips the server mirror with a notice.
+- Version bumped to **0.4.0**; tag `v0.4.0` → release CI builds + publishes
+  + (once the secret lands) mirrors to istias.tech.

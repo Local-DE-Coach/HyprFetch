@@ -13,7 +13,7 @@ depends=('glibc' 'gcc-libs')
 optdepends=('xdg-utils: open the web UI / download folder from the daemon')
 provides=('hyprfetch')
 conflicts=('hyprfetch')
-source=("hyprfetch-${pkgver}.tar.gz::https://github.com/Local-DE-Coach/HyprFetch/releases/download/v${pkgver}/hyprfetch-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+source=("hyprfetch-${pkgver}.tar.gz::https://github.com/Local-DE-Coach/HyprFetch/releases/download/v${pkgver}/hyprfetch-${pkgver}-linux-x64.tar.gz")
 sha256sums=('__SHA256__')
 
 package() {

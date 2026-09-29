@@ -1,28 +1,23 @@
-//! Shared helpers: config file model, XDG paths, token resolution and the
-//! in-app updater configuration.
+//! Shared helpers: config file model, XDG paths, API-token resolution and
+//! the in-app updater configuration (self-hosted update channel only).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use hyprfetch_core::update::{UpdateConfig, DEFAULT_API_BASE, DEFAULT_CHANNEL_URL, DEFAULT_REPO};
+use hyprfetch_core::update::{UpdateConfig, DEFAULT_CHANNEL_URL};
 
 /// `update` section of the config file.
-#[derive(Debug, Default, Deserialize)]
+///
+/// Legacy keys (`repo`, `token`, `source_dir`, `git_url`) from older
+/// versions are accepted but IGNORED — the updater talks only to the
+/// self-hosted channel and never touches GitHub.
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct UpdateCfg {
-    /// GitHub repo (`owner/name`) checked by the updater.
-    pub repo: Option<String>,
-    /// PAT used when the repo is private (sent as a Bearer token).
-    pub token: Option<String>,
-    /// Source clone path for `hyprfetch update --from-git`.
-    pub source_dir: Option<PathBuf>,
-    /// Git remote used when the REST API cannot see the repo (private repo
-    /// + SSH access). Falls back to a local clone's origin automatically.
-    pub git_url: Option<String>,
-    /// Self-hosted update-channel base URL (`latest.json` mirror). Checked
-    /// FIRST — one fast HTTPS GET, no GitHub, works for private repos.
-    /// Set to `""` to disable the channel tier.
+    /// Self-hosted update-channel base URL (`latest.json` mirror). One
+    /// fast HTTPS GET, no GitHub, works even when the repo is private.
+    /// Set to `""` to disable the updater entirely.
     pub channel: Option<String>,
 }
 
@@ -143,195 +138,14 @@ pub fn resolve_or_generate_token(
     Ok((token, true))
 }
 
-/// Common clone locations scanned when the updater has no explicit token.
-/// `git clone https://<PAT>@github.com/…` (the documented install path) puts
-/// the PAT right into the origin URL, so a plain clone install needs zero
-/// extra configuration for `hyprfetch update` to work.
-const CLONE_SCAN_PATHS: &[&str] = &[
-    "HyprFetch",
-    "Projects/HyprFetch",
-    "src/HyprFetch",
-    "code/HyprFetch",
-    "Developer/HyprFetch",
-];
-
-/// Directories scanned when the updater has no explicit token/remote:
-/// `[update] source_dir` first, then well-known clone locations under $HOME.
-fn clone_candidate_dirs(source_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(d) = source_dir {
-        candidates.push(d.to_path_buf());
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        for rel in CLONE_SCAN_PATHS {
-            candidates.push(Path::new(&home).join(rel));
-        }
-    }
-    candidates
-}
-
-/// Scan well-known clone locations for git access to the repo. Returns
-/// `(pat_from_origin_url, origin_url)`:
-/// - the PAT covers HTTPS-PAT clones (zero-config API-tier updates),
-/// - the origin URL covers SSH remotes — the updater's git tier can
-///   `ls-remote`/`clone` with the user's existing SSH keys, so private-repo
-///   updates work with NO token at all.
-pub fn detect_git_from_source_clones(
-    source_dir: Option<&Path>,
-) -> (Option<String>, Option<String>) {
-    for dir in clone_candidate_dirs(source_dir) {
-        if !dir.join(".git").exists() {
-            continue;
-        }
-        let url = std::process::Command::new("git")
-            .args(["-C"])
-            .arg(&dir)
-            .arg("config")
-            .arg("--get")
-            .arg("remote.origin.url")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        let Some(url) = url.filter(|u| !u.is_empty()) else {
-            continue;
-        };
-        let token = hyprfetch_core::update::parse_pat_from_git_url(&url);
-        if token.is_some() || url.contains("github.com") {
-            tracing::debug!(clone = %dir.display(), "found usable git access in a local clone");
-            let url_out = url.contains("github.com").then(|| url.clone());
-            return (token, url_out);
-        }
-    }
-    (None, None)
-}
-
-/// PAT from the GitHub CLI (`gh auth login` users).
-fn gh_cli_token() -> Option<String> {
-    let out = std::process::Command::new("gh")
-        .args(["auth", "token"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (t.len() >= 20).then_some(t)
-}
-
-/// PAT stored in git's credential helpers for github.com (store, cache,
-/// libsecret, gnome-keyring…). Prompting is disabled: helpers that would
-/// need user interaction simply fail and we move on.
-fn git_credential_token() -> Option<String> {
-    use std::io::Write as _;
-    let mut child = std::process::Command::new("git")
-        .args(["credential", "fill"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "true")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    {
-        let mut si = child.stdin.take()?;
-        let _ = si.write_all(b"protocol=https\nhost=github.com\n\n");
-    }
-    let out = child.wait_with_output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let pass = text
-        .lines()
-        .find_map(|l| l.strip_prefix("password="))
-        .map(str::trim)
-        .unwrap_or_default();
-    let t = pass.to_string();
-    (t.len() >= 20).then_some(t)
-}
-
-/// Resolve the updater config from CLI flags, env vars, the config file's
-/// `[update]` section and the settings DB (in that precedence order).
-#[allow(clippy::too_many_arguments)]
-pub fn resolve_update_cfg_with_db(
+/// Resolve the updater config: `--channel` flag > `HYPRFETCH_UPDATE_CHANNEL`
+/// env > `[update] channel` in the config file > built-in default
+/// (<https://istias.tech/hyprfetch/updates/>). An empty value (flag, env or
+/// config) means the user explicitly DISABLED the updater.
+pub fn resolve_update_cfg(
     channel_flag: Option<&str>,
-    repo_flag: Option<&str>,
-    token_flag: Option<&str>,
     cfg_update: &Option<UpdateCfg>,
-    settings: Option<&hyprfetch_db::SettingsRepo>,
 ) -> UpdateConfig {
-    let db_repo = settings
-        .and_then(|s| s.get("github_repo").ok().flatten())
-        .filter(|v| !v.trim().is_empty());
-    let db_token = settings
-        .and_then(|s| s.get("github_token").ok().flatten())
-        .filter(|v| !v.trim().is_empty());
-
-    let repo = repo_flag
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            cfg_update
-                .as_ref()
-                .and_then(|u| u.repo.clone())
-                .filter(|s| !s.trim().is_empty())
-        })
-        .or(db_repo)
-        .unwrap_or_else(|| DEFAULT_REPO.to_string());
-
-    // Ordered credential discovery — first hit wins and is labelled so the
-    // CLI can show WHERE it came from. The clone scan doubles as the git
-    // tier's remote discovery (SSH clones grant tag access without a token).
-    let (clone_token, clone_url) =
-        detect_git_from_source_clones(cfg_update.as_ref().and_then(|u| u.source_dir.as_deref()));
-
-    let mut token: Option<String> = None;
-    let mut token_source: Option<&'static str> = None;
-    let mut take = |cand: Option<String>, label: &'static str| {
-        if token.is_none() {
-            if let Some(t) = cand.filter(|t| !t.trim().is_empty()) {
-                token = Some(t.trim().to_string());
-                token_source = Some(label);
-            }
-        }
-    };
-    // clap may have filled the flag from HYPRFETCH_GITHUB_TOKEN already.
-    take(
-        token_flag
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        "cli flag/env",
-    );
-    take(std::env::var("HYPRFETCH_GITHUB_TOKEN").ok(), "env");
-    take(std::env::var("GITHUB_TOKEN").ok(), "env");
-    take(std::env::var("GH_TOKEN").ok(), "env");
-    take(
-        cfg_update.as_ref().and_then(|u| u.token.clone()),
-        "config file",
-    );
-    take(db_token, "settings db");
-    take(clone_token, "clone origin");
-    take(gh_cli_token(), "gh cli");
-    take(git_credential_token(), "git credentials");
-
-    let git_url = cfg_update
-        .as_ref()
-        .and_then(|u| u.git_url.clone())
-        .filter(|s| !s.trim().is_empty())
-        .or(clone_url);
-
-    let api_base = std::env::var("HYPRFETCH_UPDATE_API")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_API_BASE.to_string());
-
-    // Channel precedence: --channel flag > HYPRFETCH_UPDATE_CHANNEL env >
-    // [update] channel in the config file > built-in default. Empty value
-    // disables the tier ("" means the user explicitly opted out).
     let channel_url = [
         channel_flag,
         std::env::var("HYPRFETCH_UPDATE_CHANNEL").ok().as_deref(),
@@ -343,12 +157,66 @@ pub fn resolve_update_cfg_with_db(
     .map(str::to_string)
     .unwrap_or_else(|| DEFAULT_CHANNEL_URL.to_string());
 
-    UpdateConfig {
-        repo,
-        token,
-        token_source,
-        git_url,
-        api_base,
-        channel_url,
+    UpdateConfig { channel_url }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // One sequential test: it mutates HYPRFETCH_UPDATE_CHANNEL, and cargo
+    // runs tests in parallel threads that share the process environment.
+    #[test]
+    fn resolve_precedence_and_disable() {
+        // Flag wins even when env + config are set.
+        let cfg = UpdateCfg {
+            channel: Some("https://config.example/".into()),
+        };
+        std::env::set_var("HYPRFETCH_UPDATE_CHANNEL", "https://env.example/");
+        let resolved = resolve_update_cfg(Some("https://flag.example/"), &Some(cfg.clone()));
+        assert_eq!(resolved.channel_url, "https://flag.example/");
+
+        // No flag: env wins over config.
+        let resolved = resolve_update_cfg(None, &Some(cfg.clone()));
+        assert_eq!(resolved.channel_url, "https://env.example/");
+
+        // Neither: config wins over the built-in default.
+        std::env::remove_var("HYPRFETCH_UPDATE_CHANNEL");
+        let resolved = resolve_update_cfg(None, &Some(cfg.clone()));
+        assert_eq!(resolved.channel_url, "https://config.example/");
+
+        // Nothing at all: the project mirror.
+        let resolved = resolve_update_cfg(None, &None);
+        assert_eq!(resolved.channel_url, DEFAULT_CHANNEL_URL);
+
+        // Empty STRING = opted out (distinct from unset, which defaults).
+        let cfg = UpdateCfg {
+            channel: Some(String::new()),
+        };
+        let resolved = resolve_update_cfg(None, &Some(cfg));
+        assert_eq!(resolved.channel_url, "");
+        assert!(resolved.effective_channel().is_none());
+
+        // Flag can also disable.
+        let resolved = resolve_update_cfg(Some(""), &None);
+        assert_eq!(resolved.channel_url, "");
+        assert!(resolved.effective_channel().is_none());
+    }
+
+    #[test]
+    fn legacy_config_keys_are_ignored() {
+        // Old configs carried repo/token/git_url/source_dir — they must
+        // still parse (serde ignores unknown fields) and not error out.
+        let raw = r#"
+[update]
+repo = "Local-DE-Coach/HyprFetch"
+token = "ghp_legacytokenvalue123456"
+source_dir = "/tmp/clone"
+git_url = "git@github.com:Local-DE-Coach/HyprFetch.git"
+channel = "https://mirror.example/"
+"#;
+        let cfg: ConfigFile = toml::from_str(raw).expect("legacy keys must not break parsing");
+        let u = cfg.update.expect("update section present");
+        assert_eq!(u.channel.as_deref(), Some("https://mirror.example/"));
     }
 }

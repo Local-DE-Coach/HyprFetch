@@ -71,8 +71,8 @@ enum Command {
         #[arg(short = 'n', long, default_value_t = 50)]
         lines: usize,
     },
-    /// Check for / install new releases. Fast path: the self-hosted update
-    /// channel (istias.tech mirror); fallbacks: GitHub API + plain git.
+    /// Check for / install new releases from the self-hosted update channel
+    /// (istias.tech). GitHub is never contacted.
     Update {
         /// Only report what's available; don't install.
         #[arg(long, default_value_t = false)]
@@ -81,25 +81,14 @@ enum Command {
         #[arg(long, short = 'y', default_value_t = false)]
         yes: bool,
         /// Update-channel base URL (latest.json mirror). Empty string
-        /// disables the channel tier. Default: the project mirror,
-        /// override with [update] channel / HYPRFETCH_UPDATE_CHANNEL.
+        /// disables the updater. Default: the project mirror
+        /// (https://istias.tech/hyprfetch/updates/), override with
+        /// [update] channel / HYPRFETCH_UPDATE_CHANNEL.
         #[arg(long)]
         channel: Option<String>,
-        /// Override the GitHub repo (`owner/name`).
-        #[arg(long)]
-        repo: Option<String>,
-        /// GitHub token for private repos (else: env/config/settings).
-        #[arg(long, env = "HYPRFETCH_GITHUB_TOKEN", hide_env_values = true)]
-        token: Option<String>,
-        /// Update by pulling + rebuilding a source clone instead of a release tarball.
-        #[arg(long, default_value_t = false)]
-        from_git: bool,
-        /// Source clone used with --from-git.
-        #[arg(long)]
-        source_dir: Option<PathBuf>,
-        /// Config file path — its `[update]` section supplies repo / token /
-        /// git_url / source_dir. Defaults to
-        /// `$XDG_CONFIG_HOME/hyprfetch/config.toml` when it exists.
+        /// Config file path — its `[update]` section supplies the channel.
+        /// Defaults to `$XDG_CONFIG_HOME/hyprfetch/config.toml` when it
+        /// exists.
         #[arg(long, env = "HYPRFETCH_CONFIG")]
         config: Option<PathBuf>,
     },
@@ -163,10 +152,6 @@ pub struct UpdateArgs {
     pub check: bool,
     pub yes: bool,
     pub channel: Option<String>,
-    pub repo: Option<String>,
-    pub token: Option<String>,
-    pub from_git: bool,
-    pub source_dir: Option<PathBuf>,
     pub config: Option<PathBuf>,
 }
 
@@ -218,20 +203,12 @@ async fn run_async(cli: Cli, orig_args: Vec<String>) -> Result<()> {
             check,
             yes,
             channel,
-            repo,
-            token,
-            from_git,
-            source_dir,
             config,
         } => {
             update_cmd::run(UpdateArgs {
                 check,
                 yes,
                 channel,
-                repo,
-                token,
-                from_git,
-                source_dir,
                 config,
             })
             .await
@@ -361,9 +338,8 @@ async fn run_serve(
         );
     }
 
-    // In-app updater configuration (private-repo aware).
-    let update_cfg =
-        helpers::resolve_update_cfg_with_db(None, None, None, &cfg.update, Some(&settings));
+    // In-app updater configuration (self-hosted channel only).
+    let update_cfg = helpers::resolve_update_cfg(None, &cfg.update);
 
     let state = hyprfetch_api::AppState {
         update_cfg: Arc::new(update_cfg),
@@ -470,29 +446,14 @@ async fn doctor() -> Result<()> {
             "not generated yet (created on first non-loopback serve)".to_string()
         }
     );
-    let update_cfg = helpers::resolve_update_cfg_with_db(None, None, None, &None, Some(&s));
+    let update_cfg = helpers::resolve_update_cfg(None, &None);
     println!(
         "  update channel = {}",
         update_cfg
             .effective_channel()
             .map(|u| u.to_string())
-            .unwrap_or_else(|| "disabled".to_string())
+            .unwrap_or_else(|| "disabled (empty channel url)".to_string())
     );
-    println!("  update repo  = {}", update_cfg.repo);
-    println!(
-        "  update token = {}",
-        match update_cfg.token_source {
-            Some(src) => format!("configured ({src})"),
-            None => "not set (public repos + git/SSH access)".to_string(),
-        }
-    );
-    match &update_cfg.git_url {
-        Some(u) => println!("  update git   = {u}"),
-        None => println!(
-            "  update git   = auto (git@github.com:{} or a local clone's origin)",
-            update_cfg.repo
-        ),
-    }
     println!("  foreign_keys = ON (verified at open)");
     println!("  journal_mode = WAL (verified at open)");
     println!("OK");

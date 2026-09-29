@@ -6,9 +6,63 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
-## [Unreleased]
+## [0.4.0] — 2026-09-29 (updates served only by our own server + new docs site)
 
-- Nothing yet.
+### Changed — GitHub fully removed from the update flow (owner request)
+- **The updater now has exactly ONE source: the self-hosted update channel**
+  (`https://istias.tech/hyprfetch/updates/`). The GitHub REST API tier and the
+  plain-git tier are **gone entirely** — `hyprfetch update --check` is one
+  fast HTTPS GET and an install is download → sha256-verify → atomic swap.
+  No tokens, no rate limits, works regardless of repo visibility. If the
+  channel cannot be reached the CLI prints a clear error pointing at the
+  updates page (`https://istias.tech/hyprfetch/updates`) — no silent fallback.
+- `--repo` / `--token` / `--from-git` / `--source-dir` flags removed from
+  `hyprfetch update`; `[update] repo / token / git_url / source_dir` config
+  keys are still parsed but ignored (legacy configs keep working). Token /
+  clone-scanning machinery deleted from the codebase.
+- Web UI: the Settings **GitHub token** card became an **Update channel**
+  card; the Updates card copy now states GitHub is never contacted;
+  `ui/dist` rebuilt.
+- `/api/update/check` answers from the channel only — on failure it returns
+  `available: false` + a human-readable `error` + `updates_page`; legacy
+  `via_channel` / `via_git` payload fields are gone.
+
+### Added — clean release asset names
+- Release archives are renamed for humans: `hyprfetch-<ver>-linux-x64.tar.gz`,
+  `hyprfetch-<ver>-linux-arm64.tar.gz`, `hyprfetch-<ver>-linux-musl-x64.tar.gz`
+  (the update-channel manifest maps them back to target triples for the
+  updater). PKGBUILD + rpm spec templates pinned to the new names.
+
+### Added — generated release notes with update/install commands
+- The release workflow now assembles a rich release body automatically:
+  the matching `## [X.Y.Z]` section extracted from this CHANGELOG, the
+  one-line update commands (`hyprfetch update --check` / `hyprfetch update`),
+  a per-platform install table, the downloads table and a sha256 verify
+  block, plus links to the project pages. Assembled with python3 (no shell
+  interpolation of changelog content).
+
+### Added — istias.tech/hyprfetch docs pages (Local-DE-Coach/Docs)
+- The Docs portal (which owns the istias.tech server) gained two static,
+  RAM-friendly pages: **`/hyprfetch`** (app info, per-platform install
+  commands, 4-step test & verify guide) and **`/hyprfetch/updates`** (live
+  version panel fetched client-side from the update-channel manifest, CLI
+  update commands, manual per-platform update steps, troubleshooting).
+- The Docs deploy workflow self-heals the server routing on every deploy:
+  creates `/var/www/istias.tech/hyprfetch/updates` and installs the nginx
+  `location` blocks (exact-match page proxy + `^~` static alias with CORS +
+  short cache). nginx serves the archives straight from disk — zero Next.js
+  RAM on the 500 MB VPS. Also fixed a month-old deploy breaker (raw `<60`
+  in `test-results/page.tsx` JSX text).
+
+### Added — update-channel E2E suite committed to the repo
+- `scripts/e2e_update_channel.sh` — 8 scenarios / 23 checks against a local
+  mock channel: check-available, up-to-date, full install (download →
+  sha256 → swap → `.old` backup → no temp leftovers), tampered-manifest
+  refusal (binary untouched), unreachable-channel error text (asserts NO
+  GitHub fallback attempt), disabled mode, `/api/update/check` payload
+  shape, malformed-manifest handling. Plus
+  `scripts/simulate_release_notes.sh` which exercises the release-notes
+  generation step locally before tagging.
 
 ## [0.3.3] — 2026-09-29 (fast self-hosted update channel on istias.tech)
 

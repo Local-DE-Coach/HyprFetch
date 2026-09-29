@@ -21,7 +21,7 @@ HyprFetch is a single Rust binary that serves a web UI on `127.0.0.1`. You open 
 - **QoS / bandwidth-sharing mode** — toggle that caps downloads to leave headroom for browsing, gaming, video calls
 - **Browser-based UI** — Svelte + Tailwind + DaisyUI SPA embedded in the binary (~18 KiB gzipped), served from `127.0.0.1:<port>`
 - **Node.js-style run modes** — `dev` console, `serve` foreground, managed `daemon` with `logs -f` / `status` / `stop` / `restart`
-- **In-app self-update** — fastest check via the self-hosted update channel (istias.tech mirror, no GitHub/rate limits), fallback to GitHub releases (private-repo PAT aware); sha256-verifies, swaps the binary atomically, auto-resumes downloads
+- **In-app self-update** — served exclusively by the project's own server (istias.tech update channel): one fast HTTPS GET, **GitHub is never contacted**; sha256-verifies, swaps the binary atomically, auto-resumes downloads
 - **Sleep mode** — `--exit-when-idle` so nothing stays resident when there is nothing to do
 - **Lean by design** — measured idle RSS ≈ 8 MB; single static binary, no runtime deps, no Electron
 
@@ -131,34 +131,31 @@ Daemon state lives under `~/.local/state/hyprfetch/` (logs rotate at 5 MiB,
 
 ## Self-update
 
-Three access tiers, tried in order — the first that works wins. The default
-is the **fast** one:
+Updates come from **one place only** — the project's own update channel at
+`https://istias.tech/hyprfetch/updates/`. **GitHub is never contacted**: no
+API, no rate limits, no tokens, and it works no matter whether the source
+repo is private, because CI (not the client) populates the mirror on every
+release.
 
-0. **Update channel (fastest, default)** — CI mirrors every release's
-   tarballs + a `latest.json` manifest to the project's own server. One
-   plain HTTPS GET answers "is there a new version?" with no GitHub API,
-   no rate limits and no tokens — and it works for the **private repo**
-   because CI (not the client) populates the mirror. Install = download →
-   sha256-verify → atomic swap. See `docs/update-channel.md`.
-1. **PAT tier (prebuilt tarballs)** — GitHub REST API fallback when the
-   channel is unreachable and a token is available
-   (`HYPRFETCH_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` env, `[update] token`
-   in the config, `gh auth token`, git credential helpers, a PAT-in-URL clone,
-   or `--token`): the release tarball is downloaded through the API,
-   sha256-verified, swapped in atomically.
-2. **Git tier (no token needed)** — if plain `git` can reach the repo (your
-   SSH keys, e.g. `git clone git@github.com:…`), the updater falls back to
-   it: newest release tag via `ls-remote` → shallow clone →
-   `cargo build --release --locked` → atomic swap. If `git pull` works for
-   you, `hyprfetch update` works too.
+- `--check` is a single HTTPS GET of `latest.json` → prints "up to date"
+  or the available version.
+- An install downloads the archive for your CPU, **verifies its sha256
+  against the manifest**, swaps the binary atomically (the previous binary
+  is kept as `hyprfetch.old` for rollback) and restarts a running daemon,
+  auto-resuming paused downloads.
+- Docs pages: <https://istias.tech/hyprfetch> (install + test) and
+  <https://istias.tech/hyprfetch/updates> (update steps + downloads).
 
 ```bash
-hyprfetch update --check      # report only (shows which access path was used)
-hyprfetch update              # channel/API tier: download → sha256 → atomic swap → restart
-                              # git tier:          clone tag → build → atomic swap → restart
-hyprfetch update --from-git --source-dir ~/HyprFetch   # pull + build + swap instead
+hyprfetch update --check      # report only → "up to date" or the new version
+hyprfetch update              # download → sha256 → atomic swap → restart
+hyprfetch update -y           # same, non-interactive (scripts)
 hyprfetch doctor              # shows the active update channel
 ```
+
+Override the channel with `--channel <url>`, `[update] channel` in the
+config file, or `HYPRFETCH_UPDATE_CHANNEL`. Setting it to the empty string
+disables the updater entirely.
 
 The in-app updater does the same from the UI (**Updates** card): check,
 install & restart, or a plain restart (git-found updates ask you to run the

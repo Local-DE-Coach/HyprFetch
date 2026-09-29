@@ -1,38 +1,32 @@
-//! Self-update: three check tiers + sha256-verified binary swap.
+//! Self-update via the project's own update channel + sha256-verified
+//! binary swap.
 //!
-//! Tier 0 — **update channel** (fastest, default): a plain HTTPS manifest
-//! (`latest.json`) served from the project's own mirror
-//! (`https://istias.tech/hyprfetch/updates/`). No GitHub rate limits, no
-//! tokens, works for private repos because the mirror is uploaded by CI
-//! on every release. Carries per-target download URLs + sha256 so the
-//! install is download → verify → swap, same as the API tier.
-//! Tier 1 — **GitHub REST API** (public repos or a PAT); private-repo
-//! assets MUST be downloaded through the REST API endpoint with
-//! `Accept: application/octet-stream` — the
-//! `github.com/.../releases/download/...` browser URL answers 404 for PATs
-//! it cannot associate with a web session.
-//! Tier 2 — **plain git** (`ls-remote --tags` + shallow clone + cargo
-//! build) for private repos accessed via SSH keys / a local clone.
+//! The ONLY update source is the self-hosted channel: a plain HTTPS
+//! manifest (`latest.json`) served from
+//! `https://istias.tech/hyprfetch/updates/` and mirrored to by CI on
+//! every release. No GitHub API, no rate limits, no tokens — and it
+//! keeps working when the source repo is private. A check is one fast
+//! GET; an install is download → sha256-verify (manifest hash) →
+//! extract → atomic swap → (daemon restart, handled by the caller).
 //!
-//! Both the channel and the API base are overridable
-//! (`HYPRFETCH_UPDATE_CHANNEL` / `HYPRFETCH_UPDATE_API`) so tests can run
-//! against local mock servers.
+//! The channel base is overridable (`HYPRFETCH_UPDATE_CHANNEL` /
+//! `[update] channel` / `--channel`) so tests can run against local mock
+//! servers; setting it to the empty string disables the updater
+//! entirely.
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-/// Default GitHub repo checked by the updater.
-pub const DEFAULT_REPO: &str = "Local-DE-Coach/HyprFetch";
-/// GitHub REST API base.
-pub const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// Default self-hosted update channel (release mirror). CI uploads every
 /// release's tarballs + a `latest.json` manifest here, so `hyprfetch update
 /// --check` is one fast HTTPS GET with no GitHub involvement at all.
 pub const DEFAULT_CHANNEL_URL: &str = "https://istias.tech/hyprfetch/updates/";
+/// Human-facing page that documents the channel, install and update steps.
+pub const UPDATES_PAGE_URL: &str = "https://istias.tech/hyprfetch/updates";
 /// Per-request timeout for update HTTP calls.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -43,8 +37,6 @@ pub enum UpdateError {
     Http(#[from] reqwest::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    #[error("repo setting is not `owner/name`: {0}")]
-    BadRepo(String),
     #[error("asset {0} not found in release")]
     AssetMissing(String),
     #[error("sha256 mismatch: expected {expected}, got {got}")]
@@ -53,59 +45,30 @@ pub enum UpdateError {
     BinaryMissing,
     #[error("cannot determine current executable path")]
     ExePath,
-    #[error("git: {0}")]
-    Git(String),
     #[error("update channel: {0}")]
     Channel(String),
     #[error("{0}")]
     Other(String),
 }
 
-/// Where/how to check for updates.
+/// Where to check for updates.
 #[derive(Debug, Clone)]
 pub struct UpdateConfig {
-    /// `owner/name` on GitHub.
-    pub repo: String,
-    /// PAT for private repos (sent as `Authorization: Bearer`).
-    pub token: Option<String>,
-    /// Where the token came from, for UX labels (`"env"`, `"gh cli"`, …).
-    pub token_source: Option<&'static str>,
-    /// Git remote used by the git tier when the REST API cannot see the
-    /// repo (private repo accessed via SSH keys / a local clone).
-    /// Auto-discovered from a local clone's origin or set via
-    /// `[update] git_url`; when absent it is derived from `repo`.
-    pub git_url: Option<String>,
-    /// API base override (tests / GHES).
-    pub api_base: String,
     /// Self-hosted update-channel base URL (`latest.json` lives at
-    /// `<channel_url>/latest.json`). Empty string disables the channel
-    /// tier (falls straight through to the GitHub API / git tiers).
+    /// `<channel_url>/latest.json`). Empty string disables the updater
+    /// (prints a pointer to [`UPDATES_PAGE_URL`] instead).
     pub channel_url: String,
 }
 
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            repo: DEFAULT_REPO.to_string(),
-            token: None,
-            token_source: None,
-            git_url: None,
-            api_base: DEFAULT_API_BASE.to_string(),
             channel_url: DEFAULT_CHANNEL_URL.to_string(),
         }
     }
 }
 
 impl UpdateConfig {
-    /// Validate the repo string is `owner/name`.
-    pub fn validate(&self) -> Result<(), UpdateError> {
-        let mut parts = self.repo.split('/');
-        match (parts.next(), parts.next(), parts.next()) {
-            (Some(o), Some(n), None) if !o.is_empty() && !n.is_empty() => Ok(()),
-            _ => Err(UpdateError::BadRepo(self.repo.clone())),
-        }
-    }
-
     fn client(&self) -> reqwest::Client {
         reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -114,16 +77,11 @@ impl UpdateConfig {
             .expect("reqwest client")
     }
 
-    fn api(&self, path: &str) -> String {
-        format!("{}/{}", self.api_base.trim_end_matches('/'), path)
-    }
-
-    fn auth_headers(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let rb = rb.header("X-GitHub-Api-Version", "2022-11-28");
-        match &self.token {
-            Some(t) if !t.trim().is_empty() => rb.bearer_auth(t.trim()),
-            _ => rb,
-        }
+    /// The active channel base (`None` when the updater is disabled via an
+    /// empty `[update] channel` / env).
+    pub fn effective_channel(&self) -> Option<&str> {
+        let s = self.channel_url.trim();
+        (!s.is_empty()).then_some(s)
     }
 }
 
@@ -132,7 +90,6 @@ impl UpdateConfig {
 pub struct AssetInfo {
     pub name: String,
     pub size: u64,
-    pub id: u64,
 }
 
 /// Result of an update check.
@@ -146,18 +103,9 @@ pub struct UpdateCheck {
     pub available: bool,
     pub published_at: Option<String>,
     pub release_url: Option<String>,
-    /// The tarball asset matching this machine's target triple, when present.
-    /// `None` on the git tier — there the update builds from source instead.
+    /// The archive matching this machine's target, when present.
     pub asset: Option<AssetInfo>,
-    /// True when the check succeeded via plain git instead of the REST API
-    /// (private repo + SSH/clone access, no token needed).
-    #[serde(default)]
-    pub via_git: bool,
-    /// True when the check succeeded via the self-hosted update channel
-    /// (`latest.json` mirror) instead of GitHub.
-    #[serde(default)]
-    pub via_channel: bool,
-    /// The channel base URL that answered (`via_channel` only).
+    /// The channel base URL that answered.
     #[serde(default)]
     pub channel: Option<String>,
 }
@@ -186,20 +134,20 @@ pub fn version_newer(candidate: &str, current: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Update channel tier — self-hosted mirror, the FAST path
+// Update channel — the one and only update source
 //
-// CI uploads every release's tarballs (+ their .sha256 files) into
-// `<channel>/<version>/` and writes `<channel>/latest.json`. One HTTPS GET
-// answers "is there a new version?" with zero GitHub involvement: no rate
-// limits, no tokens, and it works for private repos because the mirror is
+// CI uploads every release's archives into `<channel>/<version>/` and
+// writes `<channel>/latest.json`. One HTTPS GET answers "is there a new
+// version?" with zero GitHub involvement: no rate limits, no tokens, and
+// it works even when the source repo is private, because the mirror is
 // populated by CI with deploy credentials, not by the client.
 //
 // Manifest schema (`latest.json`):
 // {
-//   "version": "0.3.3",
-//   "tag": "v0.3.3",
+//   "version": "0.4.0",
+//   "tag": "v0.4.0",
 //   "published_at": "2026-09-29T12:00:00Z",
-//   "notes_url": "https://github.com/Local-DE-Coach/HyprFetch/releases/tag/v0.3.3",
+//   "notes_url": "https://istias.tech/hyprfetch/updates",
 //   "assets": {
 //     "x86_64-unknown-linux-gnu":  {"url": "...", "sha256": "...", "size": 123},
 //     "aarch64-unknown-linux-gnu": {"url": "...", "sha256": "...", "size": 123},
@@ -223,9 +171,9 @@ pub struct ChannelAsset {
 /// The `latest.json` manifest served by the update channel.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ChannelManifest {
-    /// Newest version (`0.3.3`, no `v` prefix).
+    /// Newest version (`0.4.0`, no `v` prefix).
     pub version: String,
-    /// Raw tag (`v0.3.3`).
+    /// Raw tag (`v0.4.0`).
     pub tag: String,
     #[serde(default)]
     pub published_at: Option<String>,
@@ -249,21 +197,12 @@ pub fn pick_channel_asset(
         .find_map(|t| assets.get(&t).cloned().map(|a| (t, a)))
 }
 
-impl UpdateConfig {
-    /// The active channel base (`None` when the tier is disabled via an
-    /// empty `[update] channel` / env).
-    pub fn effective_channel(&self) -> Option<&str> {
-        let s = self.channel_url.trim();
-        (!s.is_empty()).then_some(s)
-    }
-}
-
 /// Blocking: fetch + parse the channel manifest. `Err` on HTTP trouble or
-/// a malformed manifest so the caller can fall through to the next tier.
+/// a malformed manifest.
 pub async fn fetch_manifest(cfg: &UpdateConfig) -> Result<ChannelManifest, UpdateError> {
     let base = cfg
         .effective_channel()
-        .ok_or_else(|| UpdateError::Channel("channel disabled".into()))?;
+        .ok_or_else(|| UpdateError::Channel("updater disabled (empty channel url)".into()))?;
     let resp = cfg
         .client()
         .get(manifest_url(base))
@@ -283,13 +222,13 @@ pub async fn fetch_manifest(cfg: &UpdateConfig) -> Result<ChannelManifest, Updat
     Ok(manifest)
 }
 
-/// Check the self-hosted update channel. `Ok(Some(check))` when the
-/// manifest answers — the payload looks exactly like the API tier's, so
-/// callers and the web UI treat every tier identically.
-pub async fn check_via_channel(cfg: &UpdateConfig) -> Result<Option<UpdateCheck>, UpdateError> {
+/// Check the self-hosted update channel. `Err` when the channel cannot be
+/// reached (the caller surfaces [`UPDATES_PAGE_URL`] — there is no other
+/// source to fall back to).
+pub async fn check(cfg: &UpdateConfig) -> Result<UpdateCheck, UpdateError> {
     let base = cfg
         .effective_channel()
-        .ok_or_else(|| UpdateError::Channel("channel disabled".into()))?
+        .ok_or_else(|| UpdateError::Channel("updater disabled (empty channel url)".into()))?
         .to_string();
     let m = fetch_manifest(cfg).await?;
     let current = env!("CARGO_PKG_VERSION").to_string();
@@ -302,31 +241,24 @@ pub async fn check_via_channel(cfg: &UpdateConfig) -> Result<Option<UpdateCheck>
             .unwrap_or(&format!("hyprfetch-{}-{target}.tar.gz", m.version))
             .to_string(),
         size: a.size,
-        id: 0, // no GitHub asset id on the channel tier
     });
-    Ok(Some(UpdateCheck {
+    Ok(UpdateCheck {
         available: version_newer(&m.version, &current),
         current,
         latest: m.version,
         published_at: m.published_at,
         release_url: m.notes_url,
         asset,
-        via_git: false,
-        via_channel: true,
         channel: Some(base),
-    }))
+    })
 }
 
-/// Channel-tier install: fetch the manifest, download the archive for this
-/// target, sha256-verify against the manifest, extract + atomic swap.
-pub async fn apply_channel(
-    cfg: &UpdateConfig,
-    chk: &UpdateCheck,
-) -> Result<ApplyResult, UpdateError> {
-    cfg.validate()?;
+/// Install: fetch the manifest, download the archive for this target,
+/// sha256-verify against the manifest, extract + atomic swap.
+pub async fn apply(cfg: &UpdateConfig, chk: &UpdateCheck) -> Result<ApplyResult, UpdateError> {
     let m = fetch_manifest(cfg).await?;
     let (_, asset) = pick_channel_asset(&m.assets)
-        .ok_or_else(|| UpdateError::AssetMissing("target tarball (channel)".into()))?;
+        .ok_or_else(|| UpdateError::AssetMissing("target tarball (update channel)".into()))?;
 
     let tarball = cfg
         .client()
@@ -359,277 +291,7 @@ pub async fn apply_channel(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Git tier — private-repo updates WITHOUT a token
-//
-// SSH keys cannot call the GitHub REST API, but they can run git. So when
-// the API tier comes back empty (private repo, no token), the updater falls
-// back to plain git: `ls-remote --tags` finds the newest release tag with
-// the user's existing credentials (SSH agent, credential helpers, or a
-// local clone's remote), and the install step shallow-clones that tag and
-// builds it with `cargo build --release --locked`.
-// ---------------------------------------------------------------------------
-
-/// Batch-mode SSH options so git never blocks on a passphrase/host-key
-/// prompt — an unattended updater must fail fast, not hang.
-const GIT_SSH_COMMAND: &str =
-    "ssh -oBatchMode=yes -oConnectTimeout=10 -oStrictHostKeyChecking=accept-new";
-
-/// A `git` invocation that can never stop to ask questions (no terminal
-/// prompt, no interactive askpass, no interactive ssh).
-fn git_cmd(args: &[&str]) -> std::process::Command {
-    let mut c = std::process::Command::new("git");
-    c.args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "true")
-        .env("GIT_SSH_COMMAND", GIT_SSH_COMMAND);
-    c
-}
-
-/// Git remote URLs tried by the git tier, most-specific first:
-/// 1. a configured/discovered remote (`[update] git_url` or a local clone's
-///    origin — honours the user's SSH keys and credential helpers),
-/// 2. the SSH URL derived from the repo slug,
-/// 3. anonymous HTTPS (public fallback; the API tier already covers this).
-pub fn git_url_candidates(cfg: &UpdateConfig) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(u) = cfg
-        .git_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        out.push(u.to_string());
-    }
-    let ssh = format!("git@github.com:{}.git", cfg.repo);
-    if !out.contains(&ssh) {
-        out.push(ssh);
-    }
-    let https = format!("https://github.com/{}.git", cfg.repo);
-    if !out.contains(&https) {
-        out.push(https);
-    }
-    out
-}
-
-/// Parse `git ls-remote --tags` output into raw tag names (`v0.3.1`),
-/// dropping peeled `^{}` refs, non-version tags and duplicates.
-pub fn parse_version_tags(ls_remote_output: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for line in ls_remote_output.lines() {
-        let mut it = line.split_whitespace();
-        let (_, r) = match (it.next(), it.next()) {
-            (Some(a), Some(b)) => (a, b),
-            _ => continue,
-        };
-        let Some(tag) = r.strip_prefix("refs/tags/") else {
-            continue;
-        };
-        let tag = tag.strip_suffix("^{}").unwrap_or(tag);
-        let ver = tag.strip_prefix('v').unwrap_or(tag);
-        let is_version = ver.chars().next().is_some_and(|c| c.is_ascii_digit())
-            && ver.split('.').count() >= 2
-            && ver.split('.').all(|c| !c.is_empty());
-        if is_version && !out.iter().any(|t| t == tag) {
-            out.push(tag.to_string());
-        }
-    }
-    out
-}
-
-/// Newest tag among raw version tags (`v0.3.1`); `None` when empty.
-pub fn latest_version_tag(tags: &[String]) -> Option<String> {
-    tags.iter()
-        .fold(None, |best: Option<String>, t| match best {
-            Some(b) if !version_newer(t, &b) => Some(b),
-            _ => Some(t.clone()),
-        })
-}
-
-/// Blocking: newest version tag reachable at `url`. `Ok(None)` when the
-/// remote answers but carries no version tags; `Err` when git fails
-/// (unreachable / unauthorized).
-pub fn ls_remote_latest_tag(url: &str) -> Result<Option<String>, UpdateError> {
-    let out = git_cmd(&["ls-remote", "--tags", url])
-        .output()
-        .map_err(|e| UpdateError::Git(format!("git ls-remote spawn: {e}")))?;
-    if !out.status.success() {
-        return Err(UpdateError::Git(format!(
-            "ls-remote {url}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    let tags = parse_version_tags(&String::from_utf8_lossy(&out.stdout));
-    Ok(latest_version_tag(&tags))
-}
-
-/// Outcome of a git-tier update check.
-#[derive(Debug, Clone)]
-pub struct GitCheck {
-    /// The remote URL that answered (shown to the user as access proof).
-    pub via_url: String,
-    /// Raw tag of the newest release (`v0.3.1`) — used for `--branch`.
-    pub tag: String,
-    /// Standard check payload (`asset` is always None — git builds from
-    /// source; `via_git` is true).
-    pub check: UpdateCheck,
-}
-
-/// API-independent update check for private repos: reads version tags over
-/// plain git using whatever credentials the user already has (SSH agent,
-/// credential helpers, clone remotes). Blocking — prefer [`check_via_git`]
-/// from async contexts.
-pub fn check_via_git_sync(cfg: &UpdateConfig) -> Result<Option<GitCheck>, UpdateError> {
-    cfg.validate()?;
-    let current = env!("CARGO_PKG_VERSION").to_string();
-    let mut last_err: Option<UpdateError> = None;
-    for url in git_url_candidates(cfg) {
-        match ls_remote_latest_tag(&url) {
-            Ok(Some(tag)) => {
-                let latest = tag.trim_start_matches('v').to_string();
-                return Ok(Some(GitCheck {
-                    via_url: url,
-                    tag,
-                    check: UpdateCheck {
-                        available: version_newer(&latest, &current),
-                        current,
-                        latest,
-                        published_at: None,
-                        release_url: Some(format!("https://github.com/{}/releases", cfg.repo)),
-                        asset: None,
-                        via_git: true,
-                        via_channel: false,
-                        channel: None,
-                    },
-                }));
-            }
-            // Reachable but no version tags: same as "no published release".
-            Ok(None) => return Ok(None),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(last_err.unwrap_or(UpdateError::Other("no git remote candidate".into())))
-}
-
-/// Async wrapper around [`check_via_git_sync`] (git spawns are blocking).
-pub async fn check_via_git(cfg: &UpdateConfig) -> Result<Option<GitCheck>, UpdateError> {
-    let cfg = cfg.clone();
-    tokio::task::spawn_blocking(move || check_via_git_sync(&cfg))
-        .await
-        .map_err(|e| UpdateError::Other(format!("git check join: {e}")))?
-}
-
-/// Blocking: shallow-clone `url` at `tag` into `dest` (created, emptied).
-pub fn clone_tag_shallow(url: &str, tag: &str, dest: &Path) -> Result<(), UpdateError> {
-    let _ = std::fs::remove_dir_all(dest);
-    std::fs::create_dir_all(dest)?;
-    let out = git_cmd(&[
-        "clone",
-        "--depth",
-        "1",
-        "--branch",
-        tag,
-        "--single-branch",
-        url,
-    ])
-    .arg(dest)
-    .output()
-    .map_err(|e| UpdateError::Git(format!("git clone spawn: {e}")))?;
-    if !out.status.success() {
-        return Err(UpdateError::Git(format!(
-            "clone {tag}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-/// Locate a usable `cargo`: PATH first, then the rustup default location.
-pub fn find_cargo() -> Result<String, UpdateError> {
-    let usable = |p: &str| {
-        std::process::Command::new(p)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-    if usable("cargo") {
-        return Ok("cargo".into());
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let p = format!("{home}/.cargo/bin/cargo");
-        if usable(&p) {
-            return Ok(p);
-        }
-    }
-    Err(UpdateError::Other(
-        "cargo not found on PATH — source updates need the Rust toolchain \
-         (https://rustup.rs), or install a release tarball instead"
-            .into(),
-    ))
-}
-
-/// `cargo build --release --locked` inside `dir`. Blocking; on failure the
-/// error keeps the last 15 stderr lines (enough to see the failing crate).
-pub fn cargo_build_release(dir: &Path) -> Result<(), UpdateError> {
-    let cargo = find_cargo()?;
-    let out = std::process::Command::new(&cargo)
-        .args(["build", "--release", "--locked"])
-        .current_dir(dir)
-        .output()
-        .map_err(|e| UpdateError::Git(format!("cargo spawn: {e}")))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let mut tail: Vec<&str> = stderr.lines().rev().take(15).collect();
-        tail.reverse();
-        return Err(UpdateError::Git(format!(
-            "cargo build failed: {}",
-            tail.join("\n")
-        )));
-    }
-    Ok(())
-}
-
-/// Full git-tier install: shallow-clone `url` at `tag` into `dest`, build a
-/// release binary, return its path. Blocking and long-running (a cold build
-/// takes minutes).
-pub fn build_from_tag(url: &str, tag: &str, dest: &Path) -> Result<PathBuf, UpdateError> {
-    clone_tag_shallow(url, tag, dest)?;
-    cargo_build_release(dest)?;
-    Ok(dest.join("target/release/hyprfetch"))
-}
-
-/// Parse a PAT out of a git remote URL. Clone-based installs carry the
-/// token right in the origin URL (`https://<PAT>@github.com/…`), which lets
-/// `hyprfetch update` work with zero extra configuration.
-///
-/// Accepted shapes:
-/// - `https://<token>@github.com/owner/repo.git`
-/// - `https://x-access-token:<token>@github.com/…`
-/// - `https://<any-user>:<token>@github.com/…` (GitHub accepts any username
-///   with a PAT — e.g. `https://myuser:<PAT>@github.com/…`)
-///
-/// Anything else (SSH remotes, token-less URLs) returns `None`.
-pub fn parse_pat_from_git_url(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("https://")?;
-    let (creds, host) = rest.split_once('@')?;
-    if !host.starts_with("github.com") {
-        return None;
-    }
-    let token = match creds.split_once(':') {
-        // user:pass form — the password part is the token.
-        Some((_user, pass)) if !pass.is_empty() => pass,
-        Some(_) => return None,
-        None => creds,
-    };
-    let token = token.trim();
-    if token.len() < 20 {
-        return None; // too short to be a PAT — avoid picking up junk
-    }
-    Some(token.to_string())
-}
-
-/// The release tarball naming scheme is `hyprfetch-<ver>-<target>.tar.gz`.
+/// The release archive naming scheme is `hyprfetch-<ver>-<target>.tar.gz`.
 /// Derive the target triple candidates for the running binary (Linux-first).
 fn target_candidates() -> Vec<String> {
     let arch = std::env::consts::ARCH;
@@ -637,89 +299,6 @@ fn target_candidates() -> Vec<String> {
         format!("{arch}-unknown-linux-gnu"),
         format!("{arch}-unknown-linux-musl"),
     ]
-}
-
-/// Find the tarball asset matching this machine among all release assets.
-pub fn pick_asset(assets: &[serde_json::Value], version: &str) -> Option<AssetInfo> {
-    for target in target_candidates() {
-        let want = format!("hyprfetch-{version}-{target}.tar.gz");
-        for a in assets {
-            let name = a.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-            if name == want {
-                return Some(AssetInfo {
-                    name: name.to_string(),
-                    size: a.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
-                    id: a.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
-                });
-            }
-        }
-    }
-    None
-}
-
-/// Query the latest published release. `Ok(None)` when the repo has none.
-pub async fn check(cfg: &UpdateConfig) -> Result<Option<UpdateCheck>, UpdateError> {
-    cfg.validate()?;
-    let current = env!("CARGO_PKG_VERSION").to_string();
-
-    let rb = cfg
-        .client()
-        .get(cfg.api(&format!("repos/{}/releases/latest", cfg.repo)));
-    let resp = cfg.auth_headers(rb).send().await?;
-
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    let body: serde_json::Value = resp.error_for_status()?.json().await?;
-
-    let tag = body
-        .get("tag_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let latest = tag.trim_start_matches('v').to_string();
-    let assets = body
-        .get("assets")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    Ok(Some(UpdateCheck {
-        available: version_newer(&latest, &current),
-        current,
-        latest: latest.clone(),
-        published_at: body
-            .get("published_at")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        release_url: body
-            .get("html_url")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        asset: pick_asset(&assets, &latest),
-        via_git: false,
-        via_channel: false,
-        channel: None,
-    }))
-}
-
-/// Download one release asset's bytes through the API octet-stream endpoint.
-async fn download_asset(cfg: &UpdateConfig, asset: &AssetInfo) -> Result<Vec<u8>, UpdateError> {
-    let rb = cfg
-        .client()
-        .get(cfg.api(&format!("repos/{}/releases/assets/{}", cfg.repo, asset.id)));
-    let resp = cfg
-        .auth_headers(rb)
-        .header("Accept", "application/octet-stream")
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(resp.bytes().await?.to_vec())
-}
-
-/// Parse a `.sha256` file body (`<hash>  <filename>`), returning the hash.
-pub fn parse_sha256_file(body: &str) -> Option<String> {
-    body.split_whitespace().next().map(str::to_ascii_lowercase)
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -775,69 +354,6 @@ pub struct ApplyResult {
 /// `<exe>.old` (kept as rollback), then rename `.new` over `<exe>`.
 /// `rename(2)` on the same filesystem is atomic — a crash mid-swap leaves
 /// either the old or the new file, never a truncated one.
-pub async fn apply(cfg: &UpdateConfig, chk: &UpdateCheck) -> Result<ApplyResult, UpdateError> {
-    cfg.validate()?;
-
-    // 1. Fetch the release listing once and locate BOTH assets we need.
-    let rb = cfg
-        .client()
-        .get(cfg.api(&format!("repos/{}/releases/latest", cfg.repo)));
-    let body: serde_json::Value = cfg
-        .auth_headers(rb)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let assets = body
-        .get("assets")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let asset = pick_asset(&assets, &chk.latest)
-        .ok_or_else(|| UpdateError::AssetMissing("target tarball".into()))?;
-    let sha_asset = {
-        let want = format!("{}.sha256", asset.name);
-        assets
-            .iter()
-            .find(|a| a.get("name").and_then(|v| v.as_str()) == Some(want.as_str()))
-            .map(|a| AssetInfo {
-                name: want.clone(),
-                size: a.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
-                id: a.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
-            })
-            .ok_or_else(|| UpdateError::AssetMissing(want))?
-    };
-
-    // 2. Download tarball + checksum asset.
-    let tarball = download_asset(cfg, &asset).await?;
-    let sha_body = download_asset(cfg, &sha_asset).await?;
-    let expected = parse_sha256_file(std::str::from_utf8(&sha_body).unwrap_or(""))
-        .ok_or_else(|| UpdateError::Other("unparseable .sha256 asset".into()))?;
-
-    // 3. Verify checksum.
-    let got = sha256_hex(&tarball);
-    if got != expected {
-        return Err(UpdateError::ChecksumMismatch { expected, got });
-    }
-
-    // 4. Extract the binary.
-    let new_bytes = extract_binary(&tarball)?;
-
-    // 5. Atomic swap next to the current exe.
-    let exe = std::env::current_exe().map_err(|_| UpdateError::ExePath)?;
-    swap_binary(&exe, &new_bytes)?;
-
-    Ok(ApplyResult {
-        current: chk.current.clone(),
-        installed: chk.latest.clone(),
-        backup_path: Some(exe.with_extension("old").to_string_lossy().into_owned()),
-        sha256: got,
-    })
-}
-
-/// Filesystem part of the swap, split out for unit testing.
 pub fn swap_binary(exe: &Path, new_bytes: &[u8]) -> Result<(), UpdateError> {
     let new_path = exe.with_extension("new");
     let old_path = exe.with_extension("old");
@@ -862,32 +378,6 @@ pub fn swap_binary(exe: &Path, new_bytes: &[u8]) -> Result<(), UpdateError> {
     Ok(())
 }
 
-/// `git pull --ff-only` + `cargo build --release --locked` inside an
-/// existing source clone (the explicit `--from-git` path).
-pub fn run_git_update(source_dir: &Path) -> Result<String, UpdateError> {
-    let run = |args: &[&str]| -> Result<String, UpdateError> {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(source_dir)
-            .output()
-            .map_err(|e| UpdateError::Git(format!("git spawn: {e}")))?;
-        if !out.status.success() {
-            return Err(UpdateError::Git(format!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    };
-    run(&["pull", "--ff-only"])?;
-    cargo_build_release(source_dir)?;
-    Ok(source_dir
-        .join("target/release/hyprfetch")
-        .to_string_lossy()
-        .into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,31 +390,6 @@ mod tests {
         assert!(!version_newer("0.3.1", "0.3.1"));
         assert!(!version_newer("0.2.0", "0.3.0"));
         assert!(!version_newer("0.3", "0.3.0"));
-    }
-
-    #[test]
-    fn asset_pick_matches_target() {
-        let mk = |name: &str| serde_json::json!({"name": name, "size": 10, "id": 1});
-        let assets = vec![
-            mk("hyprfetch-0.3.1-aarch64-unknown-linux-gnu.tar.gz"),
-            mk("hyprfetch-0.3.1-x86_64-unknown-linux-gnu.tar.gz"),
-            mk("hyprfetch-0.3.1-x86_64-unknown-linux-musl.tar.gz"),
-        ];
-        // On this machine pick_asset matches ARCH — verify it picks SOMETHING
-        // and that a wrong-version list yields None.
-        let picked = pick_asset(&assets, "0.3.1");
-        assert!(picked.is_some(), "should find an asset for the host arch");
-        assert!(pick_asset(&assets, "9.9.9").is_none());
-    }
-
-    #[test]
-    fn sha256_file_parsing() {
-        assert_eq!(
-            parse_sha256_file("abc123  hyprfetch-0.3.1.tar.gz\n").unwrap(),
-            "abc123"
-        );
-        assert_eq!(parse_sha256_file("ABCDEF00  x").unwrap(), "abcdef00");
-        assert!(parse_sha256_file("").is_none());
     }
 
     #[test]
@@ -977,18 +442,11 @@ mod tests {
         swap_binary(&exe, b"new-binary").unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"new-binary");
         assert_eq!(
-            std::fs::read(tmp.path().join("hyprfetch.old")).unwrap(),
-            b"old-binary"
+            std::fs::read(exe.with_extension("old")).unwrap(),
+            b"old-binary",
+            "previous binary kept as rollback"
         );
-        assert!(!tmp.path().join("hyprfetch.new").exists());
-    }
-
-    #[test]
-    fn config_validation() {
-        let mut cfg = UpdateConfig::default();
-        assert!(cfg.validate().is_ok());
-        cfg.repo = "just-a-name".into();
-        assert!(cfg.validate().is_err());
+        assert!(!exe.with_extension("new").exists(), "temp file consumed");
     }
 
     #[test]
@@ -998,35 +456,39 @@ mod tests {
             "https://istias.tech/hyprfetch/updates/latest.json"
         );
         assert_eq!(
-            manifest_url("https://x.test/ch"),
-            "https://x.test/ch/latest.json"
+            manifest_url("https://istias.tech/hyprfetch/updates"),
+            "https://istias.tech/hyprfetch/updates/latest.json"
         );
     }
 
     #[test]
     fn channel_effective_url() {
         let mut cfg = UpdateConfig::default();
-        assert_eq!(
-            cfg.effective_channel(),
-            Some("https://istias.tech/hyprfetch/updates/")
-        );
+        assert_eq!(cfg.effective_channel(), Some(DEFAULT_CHANNEL_URL));
+        cfg.channel_url = String::new();
+        assert_eq!(cfg.effective_channel(), None, "empty disables the updater");
         cfg.channel_url = "  ".into();
-        assert_eq!(cfg.effective_channel(), None, "blank disables the tier");
+        assert_eq!(cfg.effective_channel(), None, "blank disables the updater");
     }
 
     fn sample_manifest() -> &'static str {
         r#"{
-          "version": "9.9.9",
-          "tag": "v9.9.9",
-          "published_at": "2026-09-29T00:00:00Z",
-          "notes_url": "https://example.test/notes",
-          "assets": {
-            "x86_64-unknown-linux-gnu": {
-              "url": "https://ch.test/9.9.9/hyprfetch-9.9.9-x86_64-unknown-linux-gnu.tar.gz",
-              "sha256": "ABCDEF00",
-              "size": 42
+            "version": "9.9.9",
+            "tag": "v9.9.9",
+            "published_at": "2026-09-29T12:00:00Z",
+            "notes_url": "https://istias.tech/hyprfetch/updates",
+            "assets": {
+                "x86_64-unknown-linux-gnu": {
+                    "url": "https://istias.tech/hyprfetch/updates/9.9.9/hyprfetch-9.9.9-linux-x64.tar.gz",
+                    "sha256": "abc123",
+                    "size": 42
+                },
+                "aarch64-unknown-linux-gnu": {
+                    "url": "https://istias.tech/hyprfetch/updates/9.9.9/hyprfetch-9.9.9-linux-arm64.tar.gz",
+                    "sha256": "def456",
+                    "size": 43
+                }
             }
-          }
         }"#
     }
 
@@ -1035,165 +497,40 @@ mod tests {
         let m: ChannelManifest = serde_json::from_str(sample_manifest()).unwrap();
         assert_eq!(m.version, "9.9.9");
         assert_eq!(m.tag, "v9.9.9");
-        let (target, asset) =
-            pick_channel_asset(&m.assets).expect("host asset missing from manifest");
-        assert!(target.starts_with("x86_64-unknown-linux"));
-        assert_eq!(asset.sha256, "ABCDEF00");
-        assert_eq!(asset.size, 42);
-        // A manifest without the host triple yields None, not a panic.
-        let mut other = m.clone();
-        other.assets.clear();
-        assert!(pick_channel_asset(&other.assets).is_none());
+        let picked = pick_channel_asset(&m.assets);
+        assert!(picked.is_some(), "host arch must find its asset");
+        let (target, a) = picked.unwrap();
+        assert_eq!(a.sha256, "abc123");
+        assert!(target.starts_with(std::env::consts::ARCH));
     }
 
     #[test]
     fn manifest_requires_version_and_assets() {
-        assert!(serde_json::from_str::<ChannelManifest>("{}\n").is_err());
+        // Missing `assets` -> parse error; missing `version` -> parse error.
         assert!(
-            serde_json::from_str::<ChannelManifest>(r#"{"version":"1.0","tag":"v1.0"}"#).is_err()
+            serde_json::from_str::<ChannelManifest>(r#"{"tag":"v1.0.0","assets":{}}"#).is_err()
         );
-        assert!(serde_json::from_str::<ChannelManifest>(sample_manifest()).is_ok());
+        assert!(serde_json::from_str::<ChannelManifest>(r#"{"version":"1.0.0"}"#).is_err());
     }
 
     #[test]
-    fn version_tag_parsing() {
-        let out = "abc123\trefs/tags/v0.2.0\n\
-                   abc124\trefs/tags/v0.3.1\n\
-                   abc125\trefs/tags/v0.3.1^{}\n\
-                   abc126\trefs/tags/nightly\n\
-                   abc127\trefs/tags/vX.Y\n\
-                   abc128\trefs/tags/1.9\n";
-        assert_eq!(parse_version_tags(out), vec!["v0.2.0", "v0.3.1", "1.9"]);
-        assert!(parse_version_tags("").is_empty());
-        // Bare line without a ref is ignored.
-        assert!(parse_version_tags("abc123\n").is_empty());
-    }
-
-    #[test]
-    fn latest_tag_selection() {
-        let tags: Vec<String> = ["v0.2.0", "v0.3.1", "v1.0.0-rc1", "0.9.9"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(latest_version_tag(&tags).as_deref(), Some("v1.0.0-rc1"));
-        let tags: Vec<String> = ["v0.3.1", "v0.2.0"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(latest_version_tag(&tags).as_deref(), Some("v0.3.1"));
-        assert!(latest_version_tag(&[]).is_none());
-    }
-
-    #[test]
-    fn git_candidate_ordering() {
-        let mut cfg = UpdateConfig::default();
-        assert_eq!(
-            git_url_candidates(&cfg),
-            vec![
-                "git@github.com:Local-DE-Coach/HyprFetch.git".to_string(),
-                "https://github.com/Local-DE-Coach/HyprFetch.git".to_string(),
-            ]
-        );
-        cfg.git_url = Some(" file:///tmp/hf.git ".into());
-        assert_eq!(git_url_candidates(&cfg)[0], "file:///tmp/hf.git");
-        // A candidate equal to the derived SSH URL is not repeated.
-        cfg.git_url = Some("git@github.com:Local-DE-Coach/HyprFetch.git".into());
-        assert_eq!(git_url_candidates(&cfg).len(), 2);
-    }
-
-    /// Minimal local repo (file:// remote) for the real-subprocess tests.
-    fn init_test_repo(dir: &Path, tags: &[&str]) -> String {
-        std::fs::create_dir_all(dir).unwrap();
-        let run = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .env("GIT_AUTHOR_NAME", "t")
-                .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
-                .env("GIT_COMMITTER_NAME", "t")
-                .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+    fn update_check_serializes_for_the_web_ui() {
+        let chk = UpdateCheck {
+            current: "0.4.0".into(),
+            latest: "0.5.0".into(),
+            available: true,
+            published_at: None,
+            release_url: None,
+            asset: Some(AssetInfo {
+                name: "hyprfetch-0.5.0-linux-x64.tar.gz".into(),
+                size: 42,
+            }),
+            channel: Some(DEFAULT_CHANNEL_URL.into()),
         };
-        run(&["init", "-q", "."]);
-        std::fs::write(dir.join("f.txt"), "x").unwrap();
-        run(&["add", "."]);
-        run(&["commit", "-qm", "init"]);
-        for t in tags {
-            run(&["tag", t]);
-        }
-        format!("file://{}", dir.display())
-    }
-
-    #[test]
-    fn ls_remote_and_shallow_clone_on_local_repo() {
-        // Skip silently when git is unavailable (minimal sandboxes).
-        if !std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let url = init_test_repo(&tmp.path().join("src"), &["v0.1.0", "v0.2.0"]);
-
-        assert_eq!(
-            ls_remote_latest_tag(&url).unwrap().as_deref(),
-            Some("v0.2.0")
-        );
-
-        // Shallow clone at an exact tag materialises the worktree.
-        let dest = tmp.path().join("clone");
-        clone_tag_shallow(&url, "v0.2.0", &dest).unwrap();
-        assert!(dest.join("f.txt").exists());
-
-        // An unreachable remote is an Err, not a panic.
-        let bad = format!("file://{}", tmp.path().join("nope").display());
-        assert!(ls_remote_latest_tag(&bad).is_err());
-    }
-
-    #[test]
-    fn pat_parsing_from_git_urls() {
-        let pat = "t".repeat(44); // synthetic 44-char token, not a real credential
-        assert_eq!(
-            parse_pat_from_git_url(&format!(
-                "https://{pat}@github.com/Local-DE-Coach/HyprFetch.git"
-            )),
-            Some(pat.to_string())
-        );
-        assert_eq!(
-            parse_pat_from_git_url(&format!("https://x-access-token:{pat}@github.com/o/r.git")),
-            Some(pat.to_string())
-        );
-        assert_eq!(
-            parse_pat_from_git_url(&format!("https://oauth2:{pat}@github.com/o/r")),
-            Some(pat.to_string())
-        );
-        assert_eq!(
-            // Any username works with a PAT on GitHub — the common
-            // `git clone https://<user>:<PAT>@…` shape.
-            parse_pat_from_git_url(&format!("https://someuser:{pat}@github.com/o/r.git")),
-            Some(pat.to_string())
-        );
-        // Negative cases.
-        assert_eq!(parse_pat_from_git_url("https://github.com/o/r.git"), None);
-        assert_eq!(
-            parse_pat_from_git_url("git@github.com:Local-DE-Coach/HyprFetch.git"),
-            None
-        );
-        assert_eq!(
-            parse_pat_from_git_url("https://short@github.com/o/r"),
-            None,
-            "tiny strings are not PATs"
-        );
-        assert_eq!(
-            parse_pat_from_git_url("https://user:pass@gitlab.com/o/r"),
-            None,
-            "non-github hosts are ignored"
-        );
+        let v = serde_json::to_value(&chk).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["asset"]["name"], "hyprfetch-0.5.0-linux-x64.tar.gz");
+        assert!(v.get("via_git").is_none(), "git tier is gone");
+        assert!(v.get("via_channel").is_none(), "channel is the only tier");
     }
 }

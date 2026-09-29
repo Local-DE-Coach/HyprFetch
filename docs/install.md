@@ -12,7 +12,9 @@ Every GitHub release provides:
 | `hyprfetch_<version>-1_amd64.deb` | Ubuntu / Debian / Mint / Pop!_OS |
 | `hyprfetch-<version>-1.x86_64.rpm` | Fedora / RHEL / CentOS / openSUSE |
 | `PKGBUILD` | Arch Linux (fast install via `makepkg`) |
-| `hyprfetch-<version>-x86_64-unknown-linux-gnu.tar.gz` | any Linux x86_64 |
+| `hyprfetch-<version>-linux-x64.tar.gz` | any Linux x86_64 |
+| `hyprfetch-<version>-linux-arm64.tar.gz` | Linux ARM64 |
+| `hyprfetch-<version>-linux-musl-x64.tar.gz` | Alpine / musl |
 | `hyprfetch-<version>-aarch64-unknown-linux-gnu.tar.gz` | any Linux ARM64 |
 | `hyprfetch-<version>-x86_64-unknown-linux-musl.tar.gz` | any Linux (fully static) |
 | `*.sha256` | checksums for the tarballs |
@@ -76,16 +78,15 @@ to install. Remove with `sudo pacman -R hyprfetch-bin`.
 ## Binary tarball (any Linux)
 
 ```bash
-# replace <target> with x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
-# or x86_64-unknown-linux-musl
-VERSION=0.2.0 TARGET=x86_64-unknown-linux-gnu
-curl -fLO "https://github.com/Local-DE-Coach/HyprFetch/releases/download/v${VERSION}/hyprfetch-${VERSION}-${TARGET}.tar.gz"
+# grab the newest version straight from the update channel (x86_64)
+VERSION=$(curl -fsSL https://istias.tech/hyprfetch/updates/latest.json | jq -r .version)
+curl -fLO "https://istias.tech/hyprfetch/updates/${VERSION}/hyprfetch-${VERSION}-linux-x64.tar.gz"
 # verify (recommended)
-curl -fLO "https://github.com/Local-DE-Coach/HyprFetch/releases/download/v${VERSION}/hyprfetch-${VERSION}-${TARGET}.tar.gz.sha256"
-sha256sum -c "hyprfetch-${VERSION}-${TARGET}.tar.gz.sha256"
+curl -fLO "https://istias.tech/hyprfetch/updates/${VERSION}/hyprfetch-${VERSION}-linux-x64.tar.gz.sha256"
+sha256sum -c "hyprfetch-${VERSION}-linux-x64.tar.gz.sha256"
 
-tar xzf "hyprfetch-${VERSION}-${TARGET}.tar.gz"
-sudo install -Dm755 "hyprfetch-${VERSION}-${TARGET}/hyprfetch" /usr/local/bin/hyprfetch
+tar xzf "hyprfetch-${VERSION}-linux-x64.tar.gz"
+sudo install -Dm755 "hyprfetch-${VERSION}-linux-x64/hyprfetch" /usr/local/bin/hyprfetch
 ```
 
 The musl tarball is fully static and runs on any Linux — including minimal
@@ -142,48 +143,36 @@ re-probed at startup and continued from the last persisted byte offset
 ## Keeping it updated
 
 Once installed, updating does not need pacman/curl again — the binary can
-update itself straight from this private repo (sha256-verified release
-tarballs, or a source build through git — whichever access you have):
+update itself straight from the project's own server:
 
 ```bash
-hyprfetch update --check                   # report only (shows the access path used)
+hyprfetch update --check                   # report only → "up to date" or the new version
 hyprfetch update                           # install + restart the daemon (auto-resume)
 ```
 
-Three access tiers are tried in order — the first that works wins:
+**One source only — the self-hosted update channel** at
+`https://istias.tech/hyprfetch/updates/latest.json`, populated by CI on
+every release: one fast HTTPS GET, no GitHub API, no rate limits, works
+even when the source repo is private. Download + sha256-verify + atomic
+swap all happen from the mirror. GitHub is never contacted. See
+`docs/update-channel.md` and the online guides
+(<https://istias.tech/hyprfetch>, <https://istias.tech/hyprfetch/updates>).
 
-0. **Update channel (fastest, default)** — checks the project's self-hosted
-   mirror (`https://istias.tech/hyprfetch/updates/latest.json`) which CI
-   populates on every release: one fast HTTPS GET, no GitHub API, no rate
-   limits, works for the private repo. Download + sha256-verify + atomic
-   swap all happen from the mirror. See `docs/update-channel.md`.
-1. **PAT tier** — GitHub API fallback when the channel is unreachable;
-   downloads the prebuilt release tarball through the GitHub
-   API (octet-stream), verifies sha256, swaps atomically. A token is picked
-   up automatically from, in order: `--token` / `HYPRFETCH_GITHUB_TOKEN` /
-   `GITHUB_TOKEN` / `GH_TOKEN`, `[update] token` in `config.toml`, the
-   `github_token` setting, a PAT-in-URL clone, `gh auth token`, or git
-   credential helpers.
-2. **Git tier — no token needed** — when the API can't see the private repo
-   but plain git can (SSH keys linked to your GitHub account, credential
-   helpers, or a local clone's origin), the updater reads the newest release
-   tag via `git ls-remote`, shallow-clones that exact tag, and runs
-   `cargo build --release --locked` (rustup's cargo is found even off-PATH).
-   So after a `git clone git@github.com:Local-DE-Coach/HyprFetch.git`-style
-   install, updates work with zero extra configuration.
+There are no fallbacks — if the mirror is unreachable the updater says so
+and points at <https://istias.tech/hyprfetch/updates> for manual steps.
+Older config keys (`[update] repo / token / git_url / source_dir`) are
+still accepted but ignored.
 
-To pin the git remote or the update channel explicitly (optional):
+To pin or disable the channel explicitly (optional):
 
 ```toml
 # ~/.config/hyprfetch/config.toml
 [update]
-git_url = "git@github.com:Local-DE-Coach/HyprFetch.git"  # or any clone URL
-channel = "https://istias.tech/hyprfetch/updates/"       # default; "" disables
+channel = "https://istias.tech/hyprfetch/updates/"   # default; "" disables
 ```
 
-If you already have a clone, `hyprfetch update --from-git --source-dir
-<clone>` pulls and rebuilds in place instead. See `docs/api.md` → "In-app
-updates" for the REST surface and the UI **Updates** card.
+See `docs/api.md` → "In-app updates" for the REST surface and the UI
+**Updates** card.
 
 ## Heavy-use note (file descriptor limits)
 

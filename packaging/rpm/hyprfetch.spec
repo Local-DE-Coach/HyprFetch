@@ -7,7 +7,7 @@ Summary:        Minimal-RAM, fast, resumable download manager with a web UI
 
 License:        MIT
 URL:            https://github.com/Local-DE-Coach/HyprFetch
-Source0:        hyprfetch-%{version}-x86_64-unknown-linux-gnu.tar.gz
+Source0:        hyprfetch-%{version}-linux-x64.tar.gz
 BuildArch:      x86_64
 
 %description

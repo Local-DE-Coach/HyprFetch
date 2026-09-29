@@ -10,8 +10,6 @@
   let busy = false
   let msg = ''
 
-  $: tokenSet = $settings?.github_token_set === 'true'
-
   async function doCheck() {
     busy = true
     msg = ''
@@ -21,9 +19,9 @@
         ? `version ${updateInfo.latest} is available`
         : updateInfo.latest
           ? 'you are on the latest release'
-          : updateInfo.error ?? 'no release information'
+          : updateInfo.error ?? 'update channel unreachable — see https://istias.tech/hyprfetch/updates'
     } catch (e) {
-      msg = `check failed: ${e.message} — set a GitHub token in Settings if this is a private-repo auth error`
+      msg = `check failed: ${e.message}`
     } finally {
       busy = false
     }
@@ -72,7 +70,7 @@
       </div>
       <ul class="text-sm opacity-70">
         <li>• {$serverInfo.active_tasks ?? 0} active task(s), {$serverInfo.ws_clients ?? 0} UI client(s) connected</li>
-        <li>• updates are checked via the istias.tech update channel first (fast, no GitHub), then GitHub releases</li>
+        <li>• updates come ONLY from the istias.tech update channel — GitHub is never contacted</li>
         <li>• downloaded archives are sha256-verified and swapped atomically</li>
         <li>• active downloads are paused and auto-resumed after the restart</li>
       </ul>
@@ -89,7 +87,7 @@
           <span class="badge badge-lg {updateInfo.available ? 'badge-success' : 'badge-ghost'}">
             latest: {versionBadge(updateInfo.latest)}
           </span>
-          {#if updateInfo.via_channel}
+          {#if updateInfo.channel}
             <span class="badge badge-lg badge-ghost">via update channel ↯</span>
           {/if}
           {#if updateInfo.available}
@@ -110,12 +108,10 @@
         {/if}
       </div>
       {#if msg}<p class="text-xs opacity-70">{msg}</p>{/if}
-      {#if !tokenSet}
-        <p class="text-xs text-warning">
-          No token stored in settings — the updater will still try env vars and your
-          local clone's origin URL. If checks fail, paste a PAT in Settings → GitHub token.
-        </p>
-      {/if}
+      <p class="text-xs opacity-60">
+        Updates are served by the project's own server (istias.tech) as
+        sha256-verified archives — no GitHub account or token needed, ever.
+      </p>
     </div>
   </section>
 

@@ -750,34 +750,15 @@ pub async fn server_info(State(state): State<AppState>) -> Json<serde_json::Valu
 // GET /api/update/check
 // ---------------------------------------------------------------------------
 
-/// `GET /api/update/check` — query the newest version and cache it.
-///
-/// Tier order: self-hosted update channel (fast mirror, no GitHub) →
-/// GitHub REST API → git tier (ls-remote over the user's SSH/clone access)
-/// when the API cannot see the repo (private repo without a token).
+/// `GET /api/update/check` — query the newest version from the self-hosted
+/// update channel (istias.tech) and cache it. GitHub is never contacted;
+/// when the channel is unreachable the response carries the updates-page
+/// URL so the UI can point the user at manual steps.
 pub async fn update_check(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let checked = match hyprfetch_core::update::check_via_channel(&state.update_cfg).await {
-        Ok(Some(c)) => Some(c),
-        Ok(None) | Err(_) => {
-            match hyprfetch_core::update::check(&state.update_cfg).await {
-                Ok(Some(c)) => Some(c),
-                Ok(None) | Err(_) => {
-                    // Private repo without a token (404/401), no release,
-                    // or API failure — try the git tier before reporting
-                    // "nothing".
-                    match hyprfetch_core::update::check_via_git(&state.update_cfg).await {
-                        Ok(Some(g)) => Some(g.check),
-                        _ => None,
-                    }
-                }
-            }
-        }
-    };
-
-    match checked {
-        Some(chk) => {
+    match hyprfetch_core::update::check(&state.update_cfg).await {
+        Ok(chk) => {
             let available = chk.available;
             let latest = chk.latest.clone();
             *state.update_cache.lock().await = Some(chk.clone());
@@ -789,11 +770,12 @@ pub async fn update_check(
                 }),
             )))
         }
-        None => Ok(Json(serde_json::json!({
+        Err(e) => Ok(Json(serde_json::json!({
             "current": env!("CARGO_PKG_VERSION"),
             "latest": null,
             "available": false,
-            "error": "no published release found",
+            "error": format!("update channel unreachable: {e}"),
+            "updates_page": hyprfetch_core::update::UPDATES_PAGE_URL,
         }))),
     }
 }
@@ -815,21 +797,13 @@ pub async fn update_apply(
     State(state): State<AppState>,
     Query(q): Query<UpdateApplyQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (latest, via_git, via_channel) = {
+    let latest = {
         let cache = state.update_cache.lock().await;
         cache
             .as_ref()
-            .map(|c| (c.latest.clone(), c.via_git, c.via_channel))
+            .map(|c| c.latest.clone())
             .ok_or_else(|| ApiError::InvalidRequest("run GET /api/update/check first".into()))?
     };
-
-    if via_git {
-        return Err(ApiError::InvalidRequest(
-            "update found via git — run `hyprfetch update` in a terminal to build \
-             and install it (the web UI cannot rebuild the binary)"
-                .into(),
-        ));
-    }
 
     let chk = hyprfetch_core::update::UpdateCheck {
         current: env!("CARGO_PKG_VERSION").to_string(),
@@ -838,22 +812,13 @@ pub async fn update_apply(
         published_at: None,
         release_url: None,
         asset: None,
-        via_git: false,
-        via_channel,
         channel: None,
     };
 
-    // Channel tier downloads from the project mirror; API tier from the
-    // GitHub release. Both sha256-verify + swap atomically.
-    let applied = if via_channel {
-        hyprfetch_core::update::apply_channel(&state.update_cfg, &chk)
-            .await
-            .map_err(|e| ApiError::InternalError(format!("update apply: {e}")))?
-    } else {
-        hyprfetch_core::update::apply(&state.update_cfg, &chk)
-            .await
-            .map_err(|e| ApiError::InternalError(format!("update apply: {e}")))?
-    };
+    // Download from the project mirror → sha256-verify → swap atomically.
+    let applied = hyprfetch_core::update::apply(&state.update_cfg, &chk)
+        .await
+        .map_err(|e| ApiError::InternalError(format!("update apply: {e}")))?;
 
     let restart = q.restart.unwrap_or(true);
     let restarted = if restart {

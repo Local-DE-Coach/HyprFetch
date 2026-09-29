@@ -72,7 +72,16 @@ jobs:
           # (it is the branch name, e.g. "main").
           VERSION="${{ inputs.tag || github.ref_name }}"
           VERSION="${VERSION#v}"
-          ARCHIVE="hyprfetch-${VERSION}-${{ matrix.target }}"
+          # Clean, human-friendly archive names for the release page AND the
+          # istias.tech update channel (the manifest maps them back to
+          # target triples for the updater).
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu)  PRETTY="linux-x64" ;;
+            aarch64-unknown-linux-gnu) PRETTY="linux-arm64" ;;
+            x86_64-unknown-linux-musl) PRETTY="linux-musl-x64" ;;
+            *)                         PRETTY="${{ matrix.target }}" ;;
+          esac
+          ARCHIVE="hyprfetch-${VERSION}-${PRETTY}"
           mkdir -p "$ARCHIVE"
           cp target/${{ matrix.target }}/release/hyprfetch "$ARCHIVE/"
           cp README.md LICENSE CHANGELOG.md "$ARCHIVE/"
@@ -105,7 +114,7 @@ jobs:
           VERSION="${VERSION#v}"
           TOPDIR="$PWD/rpmbuild"
           mkdir -p "$TOPDIR"/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
-          cp "hyprfetch-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" "$TOPDIR/SOURCES/"
+          cp "hyprfetch-${VERSION}-linux-x64.tar.gz" "$TOPDIR/SOURCES/"
           sed "s/__VERSION__/${VERSION}/" packaging/rpm/hyprfetch.spec > "$TOPDIR/SPECS/hyprfetch.spec"
           rpmbuild -bb --define "_topdir $TOPDIR" "$TOPDIR/SPECS/hyprfetch.spec"
           cp "$TOPDIR"/RPMS/x86_64/hyprfetch-*.rpm ./
@@ -144,12 +153,110 @@ jobs:
           VERSION="${{ inputs.tag || github.ref_name }}"
           VERSION="${VERSION#v}"
           # The sha256 file format is "<hash>  <filename>"; take the hash.
-          SHA=$(cut -d' ' -f1 "artifacts/hyprfetch-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256")
+          SHA=$(cut -d' ' -f1 "artifacts/hyprfetch-${VERSION}-linux-x64.tar.gz.sha256")
           sed -e "s/__VERSION__/${VERSION}/g" -e "s/__SHA256__/${SHA}/" \
             packaging/arch/PKGBUILD.bin.template > PKGBUILD
           # Syntax-check the generated PKGBUILD; print it for the run log.
           bash -n PKGBUILD
           cat PKGBUILD
+
+      - name: Generate release notes (changelog + update/install commands)
+        env:
+          UPDATES_PAGE: https://istias.tech/hyprfetch/updates
+          PRODUCT_PAGE: https://istias.tech/hyprfetch
+        run: |
+          # Assembled with python3 (NOT a shell heredoc) so changelog content
+          # containing backticks / $(…) / quotes can never be interpreted.
+          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          VERSION="$VERSION" UPDATES_PAGE="$UPDATES_PAGE" PRODUCT_PAGE="$PRODUCT_PAGE" python3 - <<'PYEOF'
+          import os, re
+
+          version = os.environ["VERSION"]
+          updates_page = os.environ["UPDATES_PAGE"]
+          product_page = os.environ["PRODUCT_PAGE"]
+
+          # Pull the matching "## [X.Y.Z]" section out of CHANGELOG.md (if
+          # present) so every release shows its own what's-changed list.
+          section = []
+          try:
+              with open("CHANGELOG.md", encoding="utf-8") as f:
+                  in_section = False
+                  for line in f:
+                      if re.match(rf"^## \[{re.escape(version)}\]", line):
+                          in_section = True
+                          continue
+                      if in_section and line.startswith("## ["):
+                          break
+                      if in_section:
+                          section.append(re.sub(r"^### ", "#### ", line.rstrip()))
+          except FileNotFoundError:
+              pass
+          while section and not section[-1].strip():
+              section.pop()
+          section_md = "\n".join(section) or \
+              "Maintenance release — see the commit history for details."
+
+          sha = "<see the .sha256 assets>"
+          try:
+              with open(f"artifacts/hyprfetch-{version}-linux-x64.tar.gz.sha256") as f:
+                  sha = f.read().split()[0]
+          except (FileNotFoundError, IndexError):
+              pass
+
+          body = f"""> Fast, minimal-RAM, resumable download manager with a browser control panel.
+          > **Project page:** {product_page} · **Update guide:** {updates_page}
+
+          ## 🔄 Update (from any previous version)
+
+          ```bash
+          hyprfetch update --check   # → "up to date" or the new version
+          hyprfetch update           # → download → sha256-verify → atomic swap → restart
+          ```
+
+          Updates come from the project's own server — one fast HTTPS request, **no
+          GitHub account or token needed**. Running the web UI? Open
+          **http://127.0.0.1:7780 → Updates → Check now → Install & restart.**
+
+          ## 📦 Fresh install (per platform)
+
+          | Platform | Command |
+          |---|---|
+          | **Arch / CachyOS** | `curl -fLO https://github.com/Local-DE-Coach/HyprFetch/releases/latest/download/PKGBUILD && makepkg -si` |
+          | **Debian / Ubuntu** | download the `.deb` below → `sudo apt install ./hyprfetch_*.deb` |
+          | **Fedora / RHEL** | download the `.rpm` below → `sudo dnf install ./hyprfetch-*.rpm` |
+          | **Any Linux x64** | tarball below → `sudo install -Dm755 hyprfetch /usr/local/bin/hyprfetch` |
+
+          Full walkthroughs: <{product_page}> (install + test steps) · <{updates_page}> (update steps)
+
+          ## ✨ What's changed in v{version}
+
+          {section_md}
+
+          ## 📥 Downloads
+
+          | File | Platform |
+          |---|---|
+          | `hyprfetch-{version}-linux-x64.tar.gz` | Linux x86_64 (glibc) — recommended |
+          | `hyprfetch-{version}-linux-arm64.tar.gz` | Linux ARM64 (glibc) |
+          | `hyprfetch-{version}-linux-musl-x64.tar.gz` | Linux x86_64 (musl / Alpine) |
+          | `hyprfetch_{version}-1_amd64.deb` | Debian / Ubuntu |
+          | `hyprfetch-{version}-1.x86_64.rpm` | Fedora / RHEL |
+          | `PKGBUILD` | Arch Linux (makepkg -si) |
+
+          ## 🔐 Verify
+
+          ```bash
+          sha256sum -c <<< "{sha}  hyprfetch-{version}-linux-x64.tar.gz"
+          ```
+
+          `hyprfetch update` verifies this automatically before swapping anything.
+          """
+          with open("release_notes.md", "w", encoding="utf-8") as f:
+              f.write(body)
+          print("--- release_notes.md ---")
+          print(body)
+          PYEOF
 
       - name: Create / update release
         uses: softprops/action-gh-release@v3
@@ -157,6 +264,7 @@ jobs:
           # Attach artifacts to the tag the build was made for (inputs.tag on
           # workflow_dispatch, the pushed tag otherwise) — never the branch name.
           tag_name: ${{ inputs.tag || github.ref_name }}
+          body_path: release_notes.md
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
@@ -196,16 +304,22 @@ jobs:
       - name: Generate latest.json update manifest
         env:
           CHANNEL_BASE: https://istias.tech/hyprfetch/updates
-          REPO_SLUG: Local-DE-Coach/HyprFetch
         run: |
           VERSION="${{ inputs.tag || github.ref_name }}"
           VERSION="${VERSION#v}"
           # assets: { "<target-triple>": {url, sha256, size} } built from the
-          # produced archives + their .sha256 files.
+          # produced archives (clean names) + their .sha256 files. The updater
+          # keys by target triple, so map the clean suffix back.
+          declare -A TRIPLE=(
+            [linux-x64]=x86_64-unknown-linux-gnu
+            [linux-arm64]=aarch64-unknown-linux-gnu
+            [linux-musl-x64]=x86_64-unknown-linux-musl
+          )
           ASSETS="{}"
           for F in artifacts/hyprfetch-"$VERSION"-*.tar.gz; do
             NAME=$(basename "$F")
-            TARGET="${NAME#hyprfetch-$VERSION-}"; TARGET="${TARGET%.tar.gz}"
+            PRETTY="${NAME#hyprfetch-$VERSION-}"; PRETTY="${PRETTY%.tar.gz}"
+            TARGET="${TRIPLE[$PRETTY]:-$PRETTY}"
             SHA=$(cut -d' ' -f1 "artifacts/$NAME.sha256")
             SIZE=$(stat -c%s "$F")
             ASSETS=$(jq -c --arg t "$TARGET" --arg url "$CHANNEL_BASE/$VERSION/$NAME" \
@@ -216,7 +330,7 @@ jobs:
             --arg version "$VERSION" \
             --arg tag "v$VERSION" \
             --arg published "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg notes "https://github.com/${REPO_SLUG}/releases/tag/v$VERSION" \
+            --arg notes "https://istias.tech/hyprfetch/updates" \
             --argjson assets "$ASSETS" \
             '{version: $version, tag: $tag, published_at: $published,
               notes_url: $notes, assets: $assets}' > latest.json
