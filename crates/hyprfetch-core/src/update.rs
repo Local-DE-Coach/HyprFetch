@@ -431,7 +431,7 @@ pub fn package_owner(exe: &Path) -> Option<String> {
     let s = String::from_utf8_lossy(&out.stdout);
     s.split("is owned by")
         .nth(1)
-        .map(|rest| rest.trim().trim_end_matches('.') .to_string())
+        .map(|rest| rest.trim().trim_end_matches('.').to_string())
 }
 
 /// The release archive naming scheme is `hyprfetch-<ver>-<target>.tar.gz`.
@@ -501,11 +501,7 @@ pub struct ApplyResult {
 /// 0755). A single script keeps the swap self-recovering: if `install`
 /// fails, the script moves the old binary back before exiting, so the
 /// system never ends up without a working `hyprfetch`.
-pub fn swap_binary_escalated(
-    exe: &Path,
-    new_bytes: &[u8],
-    tool: &str,
-) -> Result<(), UpdateError> {
+pub fn swap_binary_escalated(exe: &Path, new_bytes: &[u8], tool: &str) -> Result<(), UpdateError> {
     // Stage the new binary where the CURRENT user can write it; the
     // privileged step then installs it into place (root-owned, 0755).
     let stage_dir: PathBuf = std::env::temp_dir().join(format!(
@@ -733,7 +729,11 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("hyprfetch-update-"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("hyprfetch-update-")
+            })
             .collect();
         assert!(leftovers.is_empty(), "staging dir must be cleaned up");
     }
@@ -754,8 +754,7 @@ mod tests {
         std::fs::write(&shim, "#!/bin/sh\nexit 3\n").unwrap();
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let err =
-            swap_binary_escalated(&exe, b"new-binary", shim.to_str().unwrap()).unwrap_err();
+        let err = swap_binary_escalated(&exe, b"new-binary", shim.to_str().unwrap()).unwrap_err();
         assert!(
             err.to_string().starts_with("privileged swap via ") && err.to_string().ends_with(
                 "was left untouched; run `sudo hyprfetch update` manually if the problem persists"
@@ -767,7 +766,10 @@ mod tests {
             b"old-binary",
             "failed escalation must not destroy the installed binary"
         );
-        assert!(!exe.with_extension("old").exists(), "rollback restored the original");
+        assert!(
+            !exe.with_extension("old").exists(),
+            "rollback restored the original"
+        );
     }
 
     #[test]
