@@ -6,9 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
-## [Unreleased] — install/uninstall hardening around the channel
+## [Unreleased]
+
+## [0.4.1] — 2026-09-30 (install/uninstall hardening + tag-per-release flow)
 
 ### Added
+- **Tag-per-release release flow** (`release.yml`): the workflow now derives
+  the release tag from the app version in `[workspace.package]`
+  (`Cargo.toml`) itself — bump the version, dispatch the workflow, and it
+  creates + pushes the NEW annotated tag (`0.4.1` → `v0.4.1`), builds,
+  publishes a NEW release on that tag and mirrors the update channel.
+  Guards: dispatching with an already-released version **fails** ("re-
+  releasing on an old tag is not allowed" — the old-tag re-publish that
+  repaired v0.4.0 in place is now impossible); a stale tag pointing at
+  another commit fails; a pushed tag that mismatches `Cargo.toml` fails;
+  a tag that exists at HEAD without a release (a crashed run) is the only
+  allowed re-entry path. Build/release jobs check out the resolved tag, so
+  artifacts always correspond exactly to the tagged code.
 - **One-line installer** (`https://istias.tech/hyprfetch/updates/install.sh`,
   served by the Docs-side mirror): POSIX sh, detects CPU + libc, resolves
   `latest.json`, sha256-verifies the tarball, installs to

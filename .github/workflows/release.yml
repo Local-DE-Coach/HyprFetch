@@ -1,15 +1,33 @@
 name: Release
 
+# ---------------------------------------------------------------------------
+# Every release gets its OWN NEW tag — derived from the app version in
+# [workspace.package] of Cargo.toml. Releases are never created or updated
+# on an old tag.
+#
+# How to cut a release:
+#   1. Bump `version` in [workspace.package] (Cargo.toml) — e.g. 0.4.0 → 0.4.1
+#   2. Commit to main (with the CHANGELOG.md section for the new version)
+#   3. Run this workflow (Actions → Release → Run workflow)
+#   → the workflow creates + pushes the NEW tag v0.4.1 at HEAD, builds,
+#     publishes a NEW release on that tag, and mirrors the update channel.
+#
+# Alternatively push a matching tag yourself (git tag -a v0.4.1 && git push);
+# the workflow then verifies tag == Cargo.toml version and builds it.
+#
+# Guards:
+#   * If the tag for the current Cargo.toml version ALREADY EXISTS and a
+#     GitHub release for it exists → the workflow FAILS ("bump the version").
+#     Re-releasing on an old tag is not allowed.
+#   * If the tag exists but has NO release (a previous run died mid-way) and
+#     points at the current HEAD → the run continues (recovery path).
+# ---------------------------------------------------------------------------
+
 on:
   push:
     tags:
       - "v*.*.*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to build (must already exist on the repo)"
-        required: true
-        type: string
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -18,8 +36,86 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # -------------------------------------------------------------------------
+  # Prepare: resolve version → tag, create + push the NEW tag (dispatch) or
+  # verify the pushed tag matches the version (tag push).
+  # -------------------------------------------------------------------------
+  prepare:
+    name: Resolve version + create release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag + guard against old-tag re-releases
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          PUSHED_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # App version — single source of truth: [workspace.package] in Cargo.toml.
+          VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read 'version' from [workspace.package] in Cargo.toml"
+            exit 1
+          fi
+          TAG="v$VERSION"
+
+          if [ "$EVENT" = "push" ]; then
+            # A tag was pushed manually: it must match the declared version.
+            if [ "$PUSHED_TAG" != "$TAG" ]; then
+              echo "::error::Pushed tag $PUSHED_TAG does not match Cargo.toml version ($TAG). Fix the tag or bump [workspace.package] version, then retry."
+              exit 1
+            fi
+            echo "Releasing pushed tag $TAG — matches Cargo.toml ✓"
+          else
+            # workflow_dispatch: release the CURRENT version on a NEW tag.
+            TAG_COMMIT=$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')
+            if [ -n "$TAG_COMMIT" ]; then
+              # Tag exists already. Allowed only as a crash-recovery path:
+              # same commit AND no GitHub release for it yet.
+              RELEASE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                "https://api.github.com/repos/$REPO/releases/tags/$TAG")
+              if [ "$RELEASE_CODE" = "200" ]; then
+                echo "::error::Tag $TAG already exists AND is already released. Re-releasing on an old tag is not allowed."
+                echo "        To ship a new release: bump 'version' in [workspace.package] (Cargo.toml),"
+                echo "        commit to main, then run this workflow again."
+                exit 1
+              fi
+              HEAD_COMMIT=$(git rev-parse HEAD)
+              if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+                echo "::error::Tag $TAG exists but points at $TAG_COMMIT, not HEAD ($HEAD_COMMIT), and has no release. Delete the stale tag first (git push origin :refs/tags/$TAG) or bump the version."
+                exit 1
+              fi
+              echo "Tag $TAG exists at HEAD with NO release — previous run died mid-release; continuing (recovery path)."
+            else
+              git config user.name  "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              # Remote has no such tag; drop any stale LOCAL copy so tag -a
+              # cannot fail (e.g. fetched tags from a partial earlier run).
+              git tag -d "$TAG" 2>/dev/null || true
+              git tag -a "$TAG" -m "HyprFetch $TAG"
+              git push origin "$TAG"
+              echo "Created + pushed NEW release tag $TAG at $(git rev-parse --short HEAD)"
+            fi
+          fi
+
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -33,6 +129,8 @@ jobs:
             archive: tar.gz
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -67,10 +165,9 @@ jobs:
 
       - name: Package
         run: |
-          # Prefer the workflow_dispatch `tag` input; on a tag push use the
-          # pushed tag. GITHUB_REF_NAME alone is wrong for workflow_dispatch
-          # (it is the branch name, e.g. "main").
-          VERSION="${{ inputs.tag || github.ref_name }}"
+          # Version comes from the tag resolved by the prepare job (the NEW
+          # tag created from Cargo.toml, or the pushed tag it verified).
+          VERSION="${{ needs.prepare.outputs.tag }}"
           VERSION="${VERSION#v}"
           # Clean, human-friendly archive names for the release page AND the
           # istias.tech update channel (the manifest maps them back to
@@ -110,7 +207,7 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           sudo apt-get install -y -qq rpm
-          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${{ needs.prepare.outputs.tag }}"
           VERSION="${VERSION#v}"
           TOPDIR="$PWD/rpmbuild"
           mkdir -p "$TOPDIR"/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
@@ -133,12 +230,14 @@ jobs:
 
   release:
     name: Publish release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - uses: actions/download-artifact@v8
         with:
@@ -150,7 +249,7 @@ jobs:
 
       - name: Generate Arch PKGBUILD (AUR fast install)
         run: |
-          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${{ needs.prepare.outputs.tag }}"
           VERSION="${VERSION#v}"
           # The sha256 file format is "<hash>  <filename>"; take the hash.
           SHA=$(cut -d' ' -f1 "artifacts/hyprfetch-${VERSION}-linux-x64.tar.gz.sha256")
@@ -167,7 +266,7 @@ jobs:
         run: |
           # Assembled with python3 (NOT a shell heredoc) so changelog content
           # containing backticks / $(…) / quotes can never be interpreted.
-          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${{ needs.prepare.outputs.tag }}"
           VERSION="${VERSION#v}"
           VERSION="$VERSION" UPDATES_PAGE="$UPDATES_PAGE" PRODUCT_PAGE="$PRODUCT_PAGE" python3 - <<'PYEOF'
           import os, re
@@ -271,9 +370,9 @@ jobs:
       - name: Create / update release
         uses: softprops/action-gh-release@v3
         with:
-          # Attach artifacts to the tag the build was made for (inputs.tag on
-          # workflow_dispatch, the pushed tag otherwise) — never the branch name.
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          # Attach artifacts to the tag the build was made for — the NEW tag
+          # created by the prepare job (or the pushed/matched tag), never a branch.
+          tag_name: ${{ needs.prepare.outputs.tag }}
           body_path: release_notes.md
           generate_release_notes: true
           fail_on_unmatched_files: true
@@ -303,7 +402,7 @@ jobs:
   # ---------------------------------------------------------------------
   deploy-update-channel:
     name: Deploy update channel (istias.tech)
-    needs: release
+    needs: [prepare, release]
     runs-on: ubuntu-latest
     # Direct-SSH mirror: needs DEPLOY_SSH_KEY authorized for the DEPLOY_USER
     # on the server. When the key/user combination isn't right (or org
@@ -322,7 +421,7 @@ jobs:
         env:
           CHANNEL_BASE: https://istias.tech/hyprfetch/updates
         run: |
-          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${{ needs.prepare.outputs.tag }}"
           VERSION="${VERSION#v}"
           # assets: { "<target-triple>": {url, sha256, size} } built from the
           # produced archives (clean names) + their .sha256 files. The updater
@@ -375,7 +474,7 @@ jobs:
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/var/www/istias.tech/hyprfetch' }}
         run: |
-          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${{ needs.prepare.outputs.tag }}"
           VERSION="${VERSION#v}"
           mkdir -p ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/deploy_key
@@ -399,7 +498,7 @@ jobs:
       - name: Verify the channel serves the new version
         if: steps.secrets.outputs.configured == 'true'
         run: |
-          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${{ needs.prepare.outputs.tag }}"
           VERSION="${VERSION#v}"
           GOT=$(curl -fsS --max-time 30 \
                   https://istias.tech/hyprfetch/updates/latest.json \
