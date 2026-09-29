@@ -751,12 +751,24 @@ pub async fn server_info(State(state): State<AppState>) -> Json<serde_json::Valu
 // ---------------------------------------------------------------------------
 
 /// `GET /api/update/check` — query the latest GitHub release and cache it.
+///
+/// Falls back to the git tier (ls-remote over the user's SSH/clone access)
+/// when the REST API cannot see the repo (private repo without a token) or
+/// the API call fails entirely.
 pub async fn update_check(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let checked = hyprfetch_core::update::check(&state.update_cfg)
-        .await
-        .map_err(|e| ApiError::InternalError(format!("update check: {e}")))?;
+    let checked = match hyprfetch_core::update::check(&state.update_cfg).await {
+        Ok(Some(c)) => Some(c),
+        Ok(None) | Err(_) => {
+            // Private repo without a token (404/401), no release, or API
+            // failure — try the git tier before reporting "nothing".
+            match hyprfetch_core::update::check_via_git(&state.update_cfg).await {
+                Ok(Some(g)) => Some(g.check),
+                _ => None,
+            }
+        }
+    };
 
     match checked {
         Some(chk) => {
@@ -797,13 +809,21 @@ pub async fn update_apply(
     State(state): State<AppState>,
     Query(q): Query<UpdateApplyQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let latest = {
+    let (latest, via_git) = {
         let cache = state.update_cache.lock().await;
         cache
             .as_ref()
-            .map(|c| c.latest.clone())
+            .map(|c| (c.latest.clone(), c.via_git))
             .ok_or_else(|| ApiError::InvalidRequest("run GET /api/update/check first".into()))?
     };
+
+    if via_git {
+        return Err(ApiError::InvalidRequest(
+            "update found via git — run `hyprfetch update` in a terminal to build \
+             and install it (the web UI cannot rebuild the binary)"
+                .into(),
+        ));
+    }
 
     let chk = hyprfetch_core::update::UpdateCheck {
         current: env!("CARGO_PKG_VERSION").to_string(),
@@ -812,6 +832,7 @@ pub async fn update_apply(
         published_at: None,
         release_url: None,
         asset: None,
+        via_git: false,
     };
 
     let applied = hyprfetch_core::update::apply(&state.update_cfg, &chk)

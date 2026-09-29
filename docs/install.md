@@ -142,17 +142,40 @@ re-probed at startup and continued from the last persisted byte offset
 ## Keeping it updated
 
 Once installed, updating does not need pacman/curl again — the binary can
-update itself straight from GitHub releases (PAT-aware for this private
-repo, sha256-verified, atomic swap):
+update itself straight from this private repo (sha256-verified release
+tarballs, or a source build through git — whichever access you have):
 
 ```bash
-export HYPRFETCH_GITHUB_TOKEN=<YOUR_PAT>   # or [update] token in config.toml
-hyprfetch update --check                   # report only
+hyprfetch update --check                   # report only (shows the access path used)
 hyprfetch update                           # install + restart the daemon (auto-resume)
 ```
 
-If you installed from a source clone instead, `hyprfetch update --from-git
---source-dir <clone>` pulls and rebuilds. See `docs/api.md` → "In-app
+Two access tiers are tried in order — the first that works wins:
+
+1. **PAT tier** — downloads the prebuilt release tarball through the GitHub
+   API (octet-stream), verifies sha256, swaps atomically. A token is picked
+   up automatically from, in order: `--token` / `HYPRFETCH_GITHUB_TOKEN` /
+   `GITHUB_TOKEN` / `GH_TOKEN`, `[update] token` in `config.toml`, the
+   `github_token` setting, a PAT-in-URL clone, `gh auth token`, or git
+   credential helpers.
+2. **Git tier — no token needed** — when the API can't see the private repo
+   but plain git can (SSH keys linked to your GitHub account, credential
+   helpers, or a local clone's origin), the updater reads the newest release
+   tag via `git ls-remote`, shallow-clones that exact tag, and runs
+   `cargo build --release --locked` (rustup's cargo is found even off-PATH).
+   So after a `git clone git@github.com:Local-DE-Coach/HyprFetch.git`-style
+   install, updates work with zero extra configuration.
+
+To pin the git remote explicitly (optional):
+
+```toml
+# ~/.config/hyprfetch/config.toml
+[update]
+git_url = "git@github.com:Local-DE-Coach/HyprFetch.git"  # or any clone URL
+```
+
+If you already have a clone, `hyprfetch update --from-git --source-dir
+<clone>` pulls and rebuilds in place instead. See `docs/api.md` → "In-app
 updates" for the REST surface and the UI **Updates** card.
 
 ## Heavy-use note (file descriptor limits)

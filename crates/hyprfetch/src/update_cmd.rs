@@ -1,16 +1,32 @@
 //! `hyprfetch update` — in-app updater CLI.
 //!
-//! Binary install path: query the latest GitHub release (PAT-aware for the
-//! private repo) → download the matching tarball through the API octet-stream
-//! endpoint → sha256-verify → swap the binary atomically → restart the daemon
-//! when one is running. Source install path (`--from-git`): `git pull` +
-//! `cargo build --release --locked` inside the configured clone, then swap.
+//! Two access tiers, tried in order:
+//!
+//! 1. **GitHub REST API** with a token (env / config / settings DB /
+//!    clone-origin PAT / `gh auth token` / git credential helpers) —
+//!    downloads the prebuilt release tarball through the octet-stream
+//!    endpoint, sha256-verifies it, swaps the binary atomically and
+//!    restarts the daemon.
+//! 2. **Plain git** (SSH keys, credential helpers, local clone remotes) —
+//!    resolves the newest version tag via `ls-remote`, shallow-clones it,
+//!    builds with `cargo build --release --locked`, then swaps + restarts.
+//!    This is what makes `hyprfetch update` work on PRIVATE repos without
+//!    any token: if `git pull` works for the user, the updater works too.
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 
+use hyprfetch_core::update::{UpdateCheck, UpdateConfig};
+
 use crate::{daemon, helpers, UpdateArgs};
+
+/// Outcome of the interactive confirmation gate.
+enum Confirm {
+    Proceed,
+    Abort,
+}
+
 /// Entry point for the `update` subcommand.
 pub async fn run(args: UpdateArgs) -> Result<()> {
     crate::logger::init(crate::logger::LogMode::Prod, None)?;
@@ -19,34 +35,83 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
         return run_from_git(&args).await;
     }
 
-    let cfg = helpers::resolve_update_cfg(args.repo.as_deref(), args.token.as_deref());
-    if args.repo.is_none() && args.token.is_none() {
-        let auth = if cfg.token.is_some() {
-            "authenticated (token)"
-        } else {
-            "unauthenticated (public repos only)"
+    // Load the config file so `[update]` settings (token / git_url /
+    // source_dir / repo) apply to the CLI updater too.
+    let cfg_file = helpers::load_config(args.config.as_deref())?;
+    let cfg = helpers::resolve_update_cfg_with_db(
+        args.repo.as_deref(),
+        args.token.as_deref(),
+        &cfg_file.update,
+        None,
+    );
+
+    if args.repo.is_none() {
+        let auth = match cfg.token_source {
+            Some(src) => format!("authenticated ({src})"),
+            None => "unauthenticated (public repos + git/SSH access)".to_string(),
         };
         println!("checking {} ({auth})…", cfg.repo);
     }
 
-    let Some(chk) = hyprfetch_core::update::check(&cfg)
-        .await
-        .context("update check failed")?
-    else {
-        println!("no published release found for {}", cfg.repo);
-        return Ok(());
+    // ---- Tier 1: REST API (token or public repo) -------------------------
+    // ---- Tier 2: plain git (private repos with SSH/clone access) --------
+    // `git` carries (remote_url, tag) of the working git-tier remote.
+    let (chk, git) = match hyprfetch_core::update::check(&cfg).await {
+        Ok(Some(c)) => (Some(c), None),
+        // 404 (private repo without a token / no release) or API trouble:
+        // fall back to the git tier before giving up.
+        Ok(None) | Err(_) => match hyprfetch_core::update::check_via_git(&cfg).await {
+            Ok(Some(g)) => {
+                println!("git access detected via {}", g.via_url);
+                (Some(g.check), Some((g.via_url, g.tag)))
+            }
+            Ok(None) => {
+                println!("no published release found for {}", cfg.repo);
+                return Ok(());
+            }
+            Err(ge) => {
+                println!("no published release found for {}", cfg.repo);
+                println!();
+                println!("no GitHub access could be established for this repo.");
+                println!("Any ONE of these unlocks updates:");
+                println!(
+                    "  export HYPRFETCH_GITHUB_TOKEN=<PAT with access to {}>",
+                    cfg.repo
+                );
+                println!("  gh auth login            # github CLI login");
+                println!(
+                    "  git clone git@github.com:{}.git   # SSH key with access",
+                    cfg.repo
+                );
+                println!("  # or [update] token = \"…\" / git_url = \"…\" in the config file");
+                tracing::debug!(error = %ge, "git tier also failed");
+                return Ok(());
+            }
+        },
+    };
+
+    // Both surviving arms always carry a check result (the None/Err arms
+    // return early), so unwrap once here.
+    let Some(chk) = chk else {
+        unreachable!("tier fallbacks return early when no result exists");
     };
 
     println!("current version : {}", chk.current);
     println!("latest release  : {}", chk.latest);
-    match &chk.asset {
-        Some(a) => println!("asset           : {} ({} bytes)", a.name, a.size),
-        None => println!("asset           : none for this machine's target"),
+    match (&chk.asset, &git) {
+        (Some(a), _) => println!("asset           : {} ({} bytes)", a.name, a.size),
+        (None, Some((url, _))) => println!("install method  : build from source via git ({url})"),
+        (None, None) => println!("asset           : none for this machine's target"),
     }
 
     if args.check {
         if chk.available {
-            println!("→ update available: run `hyprfetch update` to install");
+            let how = if git.is_some() {
+                " (builds from source via git — no token needed)"
+            } else {
+                ""
+            };
+            println!("→ update available: run `hyprfetch update`{how}");
         } else {
             println!("→ up to date");
         }
@@ -57,45 +122,39 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
         println!("already on the latest version — nothing to do");
         return Ok(());
     }
-    if chk.asset.is_none() {
-        bail!(
-            "release {} has no tarball for this target — install manually from {}",
-            chk.latest,
-            chk.release_url.as_deref().unwrap_or("the releases page")
-        );
-    }
 
-    // Confirmation gate: interactive prompt, or --yes / non-tty auto-yes.
+    // ---- Install ---------------------------------------------------------
+    match &git {
+        Some((url, tag)) => install_from_git(&args, url, tag, &chk).await,
+        None => install_from_release(&args, &cfg, &chk).await,
+    }
+}
+
+/// Confirmation gate: interactive prompt, or `--yes` / `HYPRFETCH_ASSUME_YES`
+/// for non-interactive runs (scripts must opt in).
+fn confirm(args: &UpdateArgs, from: &str, to: &str) -> Result<Confirm> {
     let interactive = unsafe { libc::isatty(0) } == 1;
     if interactive && !args.yes {
-        print!("install {} over {}? [y/N] ", chk.latest, chk.current);
+        print!("install {to} over {from}? [y/N] ");
         std::io::Write::flush(&mut std::io::stdout())?;
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         if !matches!(line.trim(), "y" | "Y" | "yes") {
             println!("aborted");
-            return Ok(());
+            return Ok(Confirm::Abort);
         }
     } else if !args.yes && std::env::var("HYPRFETCH_ASSUME_YES").is_err() {
         // Non-interactive without --yes: refuse, so scripts must opt in.
         bail!("refusing to update non-interactively without --yes");
     }
+    Ok(Confirm::Proceed)
+}
 
-    println!(
-        "downloading + verifying {}…",
-        chk.asset.as_ref().unwrap().name
-    );
-    let applied = hyprfetch_core::update::apply(&cfg, &chk).await?;
-    println!(
-        "installed {} (sha256 {})",
-        applied.installed,
-        &applied.sha256[..16]
-    );
-    if let Some(b) = &applied.backup_path {
+/// Print the post-install status + restart the daemon when one is running.
+fn finish_install(backup: Option<&str>) -> Result<()> {
+    if let Some(b) = backup {
         println!("previous binary kept at {b}");
     }
-
-    // Restart the daemon so the new binary takes effect (auto-resume).
     if daemon::is_running().is_some() {
         println!("restarting daemon to apply…");
         daemon::restart(&[])?;
@@ -106,12 +165,81 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-/// `--from-git`: pull + rebuild inside a source clone, then swap.
+/// API-tier install: download → sha256 verify → atomic swap → restart.
+async fn install_from_release(
+    args: &UpdateArgs,
+    cfg: &UpdateConfig,
+    chk: &UpdateCheck,
+) -> Result<()> {
+    if chk.asset.is_none() {
+        bail!(
+            "release {} has no tarball for this target — install manually from {} \
+             or run `hyprfetch update --from-git`",
+            chk.latest,
+            chk.release_url.as_deref().unwrap_or("the releases page")
+        );
+    }
+
+    match confirm(args, &chk.current, &chk.latest)? {
+        Confirm::Abort => return Ok(()),
+        Confirm::Proceed => {}
+    }
+
+    println!(
+        "downloading + verifying {}…",
+        chk.asset.as_ref().unwrap().name
+    );
+    let applied = hyprfetch_core::update::apply(cfg, chk).await?;
+    println!(
+        "installed {} (sha256 {})",
+        applied.installed,
+        &applied.sha256[..16]
+    );
+    finish_install(applied.backup_path.as_deref())
+}
+
+/// Git-tier install: shallow-clone the release tag into a temp dir, build
+/// with the user's own toolchain, swap the binary, restart the daemon.
+async fn install_from_git(
+    args: &UpdateArgs,
+    via_url: &str,
+    tag: &str,
+    chk: &UpdateCheck,
+) -> Result<()> {
+    match confirm(args, &chk.current, &chk.latest)? {
+        Confirm::Abort => return Ok(()),
+        Confirm::Proceed => {}
+    }
+
+    let dest = std::env::temp_dir().join(format!("hyprfetch-update-{}", std::process::id()));
+    println!(
+        "building {tag} from source (shallow clone into {})…",
+        dest.display()
+    );
+    let built = hyprfetch_core::update::build_from_tag(via_url, tag, &dest)
+        .with_context(|| format!("building {tag} from source via git"))?;
+    let bytes = std::fs::read(&built)
+        .with_context(|| format!("reading freshly built binary {}", built.display()))?;
+
+    let exe = std::env::current_exe().context("resolving current exe")?;
+    hyprfetch_core::update::swap_binary(&exe, &bytes)
+        .with_context(|| format!("swapping {} (permission denied? try sudo)", exe.display()))?;
+    let _ = std::fs::remove_dir_all(&dest);
+
+    println!(
+        "installed {} (built from source, swapped over {})",
+        chk.latest,
+        exe.display()
+    );
+    finish_install(Some(&exe.with_extension("old").to_string_lossy()))
+}
+
+/// `--from-git`: pull + rebuild inside an existing source clone, then swap.
 async fn run_from_git(args: &UpdateArgs) -> Result<()> {
     let source_dir: PathBuf = match args.source_dir.clone() {
         Some(d) => d,
         // Fall back to [update] source_dir from the config file.
-        None => helpers::load_config(None)
+        None => helpers::load_config(args.config.as_deref())
             .ok()
             .and_then(|c| c.update.and_then(|u| u.source_dir))
             .ok_or_else(|| {

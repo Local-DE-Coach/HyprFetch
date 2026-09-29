@@ -17,6 +17,9 @@ pub struct UpdateCfg {
     pub token: Option<String>,
     /// Source clone path for `hyprfetch update --from-git`.
     pub source_dir: Option<PathBuf>,
+    /// Git remote used when the REST API cannot see the repo (private repo
+    /// + SSH access). Falls back to a local clone's origin automatically.
+    pub git_url: Option<String>,
 }
 
 /// Flat config-file model. Unknown keys are ignored so newer fields don't
@@ -148,19 +151,31 @@ const CLONE_SCAN_PATHS: &[&str] = &[
     "Developer/HyprFetch",
 ];
 
-/// Try to find a GitHub PAT in the origin URL of a local HyprFetch clone.
-/// Checks the configured `[update] source_dir` first, then the well-known
-/// clone locations under `$HOME`. Returns `None` when nothing is found.
-pub fn detect_token_from_source_clones(source_dir: Option<&Path>) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
+/// Directories scanned when the updater has no explicit token/remote:
+/// `[update] source_dir` first, then well-known clone locations under $HOME.
+fn clone_candidate_dirs(source_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(d) = source_dir {
         candidates.push(d.to_path_buf());
     }
-    for rel in CLONE_SCAN_PATHS {
-        candidates.push(Path::new(&home).join(rel));
+    if let Ok(home) = std::env::var("HOME") {
+        for rel in CLONE_SCAN_PATHS {
+            candidates.push(Path::new(&home).join(rel));
+        }
     }
-    for dir in candidates {
+    candidates
+}
+
+/// Scan well-known clone locations for git access to the repo. Returns
+/// `(pat_from_origin_url, origin_url)`:
+/// - the PAT covers HTTPS-PAT clones (zero-config API-tier updates),
+/// - the origin URL covers SSH remotes — the updater's git tier can
+///   `ls-remote`/`clone` with the user's existing SSH keys, so private-repo
+///   updates work with NO token at all.
+pub fn detect_git_from_source_clones(
+    source_dir: Option<&Path>,
+) -> (Option<String>, Option<String>) {
+    for dir in clone_candidate_dirs(source_dir) {
         if !dir.join(".git").exists() {
             continue;
         }
@@ -174,25 +189,67 @@ pub fn detect_token_from_source_clones(source_dir: Option<&Path>) -> Option<Stri
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        if let Some(token) = url
-            .as_deref()
-            .and_then(hyprfetch_core::update::parse_pat_from_git_url)
-        {
-            tracing::debug!(clone = %dir.display(), "resolved updater token from clone origin URL");
-            return Some(token);
+        let Some(url) = url.filter(|u| !u.is_empty()) else {
+            continue;
+        };
+        let token = hyprfetch_core::update::parse_pat_from_git_url(&url);
+        if token.is_some() || url.contains("github.com") {
+            tracing::debug!(clone = %dir.display(), "found usable git access in a local clone");
+            let url_out = url.contains("github.com").then(|| url.clone());
+            return (token, url_out);
         }
     }
-    None
+    (None, None)
+}
+
+/// PAT from the GitHub CLI (`gh auth login` users).
+fn gh_cli_token() -> Option<String> {
+    let out = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (t.len() >= 20).then_some(t)
+}
+
+/// PAT stored in git's credential helpers for github.com (store, cache,
+/// libsecret, gnome-keyring…). Prompting is disabled: helpers that would
+/// need user interaction simply fail and we move on.
+fn git_credential_token() -> Option<String> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("git")
+        .args(["credential", "fill"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "true")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    {
+        let mut si = child.stdin.take()?;
+        let _ = si.write_all(b"protocol=https\nhost=github.com\n\n");
+    }
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let pass = text
+        .lines()
+        .find_map(|l| l.strip_prefix("password="))
+        .map(str::trim)
+        .unwrap_or_default();
+    let t = pass.to_string();
+    (t.len() >= 20).then_some(t)
 }
 
 /// Resolve the updater config from CLI flags, env vars, the config file's
 /// `[update]` section and the settings DB (in that precedence order).
-pub fn resolve_update_cfg(repo_flag: Option<&str>, token_flag: Option<&str>) -> UpdateConfig {
-    let (cfg_update, settings) = (None, None);
-    resolve_update_cfg_with_db(repo_flag, token_flag, &cfg_update, settings.as_ref())
-}
-
-/// Same, with the config-file `update` section and an open settings repo.
 pub fn resolve_update_cfg_with_db(
     repo_flag: Option<&str>,
     token_flag: Option<&str>,
@@ -219,34 +276,47 @@ pub fn resolve_update_cfg_with_db(
         .or(db_repo)
         .unwrap_or_else(|| DEFAULT_REPO.to_string());
 
-    let token = token_flag
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            std::env::var("HYPRFETCH_GITHUB_TOKEN")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .or_else(|| {
-            std::env::var("GITHUB_TOKEN")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .or_else(|| {
-            cfg_update
-                .as_ref()
-                .and_then(|u| u.token.clone())
-                .filter(|s| !s.trim().is_empty())
-        })
-        .or(db_token)
-        // Last resort for clone-based installs: the PAT lives in the origin
-        // URL of the local source clone, so reuse it (zero-config updates).
-        .or_else(|| {
-            detect_token_from_source_clones(
-                cfg_update.as_ref().and_then(|u| u.source_dir.as_deref()),
-            )
-        });
+    // Ordered credential discovery — first hit wins and is labelled so the
+    // CLI can show WHERE it came from. The clone scan doubles as the git
+    // tier's remote discovery (SSH clones grant tag access without a token).
+    let (clone_token, clone_url) =
+        detect_git_from_source_clones(cfg_update.as_ref().and_then(|u| u.source_dir.as_deref()));
+
+    let mut token: Option<String> = None;
+    let mut token_source: Option<&'static str> = None;
+    let mut take = |cand: Option<String>, label: &'static str| {
+        if token.is_none() {
+            if let Some(t) = cand.filter(|t| !t.trim().is_empty()) {
+                token = Some(t.trim().to_string());
+                token_source = Some(label);
+            }
+        }
+    };
+    // clap may have filled the flag from HYPRFETCH_GITHUB_TOKEN already.
+    take(
+        token_flag
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        "cli flag/env",
+    );
+    take(std::env::var("HYPRFETCH_GITHUB_TOKEN").ok(), "env");
+    take(std::env::var("GITHUB_TOKEN").ok(), "env");
+    take(std::env::var("GH_TOKEN").ok(), "env");
+    take(
+        cfg_update.as_ref().and_then(|u| u.token.clone()),
+        "config file",
+    );
+    take(db_token, "settings db");
+    take(clone_token, "clone origin");
+    take(gh_cli_token(), "gh cli");
+    take(git_credential_token(), "git credentials");
+
+    let git_url = cfg_update
+        .as_ref()
+        .and_then(|u| u.git_url.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or(clone_url);
 
     let api_base = std::env::var("HYPRFETCH_UPDATE_API")
         .ok()
@@ -256,6 +326,8 @@ pub fn resolve_update_cfg_with_db(
     UpdateConfig {
         repo,
         token,
+        token_source,
+        git_url,
         api_base,
     }
 }

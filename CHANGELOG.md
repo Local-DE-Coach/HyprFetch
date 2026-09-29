@@ -10,6 +10,43 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 - Nothing yet.
 
+## [0.3.2] — 2026-09-29 (private-repo self-update without a token)
+
+### Fixed — `hyprfetch update` on private repos with SSH-only access (owner request)
+- The updater now has **two access tiers**. Tier 1 stays as before (GitHub
+  REST API with a PAT → prebuilt tarball → sha256 → atomic swap). When the
+  API cannot see the private repo and no token exists anywhere, tier 2
+  kicks in: **plain git**. SSH keys cannot call the REST API but they can
+  run git, so the updater now resolves the newest release tag via
+  `git ls-remote --tags` and installs by **shallow-cloning that exact tag
+  and running `cargo build --release --locked`** — atomic swap + daemon
+  restart just like the tarball path. If `git pull` works for the user,
+  `hyprfetch update` now works too.
+- Git remote discovery: `[update] git_url` in the config → a local clone's
+  `remote.origin.url` (well-known locations scanned) → the derived
+  `git@github.com:<repo>.git`. All git invocations run non-interactively
+  (batch-mode SSH, no prompts — the updater fails fast instead of hanging).
+- Token discovery widened: `GH_TOKEN` env, `gh auth token` (GitHub CLI),
+  and `git credential fill` (store/cache/libsecret/keyring) join the
+  existing chain; each source is labelled in the CLI output
+  (`authenticated (env)`, `(gh cli)`, `(clone origin)`, …).
+- `hyprfetch update` now actually loads the config file (`[update]`
+  section: `repo` / `token` / `git_url` / `source_dir`) and gained a
+  `--config` flag.
+- `GET /api/update/check` (web UI Updates card) falls back to the git tier
+  the same way and reports `"via_git": true` with no asset;
+  `POST /api/update/apply` answers `400` with guidance to run the CLI for
+  git-found updates (a web request cannot rebuild the binary).
+- `hyprfetch doctor` now shows the update token source and the git remote
+  it will use.
+- E2E `scripts/e2e_update_tiers.sh` (4 scenarios, 20 checks): no-auth
+  hints, PAT tier against the real GitHub release, full git-tier install
+  (shallow clone → build → atomic swap → rollback copy) against a local
+  git remote, clone-origin discovery. Unit tests for tag parsing,
+  latest-tag selection, candidate ordering and real-subprocess
+  ls-remote/shallow-clone against local repos (134 workspace tests green;
+  downloader E2E 43/43 still green).
+
 ## [0.3.1] — 2026-09-29 (re-cut with the multi-page UI + category folders)
 
 ### Added — multi-page web UI (owner request, applied)

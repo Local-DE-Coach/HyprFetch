@@ -209,9 +209,17 @@ footer:
 The updater queries the latest GitHub release of the configured repo
 (`[update] repo` in `config.toml`, default `Local-DE-Coach/HyprFetch`). For
 private repos a PAT is resolved from `HYPRFETCH_GITHUB_TOKEN` / `GITHUB_TOKEN`
-/ `[update] token` / the `github_token` setting. Release assets are
+/ `GH_TOKEN` / `[update] token` / the `github_token` setting / a PAT-in-URL
+clone / `gh auth token` / git credential helpers. Release assets are
 downloaded through the REST API octet-stream endpoint and sha256-verified
 before anything touches disk.
+
+**Git-tier fallback:** when the API cannot see the repo (private repo
+without a token) the check falls back to plain git — `ls-remote` over the
+user's SSH keys / clone origin / `[update] git_url`. In that mode the
+response has `"via_git": true`, `asset` is `null`, and installation must
+happen through the CLI (`hyprfetch update` shallow-clones the tag and runs
+`cargo build --release --locked`).
 
 `GET /api/update/check` → runs the check and caches it:
 
@@ -222,7 +230,8 @@ before anything touches disk.
   "available": true,
   "published_at": "2026-09-29T00:00:00Z",
   "release_url": "https://github.com/…/releases/tag/v0.3.2",
-  "asset": { "name": "hyprfetch-0.3.2-x86_64-unknown-linux-gnu.tar.gz", "size": 3605057, "id": 1001 }
+  "asset": { "name": "hyprfetch-0.3.2-x86_64-unknown-linux-gnu.tar.gz", "size": 3605057, "id": 1001 },
+  "via_git": false
 }
 ```
 
@@ -231,7 +240,9 @@ atomic binary swap (`hyprfetch.old` kept as rollback). With `restart=true`
 (default) it then drains (pause) active downloads, re-execs a fresh server
 with the same arguments — which auto-resumes the paused tasks — and shuts
 this process down gracefully. Requires the server to have been started
-through `hyprfetch serve`/`dev` (CLI restarts keep their own args).
+through `hyprfetch serve`/`dev` (CLI restarts keep their own args). Returns
+`400` when the cached check came from the git tier (`via_git: true`) — a
+web request cannot rebuild the binary; run `hyprfetch update` instead.
 
 `POST /api/update/restart` → just the drain → re-exec → auto-resume part,
 without an update.

@@ -131,21 +131,32 @@ Daemon state lives under `~/.local/state/hyprfetch/` (logs rotate at 5 MiB,
 
 ## Self-update
 
-Update straight from GitHub releases — works with the **private repo** when
-a PAT is configured (`HYPRFETCH_GITHUB_TOKEN` env, `[update] token` in the
-config, or `--token`):
+Update straight from GitHub releases — works with the **private repo** even
+without a token, in two ways:
+
+1. **PAT tier (prebuilt tarballs)** — when a token is available
+   (`HYPRFETCH_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` env, `[update] token`
+   in the config, `gh auth token`, git credential helpers, a PAT-in-URL clone,
+   or `--token`): the release tarball is downloaded through the API,
+   sha256-verified, swapped in atomically.
+2. **Git tier (no token needed)** — if plain `git` can reach the repo (your
+   SSH keys, e.g. `git clone git@github.com:…`), the updater falls back to
+   it: newest release tag via `ls-remote` → shallow clone →
+   `cargo build --release --locked` → atomic swap. If `git pull` works for
+   you, `hyprfetch update` works too.
 
 ```bash
-hyprfetch update --check      # report only
-hyprfetch update              # download → sha256 verify → atomic swap → restart daemon
+hyprfetch update --check      # report only (shows which access path was used)
+hyprfetch update              # token tier: download → sha256 → atomic swap → restart
+                              # git tier:   clone tag → build → atomic swap → restart
 hyprfetch update --from-git --source-dir ~/HyprFetch   # pull + build + swap instead
 ```
 
 The in-app updater does the same from the UI (**Updates** card): check,
-install & restart, or a plain restart. Active downloads are drained (paused),
-the new binary is swapped in atomically (previous binary kept as
-`hyprfetch.old`), and the paused tasks **auto-resume** on the fresh server.
-Tarballs are verified with sha256 before anything touches disk.
+install & restart, or a plain restart (git-found updates ask you to run the
+CLI, which builds). Active downloads are drained (paused), the new binary is
+swapped in atomically (previous binary kept as `hyprfetch.old`), and the
+paused tasks **auto-resume** on the fresh server.
 
 ## Configuration
 

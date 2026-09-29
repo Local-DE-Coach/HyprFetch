@@ -91,6 +91,11 @@ enum Command {
         /// Source clone used with --from-git.
         #[arg(long)]
         source_dir: Option<PathBuf>,
+        /// Config file path — its `[update]` section supplies repo / token /
+        /// git_url / source_dir. Defaults to
+        /// `$XDG_CONFIG_HOME/hyprfetch/config.toml` when it exists.
+        #[arg(long, env = "HYPRFETCH_CONFIG")]
+        config: Option<PathBuf>,
     },
 }
 
@@ -155,6 +160,7 @@ pub struct UpdateArgs {
     pub token: Option<String>,
     pub from_git: bool,
     pub source_dir: Option<PathBuf>,
+    pub config: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -208,6 +214,7 @@ async fn run_async(cli: Cli, orig_args: Vec<String>) -> Result<()> {
             token,
             from_git,
             source_dir,
+            config,
         } => {
             update_cmd::run(UpdateArgs {
                 check,
@@ -216,6 +223,7 @@ async fn run_async(cli: Cli, orig_args: Vec<String>) -> Result<()> {
                 token,
                 from_git,
                 source_dir,
+                config,
             })
             .await
         }
@@ -456,12 +464,18 @@ async fn doctor() -> Result<()> {
     println!("  update repo  = {}", update_cfg.repo);
     println!(
         "  update token = {}",
-        if update_cfg.token.is_some() {
-            "configured"
-        } else {
-            "not set (public repos only)"
+        match update_cfg.token_source {
+            Some(src) => format!("configured ({src})"),
+            None => "not set (public repos + git/SSH access)".to_string(),
         }
     );
+    match &update_cfg.git_url {
+        Some(u) => println!("  update git   = {u}"),
+        None => println!(
+            "  update git   = auto (git@github.com:{} or a local clone's origin)",
+            update_cfg.repo
+        ),
+    }
     println!("  foreign_keys = ON (verified at open)");
     println!("  journal_mode = WAL (verified at open)");
     println!("OK");

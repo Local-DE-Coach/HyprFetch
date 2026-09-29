@@ -468,3 +468,48 @@ which commit**.
   commit. `https://ipv4.download.thinkbroadband.com/...` serves a TLS cert that does not
   match the hostname — it fails hostname verification by design; use the
   `http://...:8080` variant for real downloads.
+
+---
+
+## 2026-09-29 (session 3) — private-repo self-update without a token (v0.3.2)
+
+- **Owner report:** on their Arch PC the repo is accessed via SSH only
+  (`git clone git@github.com:…`, no PAT anywhere) — `hyprfetch update
+  --check` printed "unauthenticated (public repos only)" and "no published
+  release found". SSH keys cannot call the GitHub REST API, but they CAN
+  run git — the updater now exploits exactly that.
+- **Core (`hyprfetch-core/src/update.rs`):** new git tier —
+  `parse_version_tags` / `latest_version_tag` / `ls_remote_latest_tag`
+  (non-interactive env: batch-mode SSH, no prompts), `git_url_candidates`
+  (config `git_url` → clone origin → derived `git@github.com:<repo>.git` →
+  anonymous HTTPS), `check_via_git(_sync)` → `GitCheck{via_url, tag}`,
+  `clone_tag_shallow` + `find_cargo` (PATH → `~/.cargo/bin`) +
+  `cargo_build_release` + `build_from_tag`. `UpdateConfig` gained
+  `token_source` + `git_url`; new `UpdateError::Git`; `UpdateCheck.via_git`.
+  Shared cargo-build code with `run_git_update`. 5 new unit tests incl.
+  real-subprocess ls-remote/shallow-clone against a local `file://` repo.
+- **CLI (`update_cmd.rs`):** two-tier flow — API check → git fallback →
+  labelled auth line (`authenticated (env)` / `(gh cli)` / `(clone origin)`
+  / unauthenticated), git install = shallow clone at the exact tag →
+  `cargo build --release --locked` → atomic swap (`hyprfetch.old` kept) →
+  daemon restart. No-auth path prints concrete unlock hints. `update` now
+  loads the config file + new `--config` flag. Fixed pre-existing bug:
+  `[update]` config section was ignored by the update subcommand.
+- **Token chain (helpers.rs):** + `GH_TOKEN`, `gh auth token`, `git
+  credential fill` (prompting disabled); clone scan returns BOTH the
+  PAT-in-URL and the origin URL; every source labelled.
+- **API (routes.rs):** `GET /api/update/check` falls back to the git tier;
+  payload carries `via_git`; `POST /api/update/apply` returns 400 with CLI
+  guidance for git-found updates (web requests cannot rebuild the binary).
+- **Doctor:** shows token source + the git remote the updater will use.
+- **Tests:** cargo fmt + clippy clean; **134** workspace tests green; main
+  downloader E2E **43/43** green; NEW `scripts/e2e_update_tiers.sh` — 4
+  scenarios / 20 checks green: (A) no-auth hints, (B) PAT tier against the
+  real v0.3.1 GitHub release, (C) full git-tier install vs a local bare
+  git remote (shallow clone → build → swap → verified `--version` of the
+  swapped binary + rollback copy), (D) clone-origin discovery via doctor.
+  E2E caught 2 real bugs pre-commit (tier-fallback `unreachable!()` panic;
+  unlabelled env token) — both fixed.
+- **Docs:** README "Self-update" rewritten (two tiers), install.md
+  "Keeping it updated" (+ `[update] git_url` example), api.md (via_git,
+  400-on-git-apply). CHANGELOG [0.3.2]; worktasks section 17.

@@ -10,7 +10,7 @@
 //! against a local mock release server.
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -40,6 +40,8 @@ pub enum UpdateError {
     BinaryMissing,
     #[error("cannot determine current executable path")]
     ExePath,
+    #[error("git: {0}")]
+    Git(String),
     #[error("{0}")]
     Other(String),
 }
@@ -51,6 +53,13 @@ pub struct UpdateConfig {
     pub repo: String,
     /// PAT for private repos (sent as `Authorization: Bearer`).
     pub token: Option<String>,
+    /// Where the token came from, for UX labels (`"env"`, `"gh cli"`, …).
+    pub token_source: Option<&'static str>,
+    /// Git remote used by the git tier when the REST API cannot see the
+    /// repo (private repo accessed via SSH keys / a local clone).
+    /// Auto-discovered from a local clone's origin or set via
+    /// `[update] git_url`; when absent it is derived from `repo`.
+    pub git_url: Option<String>,
     /// API base override (tests / GHES).
     pub api_base: String,
 }
@@ -60,6 +69,8 @@ impl Default for UpdateConfig {
         Self {
             repo: DEFAULT_REPO.to_string(),
             token: None,
+            token_source: None,
+            git_url: None,
             api_base: DEFAULT_API_BASE.to_string(),
         }
     }
@@ -116,7 +127,12 @@ pub struct UpdateCheck {
     pub published_at: Option<String>,
     pub release_url: Option<String>,
     /// The tarball asset matching this machine's target triple, when present.
+    /// `None` on the git tier — there the update builds from source instead.
     pub asset: Option<AssetInfo>,
+    /// True when the check succeeded via plain git instead of the REST API
+    /// (private repo + SSH/clone access, no token needed).
+    #[serde(default)]
+    pub via_git: bool,
 }
 
 /// Compare dotted numeric versions (`0.3.1` > `0.3.0`); non-numeric chunks
@@ -140,6 +156,244 @@ pub fn version_newer(candidate: &str, current: &str) -> bool {
         }
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Git tier — private-repo updates WITHOUT a token
+//
+// SSH keys cannot call the GitHub REST API, but they can run git. So when
+// the API tier comes back empty (private repo, no token), the updater falls
+// back to plain git: `ls-remote --tags` finds the newest release tag with
+// the user's existing credentials (SSH agent, credential helpers, or a
+// local clone's remote), and the install step shallow-clones that tag and
+// builds it with `cargo build --release --locked`.
+// ---------------------------------------------------------------------------
+
+/// Batch-mode SSH options so git never blocks on a passphrase/host-key
+/// prompt — an unattended updater must fail fast, not hang.
+const GIT_SSH_COMMAND: &str =
+    "ssh -oBatchMode=yes -oConnectTimeout=10 -oStrictHostKeyChecking=accept-new";
+
+/// A `git` invocation that can never stop to ask questions (no terminal
+/// prompt, no interactive askpass, no interactive ssh).
+fn git_cmd(args: &[&str]) -> std::process::Command {
+    let mut c = std::process::Command::new("git");
+    c.args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "true")
+        .env("GIT_SSH_COMMAND", GIT_SSH_COMMAND);
+    c
+}
+
+/// Git remote URLs tried by the git tier, most-specific first:
+/// 1. a configured/discovered remote (`[update] git_url` or a local clone's
+///    origin — honours the user's SSH keys and credential helpers),
+/// 2. the SSH URL derived from the repo slug,
+/// 3. anonymous HTTPS (public fallback; the API tier already covers this).
+pub fn git_url_candidates(cfg: &UpdateConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(u) = cfg
+        .git_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push(u.to_string());
+    }
+    let ssh = format!("git@github.com:{}.git", cfg.repo);
+    if !out.contains(&ssh) {
+        out.push(ssh);
+    }
+    let https = format!("https://github.com/{}.git", cfg.repo);
+    if !out.contains(&https) {
+        out.push(https);
+    }
+    out
+}
+
+/// Parse `git ls-remote --tags` output into raw tag names (`v0.3.1`),
+/// dropping peeled `^{}` refs, non-version tags and duplicates.
+pub fn parse_version_tags(ls_remote_output: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in ls_remote_output.lines() {
+        let mut it = line.split_whitespace();
+        let (_, r) = match (it.next(), it.next()) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+        let Some(tag) = r.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        let tag = tag.strip_suffix("^{}").unwrap_or(tag);
+        let ver = tag.strip_prefix('v').unwrap_or(tag);
+        let is_version = ver.chars().next().is_some_and(|c| c.is_ascii_digit())
+            && ver.split('.').count() >= 2
+            && ver.split('.').all(|c| !c.is_empty());
+        if is_version && !out.iter().any(|t| t == tag) {
+            out.push(tag.to_string());
+        }
+    }
+    out
+}
+
+/// Newest tag among raw version tags (`v0.3.1`); `None` when empty.
+pub fn latest_version_tag(tags: &[String]) -> Option<String> {
+    tags.iter()
+        .fold(None, |best: Option<String>, t| match best {
+            Some(b) if !version_newer(t, &b) => Some(b),
+            _ => Some(t.clone()),
+        })
+}
+
+/// Blocking: newest version tag reachable at `url`. `Ok(None)` when the
+/// remote answers but carries no version tags; `Err` when git fails
+/// (unreachable / unauthorized).
+pub fn ls_remote_latest_tag(url: &str) -> Result<Option<String>, UpdateError> {
+    let out = git_cmd(&["ls-remote", "--tags", url])
+        .output()
+        .map_err(|e| UpdateError::Git(format!("git ls-remote spawn: {e}")))?;
+    if !out.status.success() {
+        return Err(UpdateError::Git(format!(
+            "ls-remote {url}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let tags = parse_version_tags(&String::from_utf8_lossy(&out.stdout));
+    Ok(latest_version_tag(&tags))
+}
+
+/// Outcome of a git-tier update check.
+#[derive(Debug, Clone)]
+pub struct GitCheck {
+    /// The remote URL that answered (shown to the user as access proof).
+    pub via_url: String,
+    /// Raw tag of the newest release (`v0.3.1`) — used for `--branch`.
+    pub tag: String,
+    /// Standard check payload (`asset` is always None — git builds from
+    /// source; `via_git` is true).
+    pub check: UpdateCheck,
+}
+
+/// API-independent update check for private repos: reads version tags over
+/// plain git using whatever credentials the user already has (SSH agent,
+/// credential helpers, clone remotes). Blocking — prefer [`check_via_git`]
+/// from async contexts.
+pub fn check_via_git_sync(cfg: &UpdateConfig) -> Result<Option<GitCheck>, UpdateError> {
+    cfg.validate()?;
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let mut last_err: Option<UpdateError> = None;
+    for url in git_url_candidates(cfg) {
+        match ls_remote_latest_tag(&url) {
+            Ok(Some(tag)) => {
+                let latest = tag.trim_start_matches('v').to_string();
+                return Ok(Some(GitCheck {
+                    via_url: url,
+                    tag,
+                    check: UpdateCheck {
+                        available: version_newer(&latest, &current),
+                        current,
+                        latest,
+                        published_at: None,
+                        release_url: Some(format!("https://github.com/{}/releases", cfg.repo)),
+                        asset: None,
+                        via_git: true,
+                    },
+                }));
+            }
+            // Reachable but no version tags: same as "no published release".
+            Ok(None) => return Ok(None),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or(UpdateError::Other("no git remote candidate".into())))
+}
+
+/// Async wrapper around [`check_via_git_sync`] (git spawns are blocking).
+pub async fn check_via_git(cfg: &UpdateConfig) -> Result<Option<GitCheck>, UpdateError> {
+    let cfg = cfg.clone();
+    tokio::task::spawn_blocking(move || check_via_git_sync(&cfg))
+        .await
+        .map_err(|e| UpdateError::Other(format!("git check join: {e}")))?
+}
+
+/// Blocking: shallow-clone `url` at `tag` into `dest` (created, emptied).
+pub fn clone_tag_shallow(url: &str, tag: &str, dest: &Path) -> Result<(), UpdateError> {
+    let _ = std::fs::remove_dir_all(dest);
+    std::fs::create_dir_all(dest)?;
+    let out = git_cmd(&[
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        tag,
+        "--single-branch",
+        url,
+    ])
+    .arg(dest)
+    .output()
+    .map_err(|e| UpdateError::Git(format!("git clone spawn: {e}")))?;
+    if !out.status.success() {
+        return Err(UpdateError::Git(format!(
+            "clone {tag}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Locate a usable `cargo`: PATH first, then the rustup default location.
+pub fn find_cargo() -> Result<String, UpdateError> {
+    let usable = |p: &str| {
+        std::process::Command::new(p)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if usable("cargo") {
+        return Ok("cargo".into());
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let p = format!("{home}/.cargo/bin/cargo");
+        if usable(&p) {
+            return Ok(p);
+        }
+    }
+    Err(UpdateError::Other(
+        "cargo not found on PATH — source updates need the Rust toolchain \
+         (https://rustup.rs), or install a release tarball instead"
+            .into(),
+    ))
+}
+
+/// `cargo build --release --locked` inside `dir`. Blocking; on failure the
+/// error keeps the last 15 stderr lines (enough to see the failing crate).
+pub fn cargo_build_release(dir: &Path) -> Result<(), UpdateError> {
+    let cargo = find_cargo()?;
+    let out = std::process::Command::new(&cargo)
+        .args(["build", "--release", "--locked"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| UpdateError::Git(format!("cargo spawn: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let mut tail: Vec<&str> = stderr.lines().rev().take(15).collect();
+        tail.reverse();
+        return Err(UpdateError::Git(format!(
+            "cargo build failed: {}",
+            tail.join("\n")
+        )));
+    }
+    Ok(())
+}
+
+/// Full git-tier install: shallow-clone `url` at `tag` into `dest`, build a
+/// release binary, return its path. Blocking and long-running (a cold build
+/// takes minutes).
+pub fn build_from_tag(url: &str, tag: &str, dest: &Path) -> Result<PathBuf, UpdateError> {
+    clone_tag_shallow(url, tag, dest)?;
+    cargo_build_release(dest)?;
+    Ok(dest.join("target/release/hyprfetch"))
 }
 
 /// Parse a PAT out of a git remote URL. Clone-based installs carry the
@@ -240,6 +494,7 @@ pub async fn check(cfg: &UpdateConfig) -> Result<Option<UpdateCheck>, UpdateErro
             .and_then(|v| v.as_str())
             .map(str::to_string),
         asset: pick_asset(&assets, &latest),
+        via_git: false,
     }))
 }
 
@@ -402,17 +657,17 @@ pub fn swap_binary(exe: &Path, new_bytes: &[u8]) -> Result<(), UpdateError> {
     Ok(())
 }
 
-/// Resolve the `hyprfetch` source clone path for `--from-git` updates.
-/// Reads `[update] source_dir` from the config; no default.
+/// `git pull --ff-only` + `cargo build --release --locked` inside an
+/// existing source clone (the explicit `--from-git` path).
 pub fn run_git_update(source_dir: &Path) -> Result<String, UpdateError> {
     let run = |args: &[&str]| -> Result<String, UpdateError> {
         let out = std::process::Command::new("git")
             .args(args)
             .current_dir(source_dir)
             .output()
-            .map_err(|e| UpdateError::Other(format!("git spawn: {e}")))?;
+            .map_err(|e| UpdateError::Git(format!("git spawn: {e}")))?;
         if !out.status.success() {
-            return Err(UpdateError::Other(format!(
+            return Err(UpdateError::Git(format!(
                 "git {} failed: {}",
                 args.join(" "),
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -421,21 +676,7 @@ pub fn run_git_update(source_dir: &Path) -> Result<String, UpdateError> {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     };
     run(&["pull", "--ff-only"])?;
-    let out = std::process::Command::new("cargo")
-        .args(["build", "--release", "--locked"])
-        .current_dir(source_dir)
-        .output()
-        .map_err(|e| UpdateError::Other(format!("cargo spawn: {e}")))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        let tail: Vec<&str> = stderr.lines().rev().take(15).collect();
-        let mut tail = tail;
-        tail.reverse();
-        return Err(UpdateError::Other(format!(
-            "cargo build failed: {}",
-            tail.join("\n")
-        )));
-    }
+    cargo_build_release(source_dir)?;
     Ok(source_dir
         .join("target/release/hyprfetch")
         .to_string_lossy()
@@ -543,6 +784,107 @@ mod tests {
         assert!(cfg.validate().is_ok());
         cfg.repo = "just-a-name".into();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn version_tag_parsing() {
+        let out = "abc123\trefs/tags/v0.2.0\n\
+                   abc124\trefs/tags/v0.3.1\n\
+                   abc125\trefs/tags/v0.3.1^{}\n\
+                   abc126\trefs/tags/nightly\n\
+                   abc127\trefs/tags/vX.Y\n\
+                   abc128\trefs/tags/1.9\n";
+        assert_eq!(parse_version_tags(out), vec!["v0.2.0", "v0.3.1", "1.9"]);
+        assert!(parse_version_tags("").is_empty());
+        // Bare line without a ref is ignored.
+        assert!(parse_version_tags("abc123\n").is_empty());
+    }
+
+    #[test]
+    fn latest_tag_selection() {
+        let tags: Vec<String> = ["v0.2.0", "v0.3.1", "v1.0.0-rc1", "0.9.9"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(latest_version_tag(&tags).as_deref(), Some("v1.0.0-rc1"));
+        let tags: Vec<String> = ["v0.3.1", "v0.2.0"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(latest_version_tag(&tags).as_deref(), Some("v0.3.1"));
+        assert!(latest_version_tag(&[]).is_none());
+    }
+
+    #[test]
+    fn git_candidate_ordering() {
+        let mut cfg = UpdateConfig::default();
+        assert_eq!(
+            git_url_candidates(&cfg),
+            vec![
+                "git@github.com:Local-DE-Coach/HyprFetch.git".to_string(),
+                "https://github.com/Local-DE-Coach/HyprFetch.git".to_string(),
+            ]
+        );
+        cfg.git_url = Some(" file:///tmp/hf.git ".into());
+        assert_eq!(git_url_candidates(&cfg)[0], "file:///tmp/hf.git");
+        // A candidate equal to the derived SSH URL is not repeated.
+        cfg.git_url = Some("git@github.com:Local-DE-Coach/HyprFetch.git".into());
+        assert_eq!(git_url_candidates(&cfg).len(), 2);
+    }
+
+    /// Minimal local repo (file:// remote) for the real-subprocess tests.
+    fn init_test_repo(dir: &Path, tags: &[&str]) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "."]);
+        std::fs::write(dir.join("f.txt"), "x").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "init"]);
+        for t in tags {
+            run(&["tag", t]);
+        }
+        format!("file://{}", dir.display())
+    }
+
+    #[test]
+    fn ls_remote_and_shallow_clone_on_local_repo() {
+        // Skip silently when git is unavailable (minimal sandboxes).
+        if !std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let url = init_test_repo(&tmp.path().join("src"), &["v0.1.0", "v0.2.0"]);
+
+        assert_eq!(
+            ls_remote_latest_tag(&url).unwrap().as_deref(),
+            Some("v0.2.0")
+        );
+
+        // Shallow clone at an exact tag materialises the worktree.
+        let dest = tmp.path().join("clone");
+        clone_tag_shallow(&url, "v0.2.0", &dest).unwrap();
+        assert!(dest.join("f.txt").exists());
+
+        // An unreachable remote is an Err, not a panic.
+        let bad = format!("file://{}", tmp.path().join("nope").display());
+        assert!(ls_remote_latest_tag(&bad).is_err());
     }
 
     #[test]

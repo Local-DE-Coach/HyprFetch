@@ -302,6 +302,32 @@ segmented download, no leak after completion.
 mid-flight pause/resume (16 MB/s loopback incl. per-chunk pattern
 generation); cargo test 130 green; clippy `-D warnings` clean.
 
+## 17. Private-repo self-update without a token (v0.3.2 — owner request, APPLIED 2026-09-29)
+
+Owner report: on their Arch box the repo is linked via **SSH** (`git clone
+git@github.com:…`), so no PAT exists anywhere — `hyprfetch update --check`
+printed "unauthenticated (public repos only)" and gave up. SSH keys cannot
+call the GitHub REST API, but they CAN run git — so the updater gained a
+git tier.
+
+| ID | Item | Status | Proof |
+|---|---|---|---|
+| 17.1 | Core git tier: `git ls-remote --tags` version discovery (`parse_version_tags`, `latest_version_tag`, `ls_remote_latest_tag`) with non-interactive env (batch-mode SSH, no prompts) | ✅ | unit tests `version_tag_parsing`, `latest_tag_selection`, `ls_remote_and_shallow_clone_on_local_repo` (real subprocess over `file://` repo) |
+| 17.2 | Git-tier check: `git_url_candidates` (config `git_url` → clone origin → derived `git@github.com:<repo>.git` → anonymous HTTPS) + `check_via_git(_sync)` returning `GitCheck{via_url, tag}` | ✅ | unit test `git_candidate_ordering`; E2E scenario C "git tier via file:// remote" |
+| 17.3 | Git-tier install: `clone_tag_shallow` + `find_cargo` (PATH → `~/.cargo/bin`) + `cargo_build_release` + `build_from_tag` → atomic swap → daemon restart | ✅ | E2E scenario C4: `installed 9.9.9`, swapped binary reports 9.9.9, `hyprfetch.old` kept, temp dir cleaned |
+| 17.4 | Token chain widened + labelled: `GH_TOKEN`, `gh auth token`, `git credential fill` join the chain; `token_source` shown in CLI (`authenticated (env)`…) and doctor | ✅ | E2E scenario B label check; doctor scenario D |
+| 17.5 | Clone-origin discovery returns BOTH PAT and origin URL (`detect_git_from_source_clones`) so SSH clones feed the git tier with zero config | ✅ | E2E scenario D: doctor shows `update git = git@github.com:Local-DE-Coach/HyprFetch.git` |
+| 17.6 | `update` CLI loads `[update]` config section + new `--config` flag | ✅ | E2E scenario C uses config-file `git_url` |
+| 17.7 | API `GET /api/update/check` git-tier fallback, `via_git` in payload; `POST /api/update/apply` returns 400 with CLI guidance when `via_git` | ✅ | build + existing E2E "update check endpoint graceful" still green |
+| 17.8 | No-auth UX: prints what to do (env / `gh auth login` / SSH clone / config) instead of a dead end | ✅ | E2E scenario A hints checks |
+| 17.9 | Docs: README Self-update (two tiers), install.md "Keeping it updated" (+ `git_url` example), api.md (via_git + 400) | ✅ | docs diff |
+| 17.10 | New E2E `scripts/e2e_update_tiers.sh` — 4 scenarios / 20 checks, all green | ✅ | RESULT: 0 failed check(s) |
+
+**Measured:** cargo fmt + clippy clean; 134 workspace tests green; main
+downloader E2E 43/43 green; updater E2E 20/20 green (incl. a full
+clone→build→swap cycle against a local git remote and the PAT tier against
+the real v0.3.1 GitHub release).
+
 ## Bug tracker (open)
 
 | ID | Bug | Status | Notes |
