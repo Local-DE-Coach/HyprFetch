@@ -518,3 +518,21 @@ zero console errors; all API endpoints return correct codes; downloads land
 on disk; pause/resume/cancel state machine correct; update channel check
 talks to istias.tech only. 0.4.2 is the first version protected by the
 UI lint + boot-check gates in release CI.
+
+## 25. v0.4.3 — system-install self-update + standard Linux install layout
+
+Owner report: `hyprfetch update` on his Arch box (pacman install →
+`/usr/bin/hyprfetch`, root-owned) died with `io: Permission denied (os error
+13)` after the download, and the Desktop was littered with makepkg artifacts
+(`pkg/`, `src/`, `PKGBUILD`, tarballs, `*.pkg.tar.zst`) from following the
+old install instructions.
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 25.1 | Root cause: `swap_binary` creates `<exe>.new` next to the binary; pacman-owned `/usr/bin` is not user-writable → EPERM after the download. Core fix: writability probe (`can_swap_in_place`) before download; `Escalation::{Auto,Refuse}` policy; escalated swap = ONE self-recovering `sudo/doas sh -c` script (mv old → install 0755 new → rollback on failure); `RootNeeded` error with actionable hint | ✅ | crates/hyprfetch-core/src/update.rs + 12 new unit tests |
+| 25.2 | CLI: pre-flight note ("system location — will ask via sudo", pacman-owner note) before the confirm prompt; policy Auto. WebUI `/api/update/apply`: Refuse policy → clear "run sudo hyprfetch update" message instead of raw EPERM; response gains `escalated` field | ✅ | update_cmd.rs, routes.rs |
+| 25.3 | E2E: locked (chmod 555 = same EPERM as root-owned) dir + real sudo without tty → clean failure, binary untouched, no leftovers; WebUI apply → 400 with hint; user-owned dir → direct swap with zero noise | ✅ | scripts/e2e_update_channel.sh — 33/33 PASS |
+| 25.4 | Full regression: cargo test 141 green, clippy clean, API batteries 38+13 green (real browser UI render, downloads, pause/resume via QoS throttle, WS, sha256 refusal) | ✅ | test_hyprfetch_app*.sh |
+| 25.5 | Standard Linux layout: new `packaging/icons/hyprfetch.svg` + `Icon=hyprfetch`; tarball ships desktop entry + icon; PKGBUILD/.rpm/.deb/install.sh install icon into hicolor paths; install.sh warns on pacman shadowing; uninstall removes icon too | ✅ | packaging/ + Docs/hyprfetch/install.sh |
+| 25.6 | Desktop-litter fix at the source: all Arch instructions (docs, release notes template, istias.tech pages) now build in a `mktemp -d` scratch dir; product page gained a "clean your Desktop leftovers" box | ✅ | docs/install.md, release.yml, Docs pages |
+| 25.7 | Bump 0.4.3, CHANGELOG, release cut via tag-per-release workflow, channel + Docs mirror verified | ✅ | see session log |

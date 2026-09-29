@@ -816,9 +816,25 @@ pub async fn update_apply(
     };
 
     // Download from the project mirror → sha256-verify → swap atomically.
-    let applied = hyprfetch_core::update::apply(&state.update_cfg, &chk)
-        .await
-        .map_err(|e| ApiError::InternalError(format!("update apply: {e}")))?;
+    // The daemon cannot prompt for a password, so a system-owned install
+    // location (pacman/deb/rpm) is refused with an actionable hint instead
+    // of a raw "permission denied".
+    let applied = match hyprfetch_core::update::apply(
+        &state.update_cfg,
+        &chk,
+        hyprfetch_core::update::Escalation::Refuse,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(hyprfetch_core::update::UpdateError::RootNeeded { path, hint }) => {
+            return Err(ApiError::InvalidRequest(format!(
+                "this HyprFetch was installed in a system location ({path}). \
+                 Update it from a terminal instead: run `sudo hyprfetch update` once. {hint}"
+            )));
+        }
+        Err(e) => return Err(ApiError::InternalError(format!("update apply: {e}"))),
+    };
 
     let restart = q.restart.unwrap_or(true);
     let restarted = if restart {
@@ -832,6 +848,7 @@ pub async fn update_apply(
         "previous": applied.current,
         "sha256": applied.sha256,
         "backup": applied.backup_path,
+        "escalated": applied.escalated,
         "restarting": restarted,
     })))
 }

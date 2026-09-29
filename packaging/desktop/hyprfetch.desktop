@@ -4,6 +4,7 @@ Name=HyprFetch
 GenericName=Download Manager
 Comment=Minimal-RAM, fast, resumable downloads — web UI at http://127.0.0.1:7780
 Exec=hyprfetch serve
+Icon=hyprfetch
 Terminal=false
 Categories=Network;FileTransfer;
 Keywords=download;manager;resumable;hyprfetch;

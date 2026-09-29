@@ -12,7 +12,9 @@
 
 use anyhow::{bail, Result};
 
-use hyprfetch_core::update::{UpdateCheck, UpdateConfig, UPDATES_PAGE_URL};
+use hyprfetch_core::update::{
+    can_swap_in_place, find_priv_tool, package_owner, UpdateCheck, UpdateConfig, UPDATES_PAGE_URL,
+};
 
 use crate::{daemon, helpers, UpdateArgs};
 
@@ -98,6 +100,40 @@ enum Confirm {
     Abort,
 }
 
+/// Tell the user up front what kind of install this is and how the swap
+/// will happen, so the sudo password prompt (if any) never comes as a
+/// surprise. Runs before the download.
+fn explain_swap_strategy() {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if can_swap_in_place(&exe) {
+        return; // user-owned install — the plain atomic swap just works
+    }
+    match find_priv_tool() {
+        Some(tool) => {
+            println!(
+                "note: {} is a system location — the update will ask for rights via {tool}",
+                exe.display()
+            );
+        }
+        None => {
+            println!(
+                "note: {} is a system location but neither sudo nor doas was found — \
+                 the update will fail; install sudo or run it as root",
+                exe.display()
+            );
+        }
+    }
+    if let Some(owner) = package_owner(&exe) {
+        println!(
+            "note: this file belongs to pacman package `{owner}` — pacman may \
+             list it as modified after the update"
+        );
+    }
+}
+
 /// Install: download the manifest-listed archive from the server →
 /// sha256-verify → atomic swap → restart the daemon when one is running.
 async fn install(args: &UpdateArgs, cfg: &UpdateConfig, chk: &UpdateCheck) -> Result<()> {
@@ -109,18 +145,26 @@ async fn install(args: &UpdateArgs, cfg: &UpdateConfig, chk: &UpdateCheck) -> Re
         );
     };
 
+    explain_swap_strategy();
+
     match confirm(args, &chk.current, &chk.latest)? {
         Confirm::Abort => return Ok(()),
         Confirm::Proceed => {}
     }
 
     println!("downloading + verifying {} (update channel)…", asset.name);
-    let applied = hyprfetch_core::update::apply(cfg, chk).await?;
+    // The user already consented above, so the updater may escalate via
+    // sudo/doas when the binary lives in a system location.
+    let applied =
+        hyprfetch_core::update::apply(cfg, chk, hyprfetch_core::update::Escalation::Auto).await?;
     println!(
         "installed {} (sha256 {})",
         applied.installed,
         &applied.sha256[..16]
     );
+    if applied.escalated {
+        println!("system binary replaced via privilege escalation (mode 0755 kept)");
+    }
 
     if let Some(b) = &applied.backup_path {
         println!("previous binary kept at {b}");

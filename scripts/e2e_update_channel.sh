@@ -207,6 +207,71 @@ else
 fi
 
 echo
+echo "=== 9. system-owned location + real sudo (no tty) → clean error, binary intact ==="
+# Simulates a pacman/makepkg install: /usr/bin/hyprfetch is root-owned and a
+# user process cannot write there. A chmod-555 dir produces the exact same
+# EPERM for the swap probe without needing real root here.
+LOCKED="$WORK/locked"
+mkdir -p "$LOCKED"
+cp "$BIN" "$LOCKED/hyprfetch"
+chmod 555 "$LOCKED"
+write_manifest "9.9.9" "$CHANNEL/9.9.9/hyprfetch-9.9.9-linux-x64.tar.gz" "$SHA"
+OUT=$("$LOCKED/hyprfetch" update -y --channel "$CHANNEL" </dev/null 2>&1)
+RC=$?
+echo "$OUT"
+chmod 755 "$LOCKED"
+echo "$OUT" | grep -q "is a system location"
+check "warns about the system location up front" $?
+if echo "$OUT" | grep -qi "permission denied\|os error 13"; then
+  check "no raw 'permission denied' error" 1
+else
+  check "no raw 'permission denied' error" 0
+fi
+echo "$OUT" | grep -q "privileged swap via sudo failed"
+check "reports the failed privileged swap clearly" $?
+cmp -s "$LOCKED/hyprfetch" "$BIN"
+check "binary was left untouched" $?
+[ ! -e "$LOCKED/hyprfetch.old" ] && [ ! -e "$LOCKED/hyprfetch.new" ]
+check "no .old/.new leftovers in the system dir" $?
+if [ -n "$(ls /tmp 2>/dev/null | grep '^hyprfetch-update-')" ]; then
+  check "no staging leftovers in /tmp" 1
+else
+  check "no staging leftovers in /tmp" 0
+fi
+
+echo
+echo "=== 10. web UI /api/update/apply on a system install → actionable hint ==="
+mkdir -p "$WORK/serve2"
+HYPRFETCH_UPDATE_CHANNEL="$CHANNEL" "$LOCKED/hyprfetch" serve --db-path "$WORK/serve2/hyprfetch.db" --bind 127.0.0.1:7791 > "$WORK/serve2.log" 2>&1 &
+SERVE_PID=$!
+chmod 555 "$LOCKED"
+UP=1
+for _ in $(seq 1 60); do
+  curl -sf -o /dev/null http://127.0.0.1:7791/api/server && UP=0 && break
+  sleep 0.5
+done
+check "server came up (from the locked dir)" $UP
+curl -sf http://127.0.0.1:7791/api/update/check > /dev/null
+check "update check answers" $?
+PAYLOAD=$(curl -s -X POST http://127.0.0.1:7791/api/update/apply)
+HTTP_CODE=$(curl -s -o /tmp/apply_out.json -w '%{http_code}' -X POST http://127.0.0.1:7791/api/update/apply)
+echo "http $HTTP_CODE: $(cat /tmp/apply_out.json 2>/dev/null | head -c 300)"
+echo "$PAYLOAD$HTTP_CODE" | grep -qi "system location\|sudo hyprfetch update"
+check "refuses with an actionable sudo hint" $?
+kill "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null; SERVE_PID=""
+chmod 755 "$LOCKED"
+
+echo
+echo "=== 11. user-owned install in a writable dir → no escalation noise ==="
+OUT=$("$SWAP_TARGET" update -y --channel "$CHANNEL" 2>&1)
+echo "$OUT"
+if echo "$OUT" | grep -q "is a system location"; then
+  check "no system-location note for user installs" 1
+else
+  check "no system-location note for user installs" 0
+fi
+
+echo
 echo "==============================================="
 echo "PASS: $PASS  FAIL: $FAIL"
 echo "==============================================="

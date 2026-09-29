@@ -57,19 +57,30 @@ What it installs: `/usr/bin/hyprfetch` plus documentation under
 
 ## Arch Linux (PKGBUILD — fast install)
 
-Download the `PKGBUILD` attached to the release (it is generated per release
-with the version and the sha256 of the x86_64 tarball already pinned), then:
+Fetch the channel `PKGBUILD` (generated per release with the version and the
+sha256 of the x86_64 tarball already pinned) and build it **in a scratch
+directory** — makepkg always creates `src/`, `pkg/` and the `*.pkg.tar.zst`
+package in the current folder, and this way none of that lands in your home
+or Desktop:
 
 ```bash
-mkdir hyprfetch-bin && cd hyprfetch-bin
-# move the downloaded PKGBUILD into this directory
-makepkg -si
+d=$(mktemp -d); cd $d \
+  && curl -fLO https://istias.tech/hyprfetch/updates/0.4.3/PKGBUILD \
+  && makepkg -si; cd - >/dev/null; rm -rf $d
 ```
 
 `makepkg` downloads the release tarball, verifies it against the pinned
 sha256, and installs `hyprfetch-bin` with pacman (`-s` resolves dependencies,
-`-i` installs). This is the fastest Arch path — no compiler needed, seconds
-to install. Remove with `sudo pacman -R hyprfetch-bin`.
+`-i` installs) into the standard Linux layout: `/usr/bin/hyprfetch`, docs in
+`/usr/share/doc/hyprfetch/`, plus the desktop entry and icon so "HyprFetch"
+shows up in your app launcher like any other application. This is the fastest
+Arch path — no compiler needed, seconds to install. Remove with
+`sudo pacman -Rns hyprfetch-bin`.
+
+> Already installed via pacman and want a newer version later? Either rerun
+> the same command with the newer PKGBUILD, or just run `hyprfetch update` —
+> since 0.4.3 it detects system installs and asks for your sudo password to
+> swap the binary safely.
 
 > Building from source instead? Clone the repo, copy the same `PKGBUILD`
 > pattern with `source=("git+…#tag=v$pkgver")`, or just run

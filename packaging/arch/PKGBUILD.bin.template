@@ -2,13 +2,19 @@
 # Fast-install binary package for Arch Linux (generated for each release;
 # pkgver and sha256sums are pinned to that release by CI).
 #
-# Usage:
-#     curl -fLO https://istias.tech/hyprfetch/updates/<version>/PKGBUILD
-#     makepkg -si
+# Usage (build in a scratch dir so makepkg's src/, pkg/ and *.pkg.tar.zst
+# never litter your current folder — e.g. your Desktop):
+#     d=$(mktemp -d); cd $d \
+#       && curl -fLO https://istias.tech/hyprfetch/updates/<version>/PKGBUILD \
+#       && makepkg -si; cd - >/dev/null; rm -rf $d
 #
 # The source tarball comes from the istias.tech update channel — the same
 # sha256-verified mirror the CLI updater uses. No GitHub involved.
 # Remove again with:  sudo pacman -Rns hyprfetch-bin
+#
+# Installs the standard Linux layout: /usr/bin/hyprfetch, docs in
+# /usr/share/doc, desktop entry + icon so "HyprFetch" shows up in app
+# launchers like any other installed application.
 pkgname=hyprfetch-bin
 pkgver=__VERSION__
 pkgrel=1
@@ -31,9 +37,10 @@ package() {
     install -Dm644 "${_srcdir}/README.md"   "${pkgdir}/usr/share/doc/hyprfetch/README.md"
     install -Dm644 "${_srcdir}/CHANGELOG.md" "${pkgdir}/usr/share/doc/hyprfetch/CHANGELOG.md"
     install -Dm644 "${_srcdir}/LICENSE"     "${pkgdir}/usr/share/licenses/hyprfetch-bin/LICENSE"
-    # Desktop entry at the standard Linux applications path so
-    # "HyprFetch" shows up in desktop menus / app launchers.
+    # Desktop entry + icon at the standard Linux paths so "HyprFetch" shows
+    # up in desktop menus / app launchers like any other application.
     install -Dm644 "${_srcdir}/hyprfetch.desktop" "${pkgdir}/usr/share/applications/hyprfetch.desktop"
+    install -Dm644 "${_srcdir}/hyprfetch.svg"     "${pkgdir}/usr/share/icons/hicolor/scalable/apps/hyprfetch.svg"
 }
 
 # vim: set ft=sh:

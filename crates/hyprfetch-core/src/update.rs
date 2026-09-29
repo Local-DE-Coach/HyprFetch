@@ -15,7 +15,7 @@
 //! entirely.
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -47,8 +47,27 @@ pub enum UpdateError {
     ExePath,
     #[error("update channel: {0}")]
     Channel(String),
+    #[error("cannot replace {path} — it lives in a system location (permission denied). {hint}")]
+    RootNeeded { path: String, hint: String },
     #[error("{0}")]
     Other(String),
+}
+
+/// What the updater may do when the running binary sits in a root-owned
+/// directory (e.g. `/usr/bin` when installed via pacman/makepkg or .deb/.rpm).
+///
+/// A plain user process cannot write there, so the atomic swap would fail
+/// with "permission denied". With [`Escalation::Auto`] the updater performs
+/// the swap through a privilege tool (`sudo`, falling back to `doas`); with
+/// [`Escalation::Refuse`] it returns [`UpdateError::RootNeeded`] with a
+/// actionable hint instead (used by the non-interactive web UI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Escalation {
+    /// Replace system-owned binaries via `sudo`/`doas` (sudo may prompt for a
+    /// password — this is the interactive CLI choice).
+    Auto,
+    /// Never escalate; fail with [`UpdateError::RootNeeded`] instead (WebUI).
+    Refuse,
 }
 
 /// Where to check for updates.
@@ -255,7 +274,30 @@ pub async fn check(cfg: &UpdateConfig) -> Result<UpdateCheck, UpdateError> {
 
 /// Install: fetch the manifest, download the archive for this target,
 /// sha256-verify against the manifest, extract + atomic swap.
-pub async fn apply(cfg: &UpdateConfig, chk: &UpdateCheck) -> Result<ApplyResult, UpdateError> {
+///
+/// `escalation` decides how a system-owned install location is handled (see
+/// [`Escalation`]). The writability probe runs BEFORE the download, so a
+/// system install without escalation rights fails fast with a clear hint
+/// instead of after pulling the whole archive.
+pub async fn apply(
+    cfg: &UpdateConfig,
+    chk: &UpdateCheck,
+    escalation: Escalation,
+) -> Result<ApplyResult, UpdateError> {
+    // Resolve the running binary + pick the swap strategy up front (fail
+    // fast before spending time on the download).
+    let exe = std::env::current_exe().map_err(|_| UpdateError::ExePath)?;
+    let escalate_with: Option<Option<&'static str>> = if can_swap_in_place(&exe) {
+        Some(None) // direct swap, no privileges needed
+    } else {
+        match escalation {
+            Escalation::Auto => Some(Some(
+                find_priv_tool().ok_or_else(|| root_needed(&exe, true))?,
+            )),
+            Escalation::Refuse => return Err(root_needed(&exe, false)),
+        }
+    };
+
     let m = fetch_manifest(cfg).await?;
     let (_, asset) = pick_channel_asset(&m.assets)
         .ok_or_else(|| UpdateError::AssetMissing("target tarball (update channel)".into()))?;
@@ -280,15 +322,116 @@ pub async fn apply(cfg: &UpdateConfig, chk: &UpdateCheck) -> Result<ApplyResult,
     }
 
     let new_bytes = extract_binary(&tarball)?;
-    let exe = std::env::current_exe().map_err(|_| UpdateError::ExePath)?;
-    swap_binary(&exe, &new_bytes)?;
+    let escalated = match escalate_with {
+        Some(None) | None => {
+            swap_binary(&exe, &new_bytes)?;
+            false
+        }
+        // can_swap_in_place() is only ever false on unix; on other targets
+        // the arm is unreachable, but keep the code honest anyway.
+        Some(Some(tool)) => {
+            swap_binary_escalated(&exe, &new_bytes, tool)?;
+            true
+        }
+    };
 
     Ok(ApplyResult {
         current: chk.current.clone(),
         installed: chk.latest.clone(),
         backup_path: Some(exe.with_extension("old").to_string_lossy().into_owned()),
         sha256: got,
+        escalated,
     })
+}
+
+/// Build the [`UpdateError::RootNeeded`] error with an actionable hint.
+fn root_needed(exe: &Path, no_tool: bool) -> UpdateError {
+    let path = exe.to_string_lossy().into_owned();
+    let hint = if no_tool {
+        "install sudo or doas, then run `sudo hyprfetch update` — or reinstall \
+         with the one-line installer (curl -fsSL https://istias.tech/hyprfetch/updates/install.sh | sh)"
+            .to_string()
+    } else {
+        "open a terminal and run `sudo hyprfetch update` once (the CLI asks for \
+         your password and swaps the binary safely), or reinstall with the \
+         one-line installer: curl -fsSL https://istias.tech/hyprfetch/updates/install.sh | sh"
+            .to_string()
+    };
+    UpdateError::RootNeeded { path, hint }
+}
+
+/// Can the current user replace `exe` in place (direct atomic swap)?
+///
+/// Probed by actually creating a scratch file next to the binary — that is
+/// exactly what the swap needs, so the check cannot lie. Root passes
+/// wherever the filesystem is writable; a user fails on pacman/deb/rpm
+/// system directories (`/usr/bin`, `/usr/local/bin`, …).
+pub fn can_swap_in_place(exe: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        let dir = exe.parent().unwrap_or_else(|| Path::new("."));
+        let probe = dir.join(format!(".hyprfetch-update-probe-{}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = exe;
+        true
+    }
+}
+
+/// Find a privilege-escalation tool on `PATH`: `sudo` first, `doas` fallback.
+/// Returns the bare program name so `Command::new(name)` keeps resolving it
+/// at spawn time (and tests can shim it via `PATH`).
+pub fn find_priv_tool() -> Option<&'static str> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path) {
+            for name in ["sudo", "doas"] {
+                let candidate = dir.join(name);
+                if let Ok(md) = std::fs::metadata(&candidate) {
+                    if md.is_file() && md.permissions().mode() & 0o111 != 0 {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Which installed package (if any) owns `exe`, per pacman.
+/// Returns e.g. `"hyprfetch-bin 0.4.2"`; `None` when pacman is absent,
+/// the binary is not packaged, or pacman errors.
+pub fn package_owner(exe: &Path) -> Option<String> {
+    let out = std::process::Command::new("pacman")
+        .arg("-Qo")
+        .arg(exe)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.split("is owned by")
+        .nth(1)
+        .map(|rest| rest.trim().trim_end_matches('.') .to_string())
 }
 
 /// The release archive naming scheme is `hyprfetch-<ver>-<target>.tar.gz`.
@@ -346,6 +489,92 @@ pub struct ApplyResult {
     pub installed: String,
     pub backup_path: Option<String>,
     pub sha256: String,
+    /// True when the swap needed sudo/doas (system-owned install location).
+    pub escalated: bool,
+}
+
+/// Replace a system-owned binary via a privilege tool (`sudo`/`doas`).
+///
+/// Layout: stage the new binary in a user-writable temp dir, then run ONE
+/// privileged script (`sudo`/`doas` → `sh -c`) that moves the old binary to
+/// `<exe>.old` and installs the staged one as `<exe>` (root-owned, mode
+/// 0755). A single script keeps the swap self-recovering: if `install`
+/// fails, the script moves the old binary back before exiting, so the
+/// system never ends up without a working `hyprfetch`.
+pub fn swap_binary_escalated(
+    exe: &Path,
+    new_bytes: &[u8],
+    tool: &str,
+) -> Result<(), UpdateError> {
+    // Stage the new binary where the CURRENT user can write it; the
+    // privileged step then installs it into place (root-owned, 0755).
+    let stage_dir: PathBuf = std::env::temp_dir().join(format!(
+        "hyprfetch-update-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ));
+    std::fs::create_dir_all(&stage_dir)?;
+    let staged = stage_dir.join("hyprfetch");
+    let staged_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&staged)?;
+        f.write_all(new_bytes)?;
+        f.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = staged_result {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(e.into());
+    }
+
+    let old_path = exe.with_extension("old");
+    let script = escalated_swap_script(exe, &old_path, &staged);
+
+    let run = std::process::Command::new(tool)
+        .args(["sh", "-c", &script])
+        .status();
+    // Best-effort staging cleanup (the script removes the staged file on
+    // success; the dir may still be left over on failure).
+    let _ = std::fs::remove_dir_all(&stage_dir);
+
+    match run {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(UpdateError::Other(format!(
+            "privileged swap via {tool} failed (exit {status}) — {path} was left untouched; \
+             run `sudo hyprfetch update` manually if the problem persists",
+            path = exe.display(),
+        ))),
+        Err(e) => Err(UpdateError::Other(format!(
+            "cannot run {tool}: {e} — install sudo/doas or run `sudo hyprfetch update` manually"
+        ))),
+    }
+}
+
+/// POSIX single-quote a path for the privileged `sh -c` script
+/// (`'` → `'\''`), so odd install paths can never break out of the quoting.
+fn sh_quote(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The one privileged script the escalated swap runs:
+/// move the old binary aside → install the staged one (root-owned, 0755) →
+/// drop the staged copy; if `install` fails, move the old binary BACK so the
+/// system is never left without a working `hyprfetch`.
+fn escalated_swap_script(exe: &Path, old: &Path, staged: &Path) -> String {
+    format!(
+        "set -e\nmv {exe} {old}\nif install -m 0755 {new} {exe}; then\n  rm -f {new}\nelse\n  mv {old} {exe}\n  exit 1\nfi\n",
+        exe = sh_quote(exe),
+        old = sh_quote(old),
+        new = sh_quote(staged),
+    )
 }
 
 /// Download → verify → swap the running binary atomically.
@@ -447,6 +676,180 @@ mod tests {
             "previous binary kept as rollback"
         );
         assert!(!exe.with_extension("new").exists(), "temp file consumed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn can_swap_in_place_probes_the_real_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        // Writable dir → probe succeeds.
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("hyprfetch");
+        std::fs::write(&exe, b"x").unwrap();
+        assert!(can_swap_in_place(&exe), "writable dir must allow the swap");
+
+        // Read-only dir → probe fails (same EPERM a pacman-owned /usr/bin
+        // gives a user process).
+        let ro = tempfile::tempdir().unwrap();
+        let exe_ro = ro.path().join("hyprfetch");
+        std::fs::write(&exe_ro, b"x").unwrap();
+        std::fs::set_permissions(ro.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(
+            !can_swap_in_place(&exe_ro),
+            "read-only dir must require escalation"
+        );
+        std::fs::set_permissions(ro.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escalated_swap_runs_one_self_recovering_script() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bindir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        let exe = bindir.join("hyprfetch");
+        std::fs::write(&exe, b"old-binary").unwrap();
+
+        // A stand-in "sudo" that just executes the privileged script as the
+        // current user — exercises the exact same Command plumbing and the
+        // exact same sh script the real sudo runs (only the euid differs).
+        let shimdir = tempfile::tempdir().unwrap();
+        let shim = shimdir.path().join("fake-sudo");
+        std::fs::write(&shim, "#!/bin/sh\nexec \"$@\"\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        swap_binary_escalated(&exe, b"new-binary", shim.to_str().unwrap()).unwrap();
+
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new-binary");
+        assert_eq!(
+            std::fs::read(exe.with_extension("old")).unwrap(),
+            b"old-binary",
+            "previous binary kept as rollback"
+        );
+        let mode = std::fs::metadata(&exe).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "installed binary must be 0755");
+        // No staging leftovers in the temp dir.
+        let leftovers: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("hyprfetch-update-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging dir must be cleaned up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escalated_swap_failure_leaves_binary_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("hyprfetch");
+        std::fs::write(&exe, b"old-binary").unwrap();
+
+        // A "sudo" that always fails WITHOUT running the script (like sudo
+        // hitting "a password is required" in a non-tty) — nothing may
+        // change on disk.
+        let shimdir = tempfile::tempdir().unwrap();
+        let shim = shimdir.path().join("fake-sudo");
+        std::fs::write(&shim, "#!/bin/sh\nexit 3\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err =
+            swap_binary_escalated(&exe, b"new-binary", shim.to_str().unwrap()).unwrap_err();
+        assert!(
+            err.to_string().starts_with("privileged swap via ") && err.to_string().ends_with(
+                "was left untouched; run `sudo hyprfetch update` manually if the problem persists"
+            ),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&exe).unwrap(),
+            b"old-binary",
+            "failed escalation must not destroy the installed binary"
+        );
+        assert!(!exe.with_extension("old").exists(), "rollback restored the original");
+    }
+
+    #[test]
+    fn escalated_script_rolls_back_when_install_fails() {
+        // Run the REAL privileged script with a staged path that does not
+        // exist → `install` fails → the script must move the old binary back
+        // before exiting non-zero.
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("hyprfetch");
+        std::fs::write(&exe, b"old-binary").unwrap();
+        let old = exe.with_extension("old");
+        let ghost = tmp.path().join("does-not-exist");
+
+        let script = escalated_swap_script(&exe, &old, &ghost);
+        let st = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .status()
+            .unwrap();
+        assert!(!st.success(), "script must report failure");
+        assert_eq!(
+            std::fs::read(&exe).unwrap(),
+            b"old-binary",
+            "rollback must restore the previous binary"
+        );
+        assert!(!old.exists(), "rollback removes the .old copy");
+    }
+
+    #[test]
+    fn escalated_script_shape() {
+        let s = escalated_swap_script(
+            Path::new("/usr/bin/hyprfetch"),
+            Path::new("/usr/bin/hyprfetch.old"),
+            Path::new("/tmp/stage/hyprfetch"),
+        );
+        assert!(s.starts_with("set -e\n"));
+        assert!(s.contains("mv '/usr/bin/hyprfetch' '/usr/bin/hyprfetch.old'"));
+        assert!(s.contains("install -m 0755 '/tmp/stage/hyprfetch' '/usr/bin/hyprfetch'"));
+        assert!(s.contains("mv '/usr/bin/hyprfetch.old' '/usr/bin/hyprfetch'"));
+    }
+
+    #[test]
+    fn sh_quote_survives_hostile_paths() {
+        let weird = Path::new("/opt/my 'weird'/hyprfetch");
+        let q = sh_quote(weird);
+        assert_eq!(q, "'/opt/my '\\''weird'\\''/hyprfetch'");
+        // Round-trip through sh: echo the quoted string back.
+        let out = std::process::Command::new("sh")
+            .args(["-c", &format!("printf '%s' {q}")])
+            .output()
+            .unwrap();
+        assert_eq!(out.stdout, weird.as_os_str().as_encoded_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_priv_tool_finds_sudo() {
+        // The CI/sandbox image has sudo on PATH; if it ever disappears this
+        // test just downgrades to "no tool found" (both outcomes are valid
+        // — what matters is no panic and no false sudo).
+        let tool = find_priv_tool();
+        if which_sudo_exists() {
+            assert_eq!(tool, Some("sudo"));
+        }
+    }
+
+    #[cfg(unix)]
+    fn which_sudo_exists() -> bool {
+        std::process::Command::new("sh")
+            .args(["-c", "command -v sudo >/dev/null 2>&1"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn package_owner_is_none_without_pacman_or_unowned_file() {
+        // tempfile paths are never pacman-owned; pacman itself is usually
+        // absent on CI. Either way the function must return None cleanly.
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("hyprfetch");
+        std::fs::write(&exe, b"x").unwrap();
+        assert!(package_owner(&exe).is_none());
     }
 
     #[test]

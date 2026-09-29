@@ -201,9 +201,10 @@ jobs:
           mkdir -p "$ARCHIVE"
           cp target/${{ matrix.target }}/release/hyprfetch "$ARCHIVE/"
           cp README.md LICENSE CHANGELOG.md "$ARCHIVE/"
-          # Desktop entry so Linux packages can register HyprFetch in
-          # desktop menus at the standard /usr/share/applications path.
+          # Desktop entry + icon so Linux packages can register HyprFetch
+          # in desktop menus at the standard /usr/share paths.
           cp packaging/desktop/hyprfetch.desktop "$ARCHIVE/"
+          cp packaging/icons/hyprfetch.svg "$ARCHIVE/"
           tar czf "$ARCHIVE.tar.gz" "$ARCHIVE"
           sha256sum "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
           ls -la "$ARCHIVE.tar.gz" "$ARCHIVE.tar.gz.sha256"
@@ -346,7 +347,7 @@ jobs:
           | Platform | Command |
           |---|---|
           | **Any Linux (one line)** | `curl -fsSL {updates_page}/install.sh \\| sh` |
-          | **Arch / CachyOS** | `curl -fLO {updates_page}/{version}/PKGBUILD && makepkg -si` |
+          | **Arch / CachyOS** | `d=$(mktemp -d); cd $d && curl -fLO {updates_page}/{version}/PKGBUILD && makepkg -si; cd - >/dev/null; rm -rf $d` |
           | **Debian / Ubuntu** | `curl -fLO {updates_page}/{version}/hyprfetch_{version}-1_amd64.deb && sudo apt install ./hyprfetch_{version}-1_amd64.deb` |
           | **Fedora / RHEL** | `sudo dnf install {updates_page}/{version}/hyprfetch-{version}-1.x86_64.rpm` |
           | **Any Linux x64 (manual)** | tarball below → `sudo install -Dm755 hyprfetch /usr/local/bin/hyprfetch` |
@@ -354,6 +355,10 @@ jobs:
           Uninstall: `curl -fsSL {updates_page}/install.sh | sh -s -- --uninstall`
           (Arch: `sudo pacman -Rns hyprfetch-bin` · Debian: `sudo apt remove --purge hyprfetch` ·
           Fedora: `sudo dnf remove hyprfetch`) — downloads in ~/Downloads are never touched.
+
+          System install (pacman / deb / rpm / /usr/local)? `hyprfetch update` detects it and
+          asks for your sudo password to swap the binary safely — from 0.4.3 on, no more
+          "permission denied".
 
           Full walkthroughs: <{product_page}> (install + test steps) · <{updates_page}> (update steps)
 

@@ -50,4 +50,5 @@ assets = [
     ["../../CHANGELOG.md", "usr/share/doc/hyprfetch/CHANGELOG", "644"],
     ["../../LICENSE", "usr/share/doc/hyprfetch/copyright", "644"],
     ["../../packaging/desktop/hyprfetch.desktop", "usr/share/applications/hyprfetch.desktop", "644"],
+    ["../../packaging/icons/hyprfetch.svg", "usr/share/icons/hicolor/scalable/apps/hyprfetch.svg", "644"],
 ]

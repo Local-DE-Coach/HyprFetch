@@ -8,6 +8,41 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-09-30 (system installs update cleanly — no more "permission denied")
+
+### Fixed
+- **`hyprfetch update` failed with `io: Permission denied (os error 13)` on
+  any package-manager install** (Arch PKGBUILD / .deb / .rpm put the binary
+  in a root-owned directory such as `/usr/bin`, which a user process cannot
+  write to). The updater now probes whether the running binary's directory is
+  writable **before** downloading:
+  - user-owned installs (install.sh per-user, tarball in `$HOME`) — unchanged
+    direct atomic swap;
+  - system installs — the swap runs through one self-recovering privileged
+    script (`sudo`, falling back to `doas`): move old → `install -m 0755` new
+    → on any failure move old back, so a half-finished update can never leave
+    the machine without a working `hyprfetch`. The CLI prints what will happen
+    (and a pacman-ownership note) before the confirmation prompt; `sudo`
+    prompts for the password once.
+- **The web UI updater button hit the same wall** and surfaced a raw error.
+  The daemon cannot prompt for a password, so `POST /api/update/apply` now
+  refuses system installs with an actionable message pointing at
+  `sudo hyprfetch update`.
+- **Arch instructions no longer litter your folders.** The PKGBUILD flow in
+  the docs, release notes and istias.tech pages now builds in a `mktemp -d`
+  scratch directory, so makepkg's `src/`, `pkg/`, `PKGBUILD` and
+  `*.pkg.tar.zst` never land in `~/Desktop` again.
+
+### Added
+- **App icon + desktop integration everywhere**: a proper scalable icon
+  (`packaging/icons/hyprfetch.svg`, `Icon=hyprfetch` in the desktop entry)
+  ships in the release tarball and is installed by the PKGBUILD, .rpm, .deb
+  and install.sh (system and per-user hicolor paths) — HyprFetch now shows up
+  in app launchers like any other installed application. Uninstall removes
+  all of it.
+- install.sh warns when a pacman-managed `/usr/bin/hyprfetch` would be
+  shadowed by a standalone install.
+
 ## [0.4.2] — 2026-09-30 (blank-UI hotfix — the web UI works again)
 
 ### Fixed
