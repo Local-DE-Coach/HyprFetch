@@ -161,6 +161,7 @@
 | Structured tracing logs (env-filter) | ✅ | `tracing_subscriber` + `RUST_LOG` |
 | Dev / prod run modes (Node.js-style multi-run: `dev`, `serve`, `daemon start/stop/restart/status`, `logs -f`) | ✅ | v0.3.1 — E2E daemon phase 7/7 |
 | In-app updater (check → download → sha256 verify → swap → restart → auto-resume; PAT/private-repo aware) | ✅ | v0.3.1 — E2E mock-GitHub phase + CLI apply |
+| Self-hosted update channel (fast `latest.json` mirror on istias.tech; no GitHub, no rate limits; CI-deployed on every release) | ✅ | v0.3.3 — `check_via_channel` unit tests + `scripts/e2e_update_channel.sh`; `docs/update-channel.md` |
 | `GET /api/server` runtime info endpoint | ✅ | v0.3.1 — E2E UI phase |
 | Sleep mode `--exit-when-idle <min>` (exit when nothing to do) | ✅ | v0.3.1 — E2E exit-when-idle phase |
 

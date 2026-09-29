@@ -328,6 +328,34 @@ downloader E2E 43/43 green; updater E2E 20/20 green (incl. a full
 clone→build→swap cycle against a local git remote and the PAT tier against
 the real v0.3.1 GitHub release).
 
+## 18. Self-hosted fast update channel on istias.tech (v0.3.3 — owner request, APPLIED 2026-09-29)
+
+Owner request: "use my server (istias.tech / 138.197.73.65) so
+`hyprfetch update --check` is fast — and deploy each release there in a NEW
+directory so the existing webUI on that server keeps working." Result: the
+updater gained a tier 0 — a self-hosted HTTPS manifest mirror that answers
+with one fast GET (no GitHub API, no rate limits, no tokens).
+
+| ID | Item | Status | Proof |
+|---|---|---|---|
+| 18.1 | Core channel tier: `ChannelManifest`/`ChannelAsset` (serde), `manifest_url`, `pick_channel_asset` over `target_candidates()`, `effective_channel()` (empty = disabled) | ✅ | unit tests `manifest_url_join`, `channel_effective_url`, `manifest_parses_and_picks_host_asset`, `manifest_requires_version_and_assets` |
+| 18.2 | `check_via_channel` — GET `latest.json`, compare `version`, map the host asset into the shared `UpdateCheck` (via_channel + channel fields) | ✅ | E2E scenario B: "checked via update channel", version + asset lines |
+| 18.3 | `apply_channel` — download manifest-listed tarball → sha256 vs manifest → `extract_binary` → `swap_binary` (atomic, `.old` kept) | ✅ | E2E scenario C: installed 9.9.9, swapped binary reports 9.9.9; scenario D: tampered sha256 refused, binary untouched |
+| 18.4 | CLI three-tier chain (channel → API → git) with per-tier labels + `--channel` flag; `--check` fast-path hint | ✅ | E2E scenarios B/C/F: labels + `update channel unreachable (…) — trying GitHub…` |
+| 18.5 | Config + env: `[update] channel` (default = `https://istias.tech/hyprfetch/updates/`, `""` disables), `HYPRFETCH_UPDATE_CHANNEL`; precedence flag > env > config > default; doctor channel line | ✅ | E2E scenario G ("" disables silently); doctor prints `update channel = …` |
+| 18.6 | API: `GET /api/update/check` channel-first (`"via_channel": true` + `"channel"` in payload); `POST /api/update/apply` installs from the mirror when cached check was channel | ✅ | E2E scenario H payload checks |
+| 18.7 | UI: Updates card shows `via update channel` badge + updated copy (channel-first wording) | ✅ | `ui/src/pages/Updates.svelte` diff; dist rebuilt + committed |
+| 18.8 | Release workflow `deploy-update-channel` job: generate `latest.json` (per-target url/sha256/size from built archives), scp archives into `<DEPLOY_PATH>/updates/<version>/`, atomic top-level manifest swap, post-deploy public-URL verification; skips with notice when `DEPLOY_SSH_KEY` secret absent | ✅ | YAML validated; secrets table + deploy-key guide in docs/update-channel.md |
+| 18.9 | `docs/update-channel.md`: manifest schema, one-time nginx `location /hyprfetch/` setup (new dir, existing site untouched), Cloudflare notes, secrets, client overrides, verification | ✅ | docs diff; README/install.md/api.md synced to three-tier wording |
+| 18.10 | New E2E `scripts/e2e_update_channel.sh` — 8 scenarios / 28 checks all green; `e2e_update_tiers.sh` made hermetic for channel-first (channel disabled per scenario, dead API base for git-tier install) — 20/20 green again | ✅ | RESULT: 0 failed check(s) in both scripts |
+
+**Measured:** cargo fmt + clippy clean; **138** workspace tests green;
+main downloader E2E **43/43** green; channel E2E **28/28**; updater tiers
+E2E **20/20**. Side finding: the GitHub repo is **public** now
+(unauthenticated `ls-remote` + API answers), so the API/git tiers succeed
+against the real repo — scenarios that need the dead-end UX pin
+`--repo fake/nonexistent-repo` + `--channel ""` to stay hermetic.
+
 ## Bug tracker (open)
 
 | ID | Bug | Status | Notes |

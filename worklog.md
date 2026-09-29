@@ -513,3 +513,65 @@ which commit**.
 - **Docs:** README "Self-update" rewritten (two tiers), install.md
   "Keeping it updated" (+ `[update] git_url` example), api.md (via_git,
   400-on-git-apply). CHANGELOG [0.3.2]; worktasks section 17.
+
+## 2026-09-29 (session 4) — self-hosted fast update channel (v0.3.3)
+
+- **Owner request:** use their own server (domain `https://istias.tech/`,
+  origin `138.197.73.65`) so `hyprfetch update --check` is fast, and mirror
+  every release there **in a NEW directory** so the existing site on that
+  host (a Next.js app behind Cloudflare) keeps working untouched.
+- **Core (`hyprfetch-core/src/update.rs`):** new **tier 0 — update
+  channel**. `ChannelManifest`/`ChannelAsset` deserialise `latest.json`
+  (`version`, `tag`, `published_at`, `notes_url`,
+  `assets: {<target-triple>: {url, sha256, size}}`);
+  `manifest_url` joins the base; `pick_channel_asset` matches
+  `target_candidates()`; `check_via_channel` returns the shared
+  `UpdateCheck` (new `via_channel` + `channel` fields, `#[serde(default)]`
+  so older payloads stay compatible); `apply_channel` downloads the
+  manifest-listed tarball, verifies the **manifest sha256**, extracts and
+  swaps atomically via the existing `extract_binary`/`swap_binary`.
+  `UpdateConfig.channel_url` (default `https://istias.tech/hyprfetch/updates/`,
+  empty string disables); `UpdateError::Channel`. 4 new unit tests
+  (URL join, enable/disable, parse+pick, strict schema) — 138 workspace
+  tests green.
+- **CLI (`update_cmd.rs`):** three-tier chain channel → API → git with a
+  `Tier` enum routing installs; per-tier labels
+  (`checked via update channel (<url>)` / auth label / `git access detected
+  via <url>`); new `--channel <url>` flag; fast-path hint on `--check`.
+  Config/env plumbing in `helpers.rs` (`[update] channel`,
+  `HYPRFETCH_UPDATE_CHANNEL`, precedence flag > env > config > default);
+  `doctor` prints the active channel.
+- **API/UI:** `/api/update/check` tries the channel first and reports
+  `via_channel`; `/api/update/apply` installs from the mirror when the
+  cached check was channel-found. Updates card got a `via update channel`
+  badge; `ui/dist` rebuilt (npm) and committed.
+- **Release workflow:** new `deploy-update-channel` job after publish —
+  generates `latest.json` from the built archives + `.sha256` files (jq),
+  scp's archives into `<DEPLOY_PATH>/updates/<version>/`, swaps the
+  top-level manifest **atomically** (temp name + `mv(2)`), then verifies
+  the public URL serves the new version (warning + setup pointer if the
+  origin route is missing). Secrets: `DEPLOY_SSH_KEY` (required),
+  `DEPLOY_HOST`/`DEPLOY_USER`/`DEPLOY_PORT`/`DEPLOY_PATH` with the owner's
+  server as defaults; job skips with a notice when the key is absent.
+- **Docs:** new `docs/update-channel.md` (manifest schema, one-time nginx
+  `location /hyprfetch/` recipe, Cloudflare notes, secrets + deploy-key
+  generation, client overrides, verification); README Self-update +
+  `docs/install.md` rewritten around the three tiers; `docs/api.md`
+  documents the new payload fields.
+- **E2E:** new `scripts/e2e_update_channel.sh` — 8 scenarios / 28 checks
+  green (check via channel, full install download→sha256→swap→rollback,
+  tampered-manifest refusal leaves the binary untouched, up-to-date, 404
+  fallback, `--channel ""` silence, `/api/update/check` payload).
+  `scripts/e2e_update_tiers.sh` updated for the channel-first reality
+  (channel disabled per scenario, dead API base for the git-tier install)
+  — 20/20 green again. Main downloader E2E 43/43 still green.
+- **Side finding:** the GitHub repo is **public** now (anonymous
+  `ls-remote` works, API unauthenticated answers past rate limits), so
+  scenarios that need the dead-end UX pin `--repo fake/nonexistent-repo`
+  + `--channel ""`. The fast channel is still worth it: no rate limits,
+  no GitHub dependency, download stays on the owner's server.
+- **Owner TODO (one-time, outside CI):** create the new directory on the
+  server, add the nginx `location /hyprfetch/` route (recipe in
+  docs/update-channel.md), then set the `DEPLOY_SSH_KEY` secret — the
+  v0.3.3 workflow run will skip the mirror step with a notice until then
+  and the updater falls back to GitHub tiers automatically.

@@ -71,7 +71,8 @@ enum Command {
         #[arg(short = 'n', long, default_value_t = 50)]
         lines: usize,
     },
-    /// Check for / install new releases straight from GitHub.
+    /// Check for / install new releases. Fast path: the self-hosted update
+    /// channel (istias.tech mirror); fallbacks: GitHub API + plain git.
     Update {
         /// Only report what's available; don't install.
         #[arg(long, default_value_t = false)]
@@ -79,6 +80,11 @@ enum Command {
         /// Assume yes for the install prompt (script-friendly).
         #[arg(long, short = 'y', default_value_t = false)]
         yes: bool,
+        /// Update-channel base URL (latest.json mirror). Empty string
+        /// disables the channel tier. Default: the project mirror,
+        /// override with [update] channel / HYPRFETCH_UPDATE_CHANNEL.
+        #[arg(long)]
+        channel: Option<String>,
         /// Override the GitHub repo (`owner/name`).
         #[arg(long)]
         repo: Option<String>,
@@ -156,6 +162,7 @@ enum DaemonCommand {
 pub struct UpdateArgs {
     pub check: bool,
     pub yes: bool,
+    pub channel: Option<String>,
     pub repo: Option<String>,
     pub token: Option<String>,
     pub from_git: bool,
@@ -210,6 +217,7 @@ async fn run_async(cli: Cli, orig_args: Vec<String>) -> Result<()> {
         Command::Update {
             check,
             yes,
+            channel,
             repo,
             token,
             from_git,
@@ -219,6 +227,7 @@ async fn run_async(cli: Cli, orig_args: Vec<String>) -> Result<()> {
             update_cmd::run(UpdateArgs {
                 check,
                 yes,
+                channel,
                 repo,
                 token,
                 from_git,
@@ -353,7 +362,8 @@ async fn run_serve(
     }
 
     // In-app updater configuration (private-repo aware).
-    let update_cfg = helpers::resolve_update_cfg_with_db(None, None, &cfg.update, Some(&settings));
+    let update_cfg =
+        helpers::resolve_update_cfg_with_db(None, None, None, &cfg.update, Some(&settings));
 
     let state = hyprfetch_api::AppState {
         update_cfg: Arc::new(update_cfg),
@@ -460,7 +470,14 @@ async fn doctor() -> Result<()> {
             "not generated yet (created on first non-loopback serve)".to_string()
         }
     );
-    let update_cfg = helpers::resolve_update_cfg_with_db(None, None, &None, Some(&s));
+    let update_cfg = helpers::resolve_update_cfg_with_db(None, None, None, &None, Some(&s));
+    println!(
+        "  update channel = {}",
+        update_cfg
+            .effective_channel()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "disabled".to_string())
+    );
     println!("  update repo  = {}", update_cfg.repo);
     println!(
         "  update token = {}",

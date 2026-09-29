@@ -750,22 +750,28 @@ pub async fn server_info(State(state): State<AppState>) -> Json<serde_json::Valu
 // GET /api/update/check
 // ---------------------------------------------------------------------------
 
-/// `GET /api/update/check` — query the latest GitHub release and cache it.
+/// `GET /api/update/check` — query the newest version and cache it.
 ///
-/// Falls back to the git tier (ls-remote over the user's SSH/clone access)
-/// when the REST API cannot see the repo (private repo without a token) or
-/// the API call fails entirely.
+/// Tier order: self-hosted update channel (fast mirror, no GitHub) →
+/// GitHub REST API → git tier (ls-remote over the user's SSH/clone access)
+/// when the API cannot see the repo (private repo without a token).
 pub async fn update_check(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let checked = match hyprfetch_core::update::check(&state.update_cfg).await {
+    let checked = match hyprfetch_core::update::check_via_channel(&state.update_cfg).await {
         Ok(Some(c)) => Some(c),
         Ok(None) | Err(_) => {
-            // Private repo without a token (404/401), no release, or API
-            // failure — try the git tier before reporting "nothing".
-            match hyprfetch_core::update::check_via_git(&state.update_cfg).await {
-                Ok(Some(g)) => Some(g.check),
-                _ => None,
+            match hyprfetch_core::update::check(&state.update_cfg).await {
+                Ok(Some(c)) => Some(c),
+                Ok(None) | Err(_) => {
+                    // Private repo without a token (404/401), no release,
+                    // or API failure — try the git tier before reporting
+                    // "nothing".
+                    match hyprfetch_core::update::check_via_git(&state.update_cfg).await {
+                        Ok(Some(g)) => Some(g.check),
+                        _ => None,
+                    }
+                }
             }
         }
     };
@@ -809,11 +815,11 @@ pub async fn update_apply(
     State(state): State<AppState>,
     Query(q): Query<UpdateApplyQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (latest, via_git) = {
+    let (latest, via_git, via_channel) = {
         let cache = state.update_cache.lock().await;
         cache
             .as_ref()
-            .map(|c| (c.latest.clone(), c.via_git))
+            .map(|c| (c.latest.clone(), c.via_git, c.via_channel))
             .ok_or_else(|| ApiError::InvalidRequest("run GET /api/update/check first".into()))?
     };
 
@@ -833,11 +839,21 @@ pub async fn update_apply(
         release_url: None,
         asset: None,
         via_git: false,
+        via_channel,
+        channel: None,
     };
 
-    let applied = hyprfetch_core::update::apply(&state.update_cfg, &chk)
-        .await
-        .map_err(|e| ApiError::InternalError(format!("update apply: {e}")))?;
+    // Channel tier downloads from the project mirror; API tier from the
+    // GitHub release. Both sha256-verify + swap atomically.
+    let applied = if via_channel {
+        hyprfetch_core::update::apply_channel(&state.update_cfg, &chk)
+            .await
+            .map_err(|e| ApiError::InternalError(format!("update apply: {e}")))?
+    } else {
+        hyprfetch_core::update::apply(&state.update_cfg, &chk)
+            .await
+            .map_err(|e| ApiError::InternalError(format!("update apply: {e}")))?
+    };
 
     let restart = q.restart.unwrap_or(true);
     let restarted = if restart {

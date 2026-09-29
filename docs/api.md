@@ -206,20 +206,29 @@ footer:
 
 ### In-app updates
 
-The updater queries the latest GitHub release of the configured repo
-(`[update] repo` in `config.toml`, default `Local-DE-Coach/HyprFetch`). For
-private repos a PAT is resolved from `HYPRFETCH_GITHUB_TOKEN` / `GITHUB_TOKEN`
-/ `GH_TOKEN` / `[update] token` / the `github_token` setting / a PAT-in-URL
-clone / `gh auth token` / git credential helpers. Release assets are
-downloaded through the REST API octet-stream endpoint and sha256-verified
-before anything touches disk.
+The updater asks three sources in order — the first that answers wins:
 
-**Git-tier fallback:** when the API cannot see the repo (private repo
-without a token) the check falls back to plain git — `ls-remote` over the
-user's SSH keys / clone origin / `[update] git_url`. In that mode the
-response has `"via_git": true`, `asset` is `null`, and installation must
-happen through the CLI (`hyprfetch update` shallow-clones the tag and runs
-`cargo build --release --locked`).
+0. **Update channel (default, fastest)** — the self-hosted mirror
+   (`https://istias.tech/hyprfetch/updates/latest.json`) that CI populates
+   on every release. One plain HTTPS GET, no GitHub API, no rate limits,
+   works for the private repo. In this mode the response has
+   `"via_channel": true` and `"channel": "<base url>"`. Install downloads
+   the manifest-listed tarball and verifies the manifest sha256.
+   Override/disable with `[update] channel` or `HYPRFETCH_UPDATE_CHANNEL`
+   (see `docs/update-channel.md`).
+1. **GitHub REST API** — the latest release of the configured repo
+   (`[update] repo` in `config.toml`, default `Local-DE-Coach/HyprFetch`). For
+   private repos a PAT is resolved from `HYPRFETCH_GITHUB_TOKEN` / `GITHUB_TOKEN`
+   / `GH_TOKEN` / `[update] token` / the `github_token` setting / a PAT-in-URL
+   clone / `gh auth token` / git credential helpers. Release assets are
+   downloaded through the REST API octet-stream endpoint and sha256-verified
+   before anything touches disk.
+2. **Git-tier fallback** — when the API cannot see the repo (private repo
+   without a token) the check falls back to plain git — `ls-remote` over the
+   user's SSH keys / clone origin / `[update] git_url`. In that mode the
+   response has `"via_git": true`, `asset` is `null`, and installation must
+   happen through the CLI (`hyprfetch update` shallow-clones the tag and runs
+   `cargo build --release --locked`).
 
 `GET /api/update/check` → runs the check and caches it:
 
@@ -231,7 +240,9 @@ happen through the CLI (`hyprfetch update` shallow-clones the tag and runs
   "published_at": "2026-09-29T00:00:00Z",
   "release_url": "https://github.com/…/releases/tag/v0.3.2",
   "asset": { "name": "hyprfetch-0.3.2-x86_64-unknown-linux-gnu.tar.gz", "size": 3605057, "id": 1001 },
-  "via_git": false
+  "via_git": false,
+  "via_channel": true,
+  "channel": "https://istias.tech/hyprfetch/updates/"
 }
 ```
 

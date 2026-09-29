@@ -150,9 +150,15 @@ hyprfetch update --check                   # report only (shows the access path 
 hyprfetch update                           # install + restart the daemon (auto-resume)
 ```
 
-Two access tiers are tried in order — the first that works wins:
+Three access tiers are tried in order — the first that works wins:
 
-1. **PAT tier** — downloads the prebuilt release tarball through the GitHub
+0. **Update channel (fastest, default)** — checks the project's self-hosted
+   mirror (`https://istias.tech/hyprfetch/updates/latest.json`) which CI
+   populates on every release: one fast HTTPS GET, no GitHub API, no rate
+   limits, works for the private repo. Download + sha256-verify + atomic
+   swap all happen from the mirror. See `docs/update-channel.md`.
+1. **PAT tier** — GitHub API fallback when the channel is unreachable;
+   downloads the prebuilt release tarball through the GitHub
    API (octet-stream), verifies sha256, swaps atomically. A token is picked
    up automatically from, in order: `--token` / `HYPRFETCH_GITHUB_TOKEN` /
    `GITHUB_TOKEN` / `GH_TOKEN`, `[update] token` in `config.toml`, the
@@ -166,12 +172,13 @@ Two access tiers are tried in order — the first that works wins:
    So after a `git clone git@github.com:Local-DE-Coach/HyprFetch.git`-style
    install, updates work with zero extra configuration.
 
-To pin the git remote explicitly (optional):
+To pin the git remote or the update channel explicitly (optional):
 
 ```toml
 # ~/.config/hyprfetch/config.toml
 [update]
 git_url = "git@github.com:Local-DE-Coach/HyprFetch.git"  # or any clone URL
+channel = "https://istias.tech/hyprfetch/updates/"       # default; "" disables
 ```
 
 If you already have a clone, `hyprfetch update --from-git --source-dir

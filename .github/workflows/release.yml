@@ -165,3 +165,116 @@ jobs:
             artifacts/hyprfetch_*.deb
             artifacts/hyprfetch-*.rpm
             PKGBUILD
+
+  # ---------------------------------------------------------------------
+  # Mirror the release artifacts to the self-hosted update channel so
+  # `hyprfetch update --check` is one fast HTTPS GET (no GitHub API, no
+  # rate limits, works for the private repo).
+  #
+  # Layout on the server (a NEW directory — the existing site on
+  # istias.tech is untouched):
+  #   /var/www/istias.tech/hyprfetch/updates/latest.json   <- newest version
+  #   /var/www/istias.tech/hyprfetch/updates/<version>/*.tar.gz(.sha256)
+  #
+  # Required repo secret: DEPLOY_SSH_KEY (private key allowed to write to
+  # the server). Optional overrides: DEPLOY_HOST (default 138.197.73.65),
+  # DEPLOY_USER (default root), DEPLOY_PORT (default 22),
+  # DEPLOY_PATH (default /var/www/istias.tech/hyprfetch).
+  # One-time origin web-server route (/hyprfetch/ -> that directory) is
+  # documented in docs/update-channel.md.
+  # ---------------------------------------------------------------------
+  deploy-update-channel:
+    name: Deploy update channel (istias.tech)
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate latest.json update manifest
+        env:
+          CHANNEL_BASE: https://istias.tech/hyprfetch/updates
+          REPO_SLUG: Local-DE-Coach/HyprFetch
+        run: |
+          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          # assets: { "<target-triple>": {url, sha256, size} } built from the
+          # produced archives + their .sha256 files.
+          ASSETS="{}"
+          for F in artifacts/hyprfetch-"$VERSION"-*.tar.gz; do
+            NAME=$(basename "$F")
+            TARGET="${NAME#hyprfetch-$VERSION-}"; TARGET="${TARGET%.tar.gz}"
+            SHA=$(cut -d' ' -f1 "artifacts/$NAME.sha256")
+            SIZE=$(stat -c%s "$F")
+            ASSETS=$(jq -c --arg t "$TARGET" --arg url "$CHANNEL_BASE/$VERSION/$NAME" \
+              --arg sha "$SHA" --argjson size "$SIZE" \
+              '. + {($t): {url: $url, sha256: $sha, size: $size}}' <<<"$ASSETS")
+          done
+          jq -n \
+            --arg version "$VERSION" \
+            --arg tag "v$VERSION" \
+            --arg published "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg notes "https://github.com/${REPO_SLUG}/releases/tag/v$VERSION" \
+            --argjson assets "$ASSETS" \
+            '{version: $version, tag: $tag, published_at: $published,
+              notes_url: $notes, assets: $assets}' > latest.json
+          echo "--- latest.json ---"
+          cat latest.json
+
+      - name: Check deploy secrets
+        id: secrets
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Update-channel deploy SKIPPED — add the DEPLOY_SSH_KEY repo secret (see docs/update-channel.md)."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy artifacts + manifest to the server
+        if: steps.secrets.outputs.configured == 'true'
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || '138.197.73.65' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/var/www/istias.tech/hyprfetch' }}
+        run: |
+          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          SSH="ssh -i $HOME/.ssh/deploy_key -p $DEPLOY_PORT -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
+          SCP="scp -i $HOME/.ssh/deploy_key -P $DEPLOY_PORT -o StrictHostKeyChecking=accept-new"
+          # 1. New versioned directory — old versions stay downloadable.
+          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/updates/$VERSION'"
+          # 2. Upload this release's archives + checksums.
+          $SCP artifacts/hyprfetch-"$VERSION"-*.tar.gz \
+               artifacts/hyprfetch-"$VERSION"-*.tar.gz.sha256 \
+               "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/updates/$VERSION/"
+          # 3. Atomic manifest swap: upload to a temp name, then mv(2).
+          $SCP latest.json \
+               "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/updates/.latest.json.tmp.$$"
+          $SSH "$DEPLOY_USER@$DEPLOY_HOST" \
+               "mv '$DEPLOY_PATH/updates/.latest.json.tmp.$$' '$DEPLOY_PATH/updates/latest.json'"
+          # 4. Show what the channel now serves.
+          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "ls -la '$DEPLOY_PATH/updates/' '$DEPLOY_PATH/updates/$VERSION/'"
+
+      - name: Verify the channel serves the new version
+        if: steps.secrets.outputs.configured == 'true'
+        run: |
+          VERSION="${{ inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          GOT=$(curl -fsS --max-time 30 \
+                  https://istias.tech/hyprfetch/updates/latest.json \
+                  | jq -r .version 2>/dev/null || true)
+          if [ "$GOT" = "$VERSION" ]; then
+            echo "update channel serves v$VERSION ✓"
+          else
+            echo "::warning::Channel check mismatch (got: ${GOT:-nothing}). Deploy landed on the server, but the public URL does not serve the new version yet — configure the origin route /hyprfetch/ (docs/update-channel.md), then re-run this check."
+          fi

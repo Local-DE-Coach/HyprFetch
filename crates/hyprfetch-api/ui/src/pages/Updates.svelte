@@ -72,7 +72,8 @@
       </div>
       <ul class="text-sm opacity-70">
         <li>• {$serverInfo.active_tasks ?? 0} active task(s), {$serverInfo.ws_clients ?? 0} UI client(s) connected</li>
-        <li>• updates are pulled from GitHub releases, sha256-verified and swapped atomically</li>
+        <li>• updates are checked via the istias.tech update channel first (fast, no GitHub), then GitHub releases</li>
+        <li>• downloaded archives are sha256-verified and swapped atomically</li>
         <li>• active downloads are paused and auto-resumed after the restart</li>
       </ul>
     </div>
@@ -88,6 +89,9 @@
           <span class="badge badge-lg {updateInfo.available ? 'badge-success' : 'badge-ghost'}">
             latest: {versionBadge(updateInfo.latest)}
           </span>
+          {#if updateInfo.via_channel}
+            <span class="badge badge-lg badge-ghost">via update channel ↯</span>
+          {/if}
           {#if updateInfo.available}
             <span class="badge badge-lg badge-primary animate-pulse">update available</span>
           {/if}

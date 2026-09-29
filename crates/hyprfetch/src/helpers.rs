@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use hyprfetch_core::update::{UpdateConfig, DEFAULT_API_BASE, DEFAULT_REPO};
+use hyprfetch_core::update::{UpdateConfig, DEFAULT_API_BASE, DEFAULT_CHANNEL_URL, DEFAULT_REPO};
 
 /// `update` section of the config file.
 #[derive(Debug, Default, Deserialize)]
@@ -20,6 +20,10 @@ pub struct UpdateCfg {
     /// Git remote used when the REST API cannot see the repo (private repo
     /// + SSH access). Falls back to a local clone's origin automatically.
     pub git_url: Option<String>,
+    /// Self-hosted update-channel base URL (`latest.json` mirror). Checked
+    /// FIRST — one fast HTTPS GET, no GitHub, works for private repos.
+    /// Set to `""` to disable the channel tier.
+    pub channel: Option<String>,
 }
 
 /// Flat config-file model. Unknown keys are ignored so newer fields don't
@@ -250,7 +254,9 @@ fn git_credential_token() -> Option<String> {
 
 /// Resolve the updater config from CLI flags, env vars, the config file's
 /// `[update]` section and the settings DB (in that precedence order).
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_update_cfg_with_db(
+    channel_flag: Option<&str>,
     repo_flag: Option<&str>,
     token_flag: Option<&str>,
     cfg_update: &Option<UpdateCfg>,
@@ -323,11 +329,26 @@ pub fn resolve_update_cfg_with_db(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_API_BASE.to_string());
 
+    // Channel precedence: --channel flag > HYPRFETCH_UPDATE_CHANNEL env >
+    // [update] channel in the config file > built-in default. Empty value
+    // disables the tier ("" means the user explicitly opted out).
+    let channel_url = [
+        channel_flag,
+        std::env::var("HYPRFETCH_UPDATE_CHANNEL").ok().as_deref(),
+        cfg_update.as_ref().and_then(|u| u.channel.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|s| !s.trim().is_empty() || s.is_empty())
+    .map(str::to_string)
+    .unwrap_or_else(|| DEFAULT_CHANNEL_URL.to_string());
+
     UpdateConfig {
         repo,
         token,
         token_source,
         git_url,
         api_base,
+        channel_url,
     }
 }

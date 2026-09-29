@@ -1,13 +1,22 @@
-//! Self-update: GitHub-release check + sha256-verified binary swap.
+//! Self-update: three check tiers + sha256-verified binary swap.
 //!
-//! Works against public AND private repos (fine-grained PAT via
-//! `Authorization: Bearer`). Private-repo assets MUST be downloaded through
-//! the REST API endpoint with `Accept: application/octet-stream` — the
+//! Tier 0 — **update channel** (fastest, default): a plain HTTPS manifest
+//! (`latest.json`) served from the project's own mirror
+//! (`https://istias.tech/hyprfetch/updates/`). No GitHub rate limits, no
+//! tokens, works for private repos because the mirror is uploaded by CI
+//! on every release. Carries per-target download URLs + sha256 so the
+//! install is download → verify → swap, same as the API tier.
+//! Tier 1 — **GitHub REST API** (public repos or a PAT); private-repo
+//! assets MUST be downloaded through the REST API endpoint with
+//! `Accept: application/octet-stream` — the
 //! `github.com/.../releases/download/...` browser URL answers 404 for PATs
 //! it cannot associate with a web session.
+//! Tier 2 — **plain git** (`ls-remote --tags` + shallow clone + cargo
+//! build) for private repos accessed via SSH keys / a local clone.
 //!
-//! The API base is overridable (`HYPRFETCH_UPDATE_API`) so tests can run
-//! against a local mock release server.
+//! Both the channel and the API base are overridable
+//! (`HYPRFETCH_UPDATE_CHANNEL` / `HYPRFETCH_UPDATE_API`) so tests can run
+//! against local mock servers.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -20,6 +29,10 @@ use sha2::{Digest, Sha256};
 pub const DEFAULT_REPO: &str = "Local-DE-Coach/HyprFetch";
 /// GitHub REST API base.
 pub const DEFAULT_API_BASE: &str = "https://api.github.com";
+/// Default self-hosted update channel (release mirror). CI uploads every
+/// release's tarballs + a `latest.json` manifest here, so `hyprfetch update
+/// --check` is one fast HTTPS GET with no GitHub involvement at all.
+pub const DEFAULT_CHANNEL_URL: &str = "https://istias.tech/hyprfetch/updates/";
 /// Per-request timeout for update HTTP calls.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -42,6 +55,8 @@ pub enum UpdateError {
     ExePath,
     #[error("git: {0}")]
     Git(String),
+    #[error("update channel: {0}")]
+    Channel(String),
     #[error("{0}")]
     Other(String),
 }
@@ -62,6 +77,10 @@ pub struct UpdateConfig {
     pub git_url: Option<String>,
     /// API base override (tests / GHES).
     pub api_base: String,
+    /// Self-hosted update-channel base URL (`latest.json` lives at
+    /// `<channel_url>/latest.json`). Empty string disables the channel
+    /// tier (falls straight through to the GitHub API / git tiers).
+    pub channel_url: String,
 }
 
 impl Default for UpdateConfig {
@@ -72,6 +91,7 @@ impl Default for UpdateConfig {
             token_source: None,
             git_url: None,
             api_base: DEFAULT_API_BASE.to_string(),
+            channel_url: DEFAULT_CHANNEL_URL.to_string(),
         }
     }
 }
@@ -133,6 +153,13 @@ pub struct UpdateCheck {
     /// (private repo + SSH/clone access, no token needed).
     #[serde(default)]
     pub via_git: bool,
+    /// True when the check succeeded via the self-hosted update channel
+    /// (`latest.json` mirror) instead of GitHub.
+    #[serde(default)]
+    pub via_channel: bool,
+    /// The channel base URL that answered (`via_channel` only).
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 /// Compare dotted numeric versions (`0.3.1` > `0.3.0`); non-numeric chunks
@@ -156,6 +183,180 @@ pub fn version_newer(candidate: &str, current: &str) -> bool {
         }
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Update channel tier — self-hosted mirror, the FAST path
+//
+// CI uploads every release's tarballs (+ their .sha256 files) into
+// `<channel>/<version>/` and writes `<channel>/latest.json`. One HTTPS GET
+// answers "is there a new version?" with zero GitHub involvement: no rate
+// limits, no tokens, and it works for private repos because the mirror is
+// populated by CI with deploy credentials, not by the client.
+//
+// Manifest schema (`latest.json`):
+// {
+//   "version": "0.3.3",
+//   "tag": "v0.3.3",
+//   "published_at": "2026-09-29T12:00:00Z",
+//   "notes_url": "https://github.com/Local-DE-Coach/HyprFetch/releases/tag/v0.3.3",
+//   "assets": {
+//     "x86_64-unknown-linux-gnu":  {"url": "...", "sha256": "...", "size": 123},
+//     "aarch64-unknown-linux-gnu": {"url": "...", "sha256": "...", "size": 123},
+//     "x86_64-unknown-linux-musl": {"url": "...", "sha256": "...", "size": 123}
+//   }
+// }
+// ---------------------------------------------------------------------------
+
+/// One downloadable archive in the update-channel manifest.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChannelAsset {
+    /// Absolute download URL (usually `<channel>/<version>/<archive>.tar.gz`).
+    pub url: String,
+    /// sha256 of the archive — verified before anything is swapped.
+    pub sha256: String,
+    /// Archive size in bytes (informational; the hash is authoritative).
+    #[serde(default)]
+    pub size: u64,
+}
+
+/// The `latest.json` manifest served by the update channel.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChannelManifest {
+    /// Newest version (`0.3.3`, no `v` prefix).
+    pub version: String,
+    /// Raw tag (`v0.3.3`).
+    pub tag: String,
+    #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub notes_url: Option<String>,
+    /// Per-target-triple archives.
+    pub assets: std::collections::BTreeMap<String, ChannelAsset>,
+}
+
+/// `latest.json` location for a channel base URL.
+pub fn manifest_url(channel_base: &str) -> String {
+    format!("{}/latest.json", channel_base.trim_end_matches('/'))
+}
+
+/// The manifest asset matching this machine's target triple.
+pub fn pick_channel_asset(
+    assets: &std::collections::BTreeMap<String, ChannelAsset>,
+) -> Option<(String, ChannelAsset)> {
+    target_candidates()
+        .into_iter()
+        .find_map(|t| assets.get(&t).cloned().map(|a| (t, a)))
+}
+
+impl UpdateConfig {
+    /// The active channel base (`None` when the tier is disabled via an
+    /// empty `[update] channel` / env).
+    pub fn effective_channel(&self) -> Option<&str> {
+        let s = self.channel_url.trim();
+        (!s.is_empty()).then_some(s)
+    }
+}
+
+/// Blocking: fetch + parse the channel manifest. `Err` on HTTP trouble or
+/// a malformed manifest so the caller can fall through to the next tier.
+pub async fn fetch_manifest(cfg: &UpdateConfig) -> Result<ChannelManifest, UpdateError> {
+    let base = cfg
+        .effective_channel()
+        .ok_or_else(|| UpdateError::Channel("channel disabled".into()))?;
+    let resp = cfg
+        .client()
+        .get(manifest_url(base))
+        .send()
+        .await
+        .map_err(|e| UpdateError::Channel(format!("manifest get: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(UpdateError::Channel(format!(
+            "manifest get: http {}",
+            resp.status()
+        )));
+    }
+    let manifest: ChannelManifest = resp
+        .json()
+        .await
+        .map_err(|e| UpdateError::Channel(format!("manifest parse: {e}")))?;
+    Ok(manifest)
+}
+
+/// Check the self-hosted update channel. `Ok(Some(check))` when the
+/// manifest answers — the payload looks exactly like the API tier's, so
+/// callers and the web UI treat every tier identically.
+pub async fn check_via_channel(cfg: &UpdateConfig) -> Result<Option<UpdateCheck>, UpdateError> {
+    let base = cfg
+        .effective_channel()
+        .ok_or_else(|| UpdateError::Channel("channel disabled".into()))?
+        .to_string();
+    let m = fetch_manifest(cfg).await?;
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let asset = pick_channel_asset(&m.assets).map(|(target, a)| AssetInfo {
+        name: a
+            .url
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&format!("hyprfetch-{}-{target}.tar.gz", m.version))
+            .to_string(),
+        size: a.size,
+        id: 0, // no GitHub asset id on the channel tier
+    });
+    Ok(Some(UpdateCheck {
+        available: version_newer(&m.version, &current),
+        current,
+        latest: m.version,
+        published_at: m.published_at,
+        release_url: m.notes_url,
+        asset,
+        via_git: false,
+        via_channel: true,
+        channel: Some(base),
+    }))
+}
+
+/// Channel-tier install: fetch the manifest, download the archive for this
+/// target, sha256-verify against the manifest, extract + atomic swap.
+pub async fn apply_channel(
+    cfg: &UpdateConfig,
+    chk: &UpdateCheck,
+) -> Result<ApplyResult, UpdateError> {
+    cfg.validate()?;
+    let m = fetch_manifest(cfg).await?;
+    let (_, asset) = pick_channel_asset(&m.assets)
+        .ok_or_else(|| UpdateError::AssetMissing("target tarball (channel)".into()))?;
+
+    let tarball = cfg
+        .client()
+        .get(&asset.url)
+        .send()
+        .await
+        .map_err(|e| UpdateError::Channel(format!("asset get: {e}")))?
+        .error_for_status()
+        .map_err(|e| UpdateError::Channel(format!("asset get: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| UpdateError::Channel(format!("asset read: {e}")))?
+        .to_vec();
+
+    let expected = asset.sha256.trim().to_ascii_lowercase();
+    let got = sha256_hex(&tarball);
+    if got != expected {
+        return Err(UpdateError::ChecksumMismatch { expected, got });
+    }
+
+    let new_bytes = extract_binary(&tarball)?;
+    let exe = std::env::current_exe().map_err(|_| UpdateError::ExePath)?;
+    swap_binary(&exe, &new_bytes)?;
+
+    Ok(ApplyResult {
+        current: chk.current.clone(),
+        installed: chk.latest.clone(),
+        backup_path: Some(exe.with_extension("old").to_string_lossy().into_owned()),
+        sha256: got,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +498,8 @@ pub fn check_via_git_sync(cfg: &UpdateConfig) -> Result<Option<GitCheck>, Update
                         release_url: Some(format!("https://github.com/{}/releases", cfg.repo)),
                         asset: None,
                         via_git: true,
+                        via_channel: false,
+                        channel: None,
                     },
                 }));
             }
@@ -495,6 +698,8 @@ pub async fn check(cfg: &UpdateConfig) -> Result<Option<UpdateCheck>, UpdateErro
             .map(str::to_string),
         asset: pick_asset(&assets, &latest),
         via_git: false,
+        via_channel: false,
+        channel: None,
     }))
 }
 
@@ -784,6 +989,70 @@ mod tests {
         assert!(cfg.validate().is_ok());
         cfg.repo = "just-a-name".into();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_url_join() {
+        assert_eq!(
+            manifest_url("https://istias.tech/hyprfetch/updates/"),
+            "https://istias.tech/hyprfetch/updates/latest.json"
+        );
+        assert_eq!(
+            manifest_url("https://x.test/ch"),
+            "https://x.test/ch/latest.json"
+        );
+    }
+
+    #[test]
+    fn channel_effective_url() {
+        let mut cfg = UpdateConfig::default();
+        assert_eq!(
+            cfg.effective_channel(),
+            Some("https://istias.tech/hyprfetch/updates/")
+        );
+        cfg.channel_url = "  ".into();
+        assert_eq!(cfg.effective_channel(), None, "blank disables the tier");
+    }
+
+    fn sample_manifest() -> &'static str {
+        r#"{
+          "version": "9.9.9",
+          "tag": "v9.9.9",
+          "published_at": "2026-09-29T00:00:00Z",
+          "notes_url": "https://example.test/notes",
+          "assets": {
+            "x86_64-unknown-linux-gnu": {
+              "url": "https://ch.test/9.9.9/hyprfetch-9.9.9-x86_64-unknown-linux-gnu.tar.gz",
+              "sha256": "ABCDEF00",
+              "size": 42
+            }
+          }
+        }"#
+    }
+
+    #[test]
+    fn manifest_parses_and_picks_host_asset() {
+        let m: ChannelManifest = serde_json::from_str(sample_manifest()).unwrap();
+        assert_eq!(m.version, "9.9.9");
+        assert_eq!(m.tag, "v9.9.9");
+        let (target, asset) =
+            pick_channel_asset(&m.assets).expect("host asset missing from manifest");
+        assert!(target.starts_with("x86_64-unknown-linux"));
+        assert_eq!(asset.sha256, "ABCDEF00");
+        assert_eq!(asset.size, 42);
+        // A manifest without the host triple yields None, not a panic.
+        let mut other = m.clone();
+        other.assets.clear();
+        assert!(pick_channel_asset(&other.assets).is_none());
+    }
+
+    #[test]
+    fn manifest_requires_version_and_assets() {
+        assert!(serde_json::from_str::<ChannelManifest>("{}\n").is_err());
+        assert!(
+            serde_json::from_str::<ChannelManifest>(r#"{"version":"1.0","tag":"v1.0"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<ChannelManifest>(sample_manifest()).is_ok());
     }
 
     #[test]

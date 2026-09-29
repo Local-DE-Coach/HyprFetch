@@ -21,7 +21,7 @@ HyprFetch is a single Rust binary that serves a web UI on `127.0.0.1`. You open 
 - **QoS / bandwidth-sharing mode** — toggle that caps downloads to leave headroom for browsing, gaming, video calls
 - **Browser-based UI** — Svelte + Tailwind + DaisyUI SPA embedded in the binary (~18 KiB gzipped), served from `127.0.0.1:<port>`
 - **Node.js-style run modes** — `dev` console, `serve` foreground, managed `daemon` with `logs -f` / `status` / `stop` / `restart`
-- **In-app self-update** — checks GitHub releases (private-repo PAT aware), sha256-verifies, swaps the binary atomically, auto-resumes downloads
+- **In-app self-update** — fastest check via the self-hosted update channel (istias.tech mirror, no GitHub/rate limits), fallback to GitHub releases (private-repo PAT aware); sha256-verifies, swaps the binary atomically, auto-resumes downloads
 - **Sleep mode** — `--exit-when-idle` so nothing stays resident when there is nothing to do
 - **Lean by design** — measured idle RSS ≈ 8 MB; single static binary, no runtime deps, no Electron
 
@@ -131,10 +131,17 @@ Daemon state lives under `~/.local/state/hyprfetch/` (logs rotate at 5 MiB,
 
 ## Self-update
 
-Update straight from GitHub releases — works with the **private repo** even
-without a token, in two ways:
+Three access tiers, tried in order — the first that works wins. The default
+is the **fast** one:
 
-1. **PAT tier (prebuilt tarballs)** — when a token is available
+0. **Update channel (fastest, default)** — CI mirrors every release's
+   tarballs + a `latest.json` manifest to the project's own server. One
+   plain HTTPS GET answers "is there a new version?" with no GitHub API,
+   no rate limits and no tokens — and it works for the **private repo**
+   because CI (not the client) populates the mirror. Install = download →
+   sha256-verify → atomic swap. See `docs/update-channel.md`.
+1. **PAT tier (prebuilt tarballs)** — GitHub REST API fallback when the
+   channel is unreachable and a token is available
    (`HYPRFETCH_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` env, `[update] token`
    in the config, `gh auth token`, git credential helpers, a PAT-in-URL clone,
    or `--token`): the release tarball is downloaded through the API,
@@ -147,9 +154,10 @@ without a token, in two ways:
 
 ```bash
 hyprfetch update --check      # report only (shows which access path was used)
-hyprfetch update              # token tier: download → sha256 → atomic swap → restart
-                              # git tier:   clone tag → build → atomic swap → restart
+hyprfetch update              # channel/API tier: download → sha256 → atomic swap → restart
+                              # git tier:          clone tag → build → atomic swap → restart
 hyprfetch update --from-git --source-dir ~/HyprFetch   # pull + build + swap instead
+hyprfetch doctor              # shows the active update channel
 ```
 
 The in-app updater does the same from the UI (**Updates** card): check,

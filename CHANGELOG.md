@@ -10,6 +10,64 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 - Nothing yet.
 
+## [0.3.3] — 2026-09-29 (fast self-hosted update channel on istias.tech)
+
+### Added — update channel tier: `hyprfetch update` now checks the project's own server FIRST (owner request)
+- **New tier 0 in the updater** — the **update channel**: a plain HTTPS
+  manifest (`latest.json`) mirrored to `https://istias.tech/hyprfetch/updates/`
+  (the owner's own server, in a NEW directory — the existing site on the same
+  host is untouched). One fast HTTPS GET answers "is there a new version?" with
+  **no GitHub API, no rate limits, no tokens** — and it works regardless of
+  repo visibility because CI (with deploy credentials) populates the mirror on
+  every release. Install = download the manifest-listed tarball →
+  **sha256-verify against the manifest** → extract → atomic swap → daemon
+  restart (identical safety to the API tier).
+- **Graceful three-tier chain**: channel → GitHub REST API → plain git. If the
+  mirror is unreachable the updater announces it and falls through; if the
+  channel is disabled (`[update] channel = ""` / `--channel ""`) it skips
+  silently. Install paths are per-tier: channel/API download tarballs, git
+  builds from source.
+- **Release workflow gained a `deploy-update-channel` job**: after the GitHub
+  release publishes, CI generates `latest.json` (version, tag, notes URL and
+  per-target `{url, sha256, size}` entries built from the produced archives +
+  their `.sha256` files), uploads the archives into
+  `<DEPLOY_PATH>/updates/<version>/` and atomically swaps the top-level
+  `latest.json` (scp to temp name → `mv(2)`). Old versions stay downloadable.
+  SSH target is configured via repo secrets: `DEPLOY_SSH_KEY` (required),
+  `DEPLOY_HOST` (default `138.197.73.65`), `DEPLOY_USER` (default `root`),
+  `DEPLOY_PORT` (default `22`), `DEPLOY_PATH` (default
+  `/var/www/istias.tech/hyprfetch`). Without `DEPLOY_SSH_KEY` the job skips
+  with a notice and the GitHub release still ships. A post-deploy step
+  verifies the public URL serves the new version (warns with setup guidance
+  when the origin route is not configured yet).
+- **CLI**: `hyprfetch update [--check]` prints the answering tier
+  (`checked via update channel (<url>)`, GitHub auth label, or
+  `git access detected via <url>`); new `--channel <url>` flag;
+  `--check` now hints `(fast download from the update channel)`.
+- **Config**: `[update] channel` (default = the project mirror; `""`
+  disables) + `HYPRFETCH_UPDATE_CHANNEL` env override; precedence
+  `--channel` > env > config > default. `hyprfetch doctor` shows the active
+  channel line.
+- **API/UI**: `GET /api/update/check` tries the channel first and reports
+  `"via_channel": true` + `"channel"` in the payload; `POST /api/update/apply`
+  installs from the mirror when the cached check came from the channel. The
+  Updates card shows a `via update channel` badge and updated copy.
+- **Docs**: new `docs/update-channel.md` (architecture, manifest schema,
+  one-time nginx/origin setup for the new directory, Cloudflare notes,
+  secrets table + deploy-key generation, client overrides, verification
+  commands); README Self-update + install.md rewritten around the three
+  tiers; api.md documents the new payload fields.
+- **Tests**: 4 new unit tests (manifest URL join, channel enable/disable,
+  manifest parse + host-asset pick, strict schema); new
+  `scripts/e2e_update_channel.sh` — 8 scenarios / 28 checks: mirror prep,
+  check via channel, full install (download → sha256 → atomic swap →
+  rollback copy), tampered-manifest refusal (binary untouched), up-to-date,
+  404 fallback, `--channel ""` disable, `/api/update/check` payload.
+  `scripts/e2e_update_tiers.sh` made hermetic for the channel-first reality
+  (channel disabled per scenario; dead API base for the git-tier install).
+  138 workspace tests + 43/43 downloader E2E + 28/28 channel E2E + 20/20
+  tiers E2E green.
+
 ## [0.3.2] — 2026-09-29 (private-repo self-update without a token)
 
 ### Fixed — `hyprfetch update` on private repos with SSH-only access (owner request)
