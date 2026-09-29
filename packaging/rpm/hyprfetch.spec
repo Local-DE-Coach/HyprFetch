@@ -18,7 +18,7 @@ resume (SQLite-backed), and enforces an optional engine-wide QoS bandwidth
 cap. Idle RAM target: < 10 MB.
 
 %prep
-%setup -q -n hyprfetch-%{version}-x86_64-unknown-linux-gnu
+%setup -q -n hyprfetch-%{version}-linux-x64
 
 %install
 install -Dm755 hyprfetch                 %{buildroot}%{_bindir}/hyprfetch
@@ -35,5 +35,5 @@ install -Dm644 hyprfetch.desktop         %{buildroot}%{_datadir}/applications/hy
 %license %{_licensedir}/hyprfetch/LICENSE
 
 %changelog
-* Tue Sep 30 2026 HyprFetch Contributors <Local-DE-Coach@users.noreply.github.com> - __VERSION__-1
+* Tue Sep 29 2026 HyprFetch Contributors <Local-DE-Coach@users.noreply.github.com> - __VERSION__-1
 - First RPM-packaged release (see upstream CHANGELOG.md for details).
