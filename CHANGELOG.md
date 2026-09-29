@@ -8,13 +8,32 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-09-30 (blank-UI hotfix — the web UI works again)
+
+### Fixed
+- **Web UI rendered a completely blank page** (v0.4.1 regression). The SPA
+  died at boot with `Uncaught ReferenceError: Cannot access '$t' before
+  initialization`: `lib/router.js` read the `PAGES` constant from `page`'s
+  module initializer, but `PAGES` was declared *below* — a temporal-dead-zone
+  crash that killed the whole app before anything could mount. `PAGES` now
+  precedes its users. Verified in a real headless browser: Dashboard, Tasks,
+  Settings and Updates all render with a clean console.
+- **Release CI now guards this bug class so it cannot ship again**:
+  `release.yml` rebuilds the UI from source (so the embedded bundle can never
+  go stale against the committed sources), runs ESLint with
+  `no-use-before-define` on the UI sources (flags the exact pattern), and
+  imports the built bundle in Node with browser stubs
+  (`scripts/ui_boot_check.mjs`) — failing the release on any boot-time TDZ.
+  Both gates were verified against the broken v0.4.1 bundle (both catch it)
+  and the fixed one (both pass).
+
 ### Added
-- **Run & use section on every GitHub release** (`release.yml`): the
-  generated release notes now include the day-to-day commands — run
-  foreground/detached, status, stop, restart, logs, update — right between
-  the install block and the changelog, so "how do I run/stop/update this"
-  is answered on the release page itself.
-- **README.md ships as a release asset**: the publish job now attaches the
+- **Run & use section on every GitHub release page**: the generated release
+  notes now include the day-to-day commands — run foreground/detached,
+  status, stop, restart, logs, update — right between the install block and
+  the changelog, so "how do I run/stop/update this" is answered on the
+  release page itself.
+- **README.md ships as a release asset**: the publish job attaches the
   README to every release next to the binaries, so the full command
   reference is downloadable without cloning the (private) repo.
 - **Quick commands table in README.md**: install → run → stop → update →

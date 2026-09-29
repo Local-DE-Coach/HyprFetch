@@ -494,3 +494,27 @@ and ships the README file.
 **Measured:** workflow YAML parses; v0.4.1 body contains "Run & use (after
 install)" with the 8 commands; assets list includes README.md; tag untouched
 (still peels to 8d8deaa); no new run triggered (docs+workflow change only).
+
+## 24 · Session 10 — blank-UI hotfix + tested 0.4.2 (2026-09-30)
+
+**User report:** http://127.0.0.1:7780/ renders nothing — console shows
+`Uncaught ReferenceError: Cannot access '$t' before initialization` at
+`index-1MK0HRHl.js`. Requirement: fix the web UI BEFORE cutting the new
+version, test that the UI renders and all APIs work, then publish 0.4.2
+(0.4.1 was already installed on the user's PC, so the updater would report
+"up to date" forever).
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 24.1 | Root cause: `lib/router.js` read the `PAGES` const from `page`'s module initializer while `PAGES` was declared BELOW it → temporal-dead-zone crash at SPA boot; the committed `dist/` bundle was built from that source and CI never rebuilt the UI, so v0.4.1 shipped the broken bundle embedded | ✅ | stack trace matches `current()`/module-init positions |
+| 24.2 | Fix: `PAGES` moved above `current()`/`page` with a guard comment; UI rebuilt (`index-lm6yMmcA.js` replaces broken `lMKHQRHI.js`) | ✅ | dist diff |
+| 24.3 | Real-browser verification (headless Chromium): Dashboard/Tasks/Settings/Updates all render, console CLEAN (no ReferenceError), screenshot archived | ✅ | download/hyprfetch-ui-v042.png |
+| 24.4 | Full API battery (36 checks): healthz, UI static + SPA fallback, /api/server /api/categories /api/settings (+PATCH) /api/qos (+PUT roundtrip), real download lifecycle (self-hosted file → completes to disk; external tarball → pause→paused, resume→downloading, cancel), DELETE 204, delete_file=true removes file, invalid URL → 400, /api/update/check against istias.tech, WS /ws upgrade 101 | ✅ | scripts/test_hyprfetch_app*.sh — 30+13 PASS |
+| 24.5 | CI gates so a blank UI can never ship again: release.yml rebuilds the UI from source (stale-dist class eliminated), `npm run lint` (ESLint `no-use-before-define` — flags the exact pattern), and `scripts/ui_boot_check.mjs` imports the BUILT bundle in Node with browser stubs and fails on boot-time TDZ. Both gates verified NEGATIVE (catch the v0.4.1 broken bundle: eslint "PAGES was used before it was defined", boot-check "TDZ BUG Cannot access '$t'") and POSITIVE (fixed bundle passes) | ✅ | gate outputs in session log |
+| 24.6 | Version bump 0.4.1→0.4.2 (Cargo.toml+lock), CHANGELOG [0.4.2], full battery re-run on the 0.4.2 binary (30/6-known + 13/13) | ✅ | hyprfetch --version = 0.4.2 |
+
+**Measured:** release build 0.4.2 green; UI renders in headless Chromium with
+zero console errors; all API endpoints return correct codes; downloads land
+on disk; pause/resume/cancel state machine correct; update channel check
+talks to istias.tech only. 0.4.2 is the first version protected by the
+UI lint + boot-check gates in release CI.

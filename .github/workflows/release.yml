@@ -148,6 +148,25 @@ jobs:
             gcc-aarch64-linux-gnu \
             musl-tools
 
+      # Rebuild the UI from source so the embedded bundle always matches the
+      # committed Svelte/JS sources (a stale committed dist/ is what shipped
+      # the v0.4.1 blank-UI regression). The Node boot-check then fails the
+      # release on temporal-dead-zone errors — the exact bug class that
+      # rendered v0.4.1's page blank ("Cannot access '$t' before
+      # initialization"). Browser-API errors are expected in Node and pass.
+      - name: Build UI + boot-check bundle
+        run: |
+          cd crates/hyprfetch-api/ui
+          npm ci --no-audit --no-fund
+          # Static gate: no-use-before-define flags the exact source pattern
+          # (module init reading a later `const`) that blanked v0.4.1's UI.
+          npm run lint
+          npm run build
+          # Runtime gate: import the built bundle with browser stubs; fails
+          # on temporal-dead-zone errors that would blank the page.
+          node ../../../scripts/ui_boot_check.mjs dist/assets/index-*.js
+          cd ../../..
+
       - name: Build release
         env:
           # Cross-compiling aarch64 on the x86_64 runner: force the GNU
