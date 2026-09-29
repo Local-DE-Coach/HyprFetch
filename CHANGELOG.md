@@ -21,6 +21,18 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
   manual tarball / browser) and a per-platform **Uninstall** section; the
   version panel now also lists the server-hosted `.deb`, `.rpm` and
   `PKGBUILD`.
+- istias.tech/hyprfetch: new **Run & use** section — 4-step quick start
+  (start server → open dashboard → add download → stop), foreground vs
+  pm2-style daemon (`serve` / `daemon start|status|restart|stop`, `logs -f`),
+  a 10-command cheat sheet, the most useful flags with their `HYPRFETCH_*`
+  env twins, a where-your-files-live table and a dashboard-walkthrough card.
+  Answers "I installed it — how do I run it?" directly on the product page.
+- New page **istias.tech/hyprfetch/features**: the full feature catalogue
+  transcribed from `docs/feature-research.md` — 73 tracked features
+  (46 shipped & E2E-verified, 1 partial, 26 planned) across 12 categories,
+  with All / Shipped / In-progress / Planned filters and a status legend.
+  Shared data file keeps the counters on both pages in sync. Torrent note
+  aligned with `architecture.md` non-goals (out of scope for v1).
 
 ### Changed
 - Every install/update command on the pages and in the release notes now

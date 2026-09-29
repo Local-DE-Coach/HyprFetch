@@ -427,3 +427,26 @@ several download paths (link / curl / one-line terminal install).
 "up to date" via live channel → uninstall leaves nothing behind);
 `test_release_generators.sh` green (renders notes + PKGBUILD, asserts no
 GitHub links); Docs `next build` green; mirror YAML validated.
+
+## 21 · Session 7 — run-&-use guide + features & roadmap page (2026-09-29)
+
+Owner feedback after installing v0.4.0 via the PKGBUILD: the pages never
+explained **how to run and use the app**, the feature set deserved a proper
+mention on the main page, and the feature-research doc should surface as a
+public roadmap page.
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 21.1 | /hyprfetch "Run & use" section: 4-step quick start, foreground vs daemon (`serve --open`, `daemon start/status/restart/stop`, `logs -f`), Ctrl+C + daemon stop | ✅ | page source + smoke test |
+| 21.2 | 10-command everyday cheat sheet (serve, daemon lifecycle, logs, doctor, update, dev) | ✅ | rendered page |
+| 21.3 | Useful-flags card (bind/download-dir/segments/workers/exit-when-idle/open/allow-private) — defaults verified against code (segments_default=8, bind 127.0.0.1:7780, ~/Downloads) | ✅ | grep of main.rs/routes.rs/migrations |
+| 21.4 | Where-your-files-live card + dashboard-walkthrough card (100-URL batch, pause/resume/retry/delete, settings, WS progress, in-app updates) | ✅ | rendered page |
+| 21.5 | New /hyprfetch/features page from docs/feature-research.md: 73 features (46 ✅ / 1 🟨 / 26 ⬜), 12 categories, client-side filters, status legend, install CTA | ✅ | next build + standalone smoke test |
+| 21.6 | Shared catalogue `web/src/lib/hyprfetch-features.ts` — single source of truth for counters on both pages; row-by-row match with the research doc | ✅ | bun import count = 46/1/26/73 |
+| 21.7 | Unified nav (Overview / Features / Updates) on all three pages + features links in hero and footers | ✅ | rendered headers |
+| 21.8 | Accuracy: BitTorrent note aligned with architecture.md non-goals (out of scope for v1) | ✅ | page source |
+
+**Measured:** `next build` green (18 static routes incl. /hyprfetch/features);
+`bunx tsc --noEmit` clean; all three pages smoke-tested on the standalone
+server (HTTP 200, hero/sections/counts verified in HTML). Docs commits
+`d9ec613` + `8e22d37`, deployed to istias.tech by the Docs deploy workflow.

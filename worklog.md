@@ -696,3 +696,50 @@ Stage Summary:
 - Pending at write time: release run 36589215269 finishing, then the Docs
   mirror self-heals the server (PKGBUILD/deb/rpm/install.sh) within 30 min
   (or on manual dispatch).
+
+---
+Task ID: 8 (session 7 — run-&-use guide + features & roadmap page)
+Agent: Super Z (main session)
+Task: Owner installed v0.4.0 via the channel PKGBUILD and could not find
+"how do I run / stop / use it" on istias.tech/hyprfetch; also asked for a
+feature mention on the main page and a new /hyprfetch/features page mirroring
+docs/feature-research.md.
+
+Work Log:
+- Re-cloned HyprFetch + Docs repos (fresh sandbox); confirmed server-side
+  state: v0.4.0 channel live, mirror self-heal + install.sh already deployed.
+- Extracted the real CLI surface from crates/hyprfetch/src/main.rs: serve,
+  dev, doctor, daemon start/stop/restart/status, logs [-f] [-n], update
+  [--check] [-y]; ServeFlags (--bind, --db, --download-dir, --segments,
+  --config, --token, --allow-private, --workers, --exit-when-idle).
+  Verified defaults in code: bind 127.0.0.1:7780 (daemon.rs/main.rs),
+  download dir ~/Downloads (routes.rs), segments_default=8 (migration 002).
+- Docs repo — /hyprfetch rebuilt: new "Run & use" section (4-step quick
+  start; foreground vs pm2-style daemon cards; 10-command cheat sheet with
+  copy buttons; useful-flags card; where-your-files-live card; dashboard
+  walkthrough). Features overview now shows live counts + "See the full
+  list" band linking to the new page; hero gained an "All N features" CTA;
+  nav unified on all three pages (Overview / Features / Updates).
+- Docs repo — new /hyprfetch/features: 73 features transcribed row-by-row
+  from docs/feature-research.md (46 shipped & verified / 1 partial / 26
+  planned) across 12 categories, client-side All/Shipped/In-progress/
+  Planned filters, status legend, install CTA. Shared data lib
+  web/src/lib/hyprfetch-features.ts feeds the counters on both pages.
+  Count cross-checked by importing the lib under bun and by counting the
+  doc rows (73).
+- Accuracy fix: BitTorrent listed as out-of-scope-for-v1 per
+  architecture.md non-goals instead of "coming next" (commit 8e22d37).
+- Verified: next build green (18 routes, /hyprfetch/features static),
+  tsc --noEmit clean, standalone-server smoke test of all three pages
+  (HTTP 200 + section/hero/counts greps in HTML).
+- Docs commits: d9ec613 (main work) + 8e22d37 (non-goals fix), pushed;
+  deploy.yml ships them to istias.tech automatically.
+- Docs: CHANGELOG [Unreleased] bullets, worktasks 21.1–21.8, this worklog.
+
+Stage Summary:
+- Owner-visible: the product page now answers "installed — now what?" with
+  exact run/stop commands; a public features & roadmap page exists at
+  istias.tech/hyprfetch/features with verified shipped/planned statuses.
+- No Rust code changed; release channel untouched; no version bump needed.
+- Next sandbox: if feature-research.md changes, update the data lib and the
+  counters update themselves.
