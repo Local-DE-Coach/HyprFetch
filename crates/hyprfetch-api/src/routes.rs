@@ -186,7 +186,9 @@ pub(crate) fn resolve_save_dir(
             return Ok(expand_tilde(&base).to_string_lossy().into_owned());
         }
         Some(c) if is_valid_category(c) => {
-            return Ok(dir_for_category(c, &base, settings).to_string_lossy().into_owned());
+            return Ok(dir_for_category(c, &base, settings)
+                .to_string_lossy()
+                .into_owned());
         }
         Some("auto") => { /* fall through to extension auto-detect */ }
         Some(other) => {
@@ -931,25 +933,37 @@ pub async fn server_info(State(state): State<AppState>) -> Json<serde_json::Valu
 // GET /api/update/check
 // ---------------------------------------------------------------------------
 
+/// Detect other `hyprfetch` copies on PATH (e.g. an old install.sh build in
+/// `/usr/local/bin` shadowing the pacman-managed `/usr/bin` one). Users keep
+/// "updating" while the stale copy keeps launching — surface them so the UI
+/// can offer a one-click fix. Never fails the response.
+async fn stale_copies_json() -> serde_json::Value {
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("hyprfetch"));
+    serde_json::to_value(hyprfetch_core::update::shadowed_copies(&exe).await)
+        .unwrap_or(serde_json::json!([]))
+}
+
 /// `GET /api/update/check` — query the newest version from the self-hosted
 /// update channel (istias.tech) and cache it. GitHub is never contacted;
 /// when the channel is unreachable the response carries the updates-page
-/// URL so the UI can point the user at manual steps.
+/// URL so the UI can point the user at manual steps. The response also lists
+/// stale shadowing copies (see [`stale_copies_json`]).
 pub async fn update_check(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let stale = stale_copies_json().await;
     match hyprfetch_core::update::check(&state.update_cfg).await {
         Ok(chk) => {
             let available = chk.available;
             let latest = chk.latest.clone();
             *state.update_cache.lock().await = Some(chk.clone());
-            Ok(Json(serde_json::to_value(chk).unwrap_or(
-                serde_json::json!({
-                    "current": env!("CARGO_PKG_VERSION"),
-                    "latest": latest,
-                    "available": available,
-                }),
-            )))
+            let mut v = serde_json::to_value(chk).unwrap_or(serde_json::json!({
+                "current": env!("CARGO_PKG_VERSION"),
+                "latest": latest,
+                "available": available,
+            }));
+            v["stale_copies"] = stale;
+            Ok(Json(v))
         }
         Err(e) => Ok(Json(serde_json::json!({
             "current": env!("CARGO_PKG_VERSION"),
@@ -957,6 +971,7 @@ pub async fn update_check(
             "available": false,
             "error": format!("update channel unreachable: {e}"),
             "updates_page": hyprfetch_core::update::UPDATES_PAGE_URL,
+            "stale_copies": stale,
         }))),
     }
 }
@@ -997,20 +1012,22 @@ pub async fn update_apply(
     };
 
     // Download from the project mirror → sha256-verify → swap atomically.
-    // The daemon cannot prompt for a password, so a system-owned install
-    // location (pacman/deb/rpm) is refused with an actionable hint instead
-    // of a raw "permission denied".
+    // The daemon has no TTY, so a system-owned install location is updated
+    // through passwordless `sudo -n` when available, then `pkexec` (the
+    // desktop polkit agent shows the graphical password prompt); when
+    // neither can run it fails with an actionable terminal hint.
     let applied = match hyprfetch_core::update::apply(
         &state.update_cfg,
         &chk,
-        hyprfetch_core::update::Escalation::Refuse,
+        hyprfetch_core::update::Escalation::NonInteractive,
     )
     .await
     {
         Ok(a) => a,
         Err(hyprfetch_core::update::UpdateError::RootNeeded { path, hint }) => {
             return Err(ApiError::InvalidRequest(format!(
-                "this HyprFetch was installed in a system location ({path}). \
+                "this HyprFetch was installed in a system location ({path}) and \
+                 no passwordless privilege tool answered. \
                  Update it from a terminal instead: run `sudo hyprfetch update` once. {hint}"
             )));
         }
@@ -1024,6 +1041,7 @@ pub async fn update_apply(
         false
     };
 
+    let stale = stale_copies_json().await;
     Ok(Json(serde_json::json!({
         "installed": applied.installed,
         "previous": applied.current,
@@ -1031,6 +1049,7 @@ pub async fn update_apply(
         "backup": applied.backup_path,
         "escalated": applied.escalated,
         "restarting": restarted,
+        "stale_copies": stale,
     })))
 }
 
@@ -1048,6 +1067,66 @@ pub async fn update_restart(
         .await
         .map_err(|e| ApiError::InternalError(format!("restart: {e}")))?;
     Ok(Json(serde_json::json!({"restarting": true})))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/update/stale-copies/fix
+// ---------------------------------------------------------------------------
+
+/// `POST /api/update/stale-copies/fix` — remove every non-package-owned
+/// stale `hyprfetch` copy found on PATH (the classic case: an old
+/// install.sh copy in `/usr/local/bin` shadowing the pacman-managed
+/// `/usr/bin` build, so the old UI/CLI keeps launching). Package-owned
+/// files are reported back for manual removal via the package manager.
+pub async fn update_fix_stale_copies(
+    State(_state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let exe = std::env::current_exe()
+        .map_err(|e| ApiError::InternalError(format!("current_exe: {e}")))?;
+    let copies = hyprfetch_core::update::shadowed_copies(&exe).await;
+    if copies.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "removed": [], "failed": [], "owned": [],
+            "message": "no stale copies found — nothing to fix",
+        })));
+    }
+    let tool = hyprfetch_core::update::find_priv_tool_noninteractive();
+    let mut removed: Vec<String> = Vec::new();
+    let mut failed: Vec<serde_json::Value> = Vec::new();
+    let mut owned: Vec<serde_json::Value> = Vec::new();
+    for c in copies {
+        if c.owned_by.is_some() {
+            owned.push(serde_json::json!({
+                "path": c.path,
+                "owned_by": c.owned_by,
+                "hint": "remove via the package manager (e.g. `sudo pacman -Rns hyprfetch-bin`)"
+            }));
+            continue;
+        }
+        match hyprfetch_core::update::remove_stale_copy(
+            std::path::Path::new(&c.path),
+            tool.as_ref(),
+        )
+        .await
+        {
+            Ok(()) => {
+                tracing::info!(path = %c.path, "removed stale shadowing hyprfetch copy");
+                removed.push(c.path);
+            }
+            Err(e) => failed.push(serde_json::json!({ "path": c.path, "error": e.to_string() })),
+        }
+    }
+    let message = if removed.is_empty() && failed.is_empty() {
+        "package-owned copies must be removed via the package manager".to_string()
+    } else if failed.is_empty() {
+        "stale copies removed — restart the server to run the fresh binary".to_string()
+    } else {
+        "some copies could not be removed — see 'failed' (passwordless sudo/pkexec required)"
+            .to_string()
+    };
+    Ok(Json(serde_json::json!({
+        "removed": removed, "failed": failed, "owned": owned, "message": message,
+    })))
 }
 
 /// Shared restart logic: drain → spawn replacement → notify shutdown.
@@ -1541,7 +1620,11 @@ mod tests {
             serde_json::json!({"urls": ["https://example.com/song.mp3"], "category": "auto"}),
         )
         .await;
-        assert_eq!(status, StatusCode::CREATED, "category:auto must be accepted, got {body}");
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "category:auto must be accepted, got {body}"
+        );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let save_path = v["tasks"][0]["save_path"].as_str().unwrap();
         assert!(
@@ -2384,5 +2467,53 @@ mod tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         let body = body_str(res.into_body()).await;
         assert!(body.contains("not found on disk"), "got: {body}");
+    }
+
+    // -- stale copies + update responses -----------------------------------
+
+    #[tokio::test]
+    async fn stale_copies_fix_is_idempotent_and_shaped_for_the_ui() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/update/stale-copies/fix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v.get("removed").and_then(|r| r.as_array()).is_some());
+        assert!(v.get("failed").and_then(|r| r.as_array()).is_some());
+        assert!(v.get("owned").and_then(|r| r.as_array()).is_some());
+        assert!(v.get("message").and_then(|m| m.as_str()).is_some());
+    }
+
+    #[tokio::test]
+    async fn update_check_response_includes_stale_copies_key() {
+        // The channel may or may not be reachable in CI — either way the
+        // payload must carry the stale_copies key for the UI banner.
+        let app = router(test_state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/update/check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            v.get("stale_copies").and_then(|s| s.as_array()).is_some(),
+            "stale_copies key missing: {body}"
+        );
     }
 }

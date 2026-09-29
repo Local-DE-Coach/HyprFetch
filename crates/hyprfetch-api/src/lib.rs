@@ -183,6 +183,10 @@ pub fn router_with_token(state: AppState, token: impl Into<Option<String>>) -> R
             "/api/update/restart",
             axum::routing::post(routes::update_restart),
         )
+        .route(
+            "/api/update/stale-copies/fix",
+            axum::routing::post(routes::update_fix_stale_copies),
+        )
         .with_state(state.clone());
 
     if let Some(token) = token {

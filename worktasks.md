@@ -568,3 +568,30 @@ API sections; ship as 0.4.4.
 | 26.8 | **Bug found & fixed en route:** `category:"auto"` → 400 (the Add dialog's default option could never start a download in 0.4.2/0.4.3); `resolve_save_dir` now treats `"auto"` as extension sorting | ✅ | regression test `create_task_accepts_explicit_auto_category` |
 | 26.9 | Full test pass: cargo test 150 green, clippy clean, batteries 38+13+25, updater e2e 33/33, real-browser tour (themes/dialog/floatbar/mobile) | ✅ | scripts/test_hyprfetch_app3.sh + worklog |
 | 26.10 | Bump 0.4.4 + CHANGELOG [0.4.4] + docs/api.md (inspect, reveal, open) + release cut via tag-per-release; channel + Docs mirror verified | ✅ | session log |
+
+## 27 · Session 12 — v0.4.5 updater: in-app update that works + stale-copy cleanup (owner report, APPLIED 2026-09-30)
+
+**Owner report:** the WebUI update button failed ("failed to make update
+inside the webui"); updating via the terminal still served the old WebUI;
+after removing + reinstalling via the site's PKGBUILD one-liner the app
+still reported v0.4.3.
+
+**Diagnosis (two real defects):**
+1. `POST /api/update/apply` hardcoded `Escalation::Refuse` → on any system
+   install the in-app update could never succeed.
+2. A second hyprfetch copy earlier on `PATH` (classic: old `install.sh`
+   build in `/usr/local/bin` shadowing the pacman `/usr/bin` one) keeps
+   launching the stale build — new installs/updates "do nothing".
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 27.1 | `Escalation::NonInteractive` + `PrivCmd`: passwordless `sudo -n` probe → `pkexec` fallback; swap/re-removal run one privileged `/bin/sh -c` script | ✅ | core/update.rs; 3 discovery tests (sudo shim, pkexec fallback, none) |
+| 27.2 | WebUI apply uses NonInteractive; RootNeeded hint rewritten ("no passwordless privilege tool answered … sudo hyprfetch update") | ✅ | routes.rs; e2e scenario 10 (env-conditional) |
+| 27.3 | `shadowed_copies()` PATH scan (canonical compare, dedup, ordering vs running dir) + version probe (2 s timeout) + pacman ownership | ✅ | core; 3 scan-order tests |
+| 27.4 | `remove_stale_copy()` rails: never the running binary, never package-owned (prints pacman cmd), privileged `rm -f` via `sudo -n`/`pkexec` when dir is root-owned | ✅ | core; 3 removal tests |
+| 27.5 | API: `stale_copies` in check/apply responses; `POST /api/update/stale-copies/fix` one-click removal (removed/failed/owned + message) | ✅ | routes.rs + 2 handler tests |
+| 27.6 | UI: Updates page warning banner (shadow/duplicate, version, owner) + **Remove stale copies** button; banner also fed by apply response | ✅ | Updates.svelte; bundle boot-check |
+| 27.7 | CLI: `update` warns before install + offers removal after swap (TTY prompt; commands otherwise); `doctor` stale-copies report | ✅ | update_cmd.rs, main.rs |
+| 27.8 | install.sh: post-install shadow check ("`hyprfetch` resolves to X, not this install") + fix instructions; uninstall sweep unchanged/verified | ✅ | Docs repo hyprfetch/install.sh; `sh -n` |
+| 27.9 | e2e extended to 13 scenarios / 43 PASS (escalate-or-hint WebUI apply, shim `sudo -n` attempt + rollback, real shadow detection → fix → clean); cargo test 157 green; clippy clean; batteries 25+13 (38 pre-release channel check pending new release) | ✅ | scripts/e2e_update_channel.sh |
+| 27.10 | Bump 0.4.5 + CHANGELOG [0.4.5] + release via tag-per-release; channel + Docs mirror verified | ✅ | session log |

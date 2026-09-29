@@ -13,7 +13,8 @@
 use anyhow::{bail, Result};
 
 use hyprfetch_core::update::{
-    can_swap_in_place, find_priv_tool, package_owner, UpdateCheck, UpdateConfig, UPDATES_PAGE_URL,
+    can_swap_in_place, find_priv_tool, package_owner, remove_stale_copy, shadowed_copies, PrivCmd,
+    UpdateCheck, UpdateConfig, UPDATES_PAGE_URL,
 };
 
 use crate::{daemon, helpers, UpdateArgs};
@@ -47,6 +48,7 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
 
     print_report(&chk);
     println!("checked via update channel ({base})");
+    warn_shadowed_copies().await;
 
     if args.check {
         if chk.available {
@@ -72,6 +74,90 @@ fn print_report(chk: &UpdateCheck) {
     match &chk.asset {
         Some(a) => println!("asset           : {} ({} bytes)", a.name, a.size),
         None => println!("asset           : none for this machine's target"),
+    }
+}
+
+/// Warn when another `hyprfetch` copy sits on PATH (classic case: an old
+/// install.sh build in `/usr/local/bin` shadowing the pacman-managed
+/// `/usr/bin` binary — updating "does nothing" because the stale copy keeps
+/// launching). Runs on every check so the situation is never invisible.
+async fn warn_shadowed_copies() {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let copies = shadowed_copies(&exe).await;
+    if copies.is_empty() {
+        return;
+    }
+    println!();
+    println!("⚠ other hyprfetch copies found on PATH:");
+    for c in &copies {
+        println!(
+            "    {}{}",
+            if c.shadows {
+                "SHADOWS this install: "
+            } else {
+                "duplicate: "
+            },
+            c.describe()
+        );
+    }
+    println!("    a shadowing copy keeps launching the OLD version —");
+    println!("    update installs will offer to remove it (or use the WebUI Updates page)");
+}
+
+/// After a successful update: offer to remove stale copies so the next
+/// `hyprfetch` launch resolves to the freshly installed binary.
+/// - unowned copies (install.sh leftovers): removed here, escalated through
+///   sudo/doas when the directory is root-owned (TTY prompts once),
+/// - package-owned copies: never touched — print the pacman command.
+async fn cleanup_stale_copies(interactive: bool) {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let copies = shadowed_copies(&exe).await;
+    if copies.is_empty() {
+        return;
+    }
+    println!();
+    println!("⚠ other hyprfetch copies were found on PATH:");
+    let tool = PrivCmd::interactive();
+    for c in &copies {
+        if let Some(owner) = &c.owned_by {
+            println!("    package-owned (not touched): {} — {owner}", c.path);
+            println!(
+                "      remove with: sudo pacman -Rns {}",
+                owner.split_whitespace().next().unwrap_or("hyprfetch-bin")
+            );
+            continue;
+        }
+        let tag = if c.shadows {
+            "SHADOWS this install"
+        } else {
+            "duplicate"
+        };
+        if !interactive {
+            println!("    {tag}: {} — remove with: sudo rm -f {}", c.path, c.path);
+            continue;
+        }
+        print!("    {tag}: {} — remove it? [Y/n] ", c.path);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_ok()
+            && matches!(line.trim(), "n" | "N" | "no" | "No")
+        {
+            println!("      kept — remove later with: sudo rm -f {}", c.path);
+            continue;
+        }
+        match remove_stale_copy(std::path::Path::new(&c.path), tool.as_ref()).await {
+            Ok(()) => println!("      removed ✓"),
+            Err(e) => println!(
+                "      could not remove: {e} — remove later with: sudo rm -f {}",
+                c.path
+            ),
+        }
     }
 }
 
@@ -176,5 +262,10 @@ async fn install(args: &UpdateArgs, cfg: &UpdateConfig, chk: &UpdateCheck) -> Re
     } else {
         println!("restart any running `hyprfetch serve` to apply the new binary");
     }
+
+    // A stale copy elsewhere on PATH would keep launching the old version
+    // (the "updated but nothing changed" trap) — offer to clean it up.
+    let interactive = unsafe { libc::isatty(0) } == 1;
+    cleanup_stale_copies(interactive).await;
     Ok(())
 }

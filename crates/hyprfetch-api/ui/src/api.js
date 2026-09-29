@@ -142,6 +142,13 @@ export async function restartServer() {
   return handle(await fetch('/api/update/restart', { method: 'POST' }))
 }
 
+// Remove stale shadowing hyprfetch copies found on PATH (e.g. an old
+// install.sh build in /usr/local/bin keeping the old UI alive after an
+// update). Returns { removed, failed, owned, message }.
+export async function fixStaleCopies() {
+  return handle(await fetch('/api/update/stale-copies/fix', { method: 'POST' }))
+}
+
 export function connectEvents(onEvent) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const ws = new WebSocket(`${proto}://${location.host}/ws`)

@@ -8,6 +8,53 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-09-30 (Updater: in-app update that actually works + stale-copy cleanup)
+
+### Fixed — update inside the WebUI failed on system installs
+- `POST /api/update/apply` refused every system install (pacman/deb/rpm,
+  `/usr/bin`) with "run `sudo hyprfetch update`" — the button could never
+  work. The daemon now escalates **without a TTY**: passwordless `sudo -n`
+  first (NOPASSWD entries or cached credentials), then **`pkexec`** (the
+  desktop polkit agent shows the graphical password prompt, the same way GUI
+  package managers elevate). When neither answers, the response is the usual
+  actionable terminal hint. CLI `hyprfetch update` keeps interactive sudo.
+
+### Fixed — "updated but the WebUI still shows the old version" (shadowing copies)
+- Root cause: a **second hyprfetch copy earlier on `PATH`** (typically an old
+  `install.sh` build in `/usr/local/bin` next to the pacman-managed
+  `/usr/bin` one) keeps launching the stale build — `--version`, autostart
+  and the WebUI all come from the old file, no matter what was just
+  installed. HyprFetch now detects, reports and removes such copies:
+  - `GET /api/update/check` and `POST /api/update/apply` responses carry
+    `stale_copies` (path, version probe, pacman owner, whether the copy
+    *shadows* the running binary); the Updates page shows a warning banner
+    with a **Remove stale copies** button (`POST /api/update/stale-copies/fix`).
+  - `hyprfetch update` warns before installing and offers removal after the
+    swap (interactive prompt on a TTY; exact `rm`/pacman commands otherwise).
+  - `hyprfetch doctor` gained a **stale copies** report.
+- Removal safety rails: never the running binary, never package-owned files
+  (they print the `pacman -Rns` command instead), one privileged `rm -f`
+  through `sudo -n`/`pkexec` when the directory is root-owned.
+
+### Changed — installer hardening (first-time install & uninstall)
+- `install.sh` now verifies what `hyprfetch` will actually launch right
+  after installing: when `command -v hyprfetch` resolves to a different
+  copy, it prints exactly which file shadows the fresh install and the two
+  ways to fix it (remove the stale file, or `hyprfetch doctor` / the WebUI
+  Updates page on 0.4.5+). `--uninstall` continues to sweep
+  `/usr/local/bin`, `~/.local/bin`, `/usr/bin`, desktop entry, icon, docs
+  and updater leftovers; package-manager removal commands are echoed at the
+  end.
+
+### Tests
+- 11 new core tests (non-interactive tool discovery via sudo/pkexec shims,
+  shadow-scan ordering, removal rails incl. escalation routing); 2 new API
+  handler tests; updater e2e extended to **13 scenarios / 43 PASS** (WebUI
+  apply escalates via `sudo -n` or refuses with the hint — env-dependent;
+  shim-verified escalation attempt + rollback; real shadow-copy
+  detection → one-click fix → clean re-check). `cargo test --workspace`
+  157 green, clippy clean.
+
 ## [0.4.4] — 2026-09-30 (Web UI: confirm-before-download, desktop GO/Open actions, themes)
 
 ### Added — Web UI & API (owner request, "like IDM on Windows")

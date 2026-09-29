@@ -454,6 +454,28 @@ async fn doctor() -> Result<()> {
             .map(|u| u.to_string())
             .unwrap_or_else(|| "disabled (empty channel url)".to_string())
     );
+    // Stale copies on PATH keep launching an old build even after a fresh
+    // install/update — report them (the WebUI Updates page can remove the
+    // non-package-owned ones with one click).
+    let exe = std::env::current_exe().unwrap_or_else(|_| "hyprfetch".into());
+    let copies = hyprfetch_core::update::shadowed_copies(&exe).await;
+    if copies.is_empty() {
+        println!("  stale copies = none");
+    } else {
+        println!("  stale copies =");
+        for c in &copies {
+            println!(
+                "    {}{}",
+                if c.shadows {
+                    "SHADOWS this install: "
+                } else {
+                    "duplicate: "
+                },
+                c.describe()
+            );
+        }
+        println!("    → remove from the WebUI (Updates → stale copies) or: sudo rm -f <path>");
+    }
     println!("  foreign_keys = ON (verified at open)");
     println!("  journal_mode = WAL (verified at open)");
     println!("OK");

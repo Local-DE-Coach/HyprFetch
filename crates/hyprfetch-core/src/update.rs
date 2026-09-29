@@ -59,15 +59,107 @@ pub enum UpdateError {
 /// A plain user process cannot write there, so the atomic swap would fail
 /// with "permission denied". With [`Escalation::Auto`] the updater performs
 /// the swap through a privilege tool (`sudo`, falling back to `doas`); with
-/// [`Escalation::Refuse`] it returns [`UpdateError::RootNeeded`] with a
-/// actionable hint instead (used by the non-interactive web UI).
+/// [`Escalation::Refuse`] it returns [`UpdateError::RootNeeded`] with an
+/// actionable hint instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Escalation {
     /// Replace system-owned binaries via `sudo`/`doas` (sudo may prompt for a
     /// password — this is the interactive CLI choice).
     Auto,
-    /// Never escalate; fail with [`UpdateError::RootNeeded`] instead (WebUI).
+    /// Escalate WITHOUT a terminal, so a daemon/WebUI can self-update a
+    /// system install: passwordless `sudo -n` first, then `pkexec` (the
+    /// polkit agent shows the GUI password prompt on desktops). Never
+    /// blocks on a TTY password read.
+    NonInteractive,
+    /// Never escalate; fail with [`UpdateError::RootNeeded`] instead.
     Refuse,
+}
+
+/// A resolved privilege-escalation command: the program plus the argument
+/// prefix that makes it non-interactive where applicable (`sudo -n`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivCmd {
+    pub program: String,
+    pub pre_args: Vec<&'static str>,
+}
+
+impl PrivCmd {
+    /// Interactive `sudo`/`doas` (may prompt for a password) — CLI choice.
+    pub fn interactive() -> Option<Self> {
+        find_priv_tool().map(|program| Self {
+            program: program.to_string(),
+            pre_args: Vec::new(),
+        })
+    }
+
+    /// Spawn `/bin/sh -c script` under this privilege command.
+    fn run_sh(&self, script: &str) -> std::io::Result<std::process::ExitStatus> {
+        let mut cmd = std::process::Command::new(&self.program);
+        cmd.args(&self.pre_args);
+        // pkexec requires the program as an absolute path (polkit rule);
+        // `sudo`/`doas` resolve `sh` via their own secure_path anyway.
+        cmd.arg("/bin/sh").arg("-c").arg(script);
+        cmd.status()
+    }
+}
+
+/// Non-interactive privilege escalation for daemons / the WebUI.
+///
+/// 1. passwordless `sudo` (`sudo -n true` succeeds — NOPASSWD entry or
+///    cached credentials),
+/// 2. `pkexec` — on a desktop session the polkit agent pops the graphical
+///    password prompt, which is exactly how GUI package managers elevate.
+///
+/// Returns `None` when neither can run without a TTY; the caller then fails
+/// with [`UpdateError::RootNeeded`] and an actionable hint.
+pub fn find_priv_tool_noninteractive() -> Option<PrivCmd> {
+    #[cfg(unix)]
+    {
+        if which_on_path("sudo") && sudo_n_ok() {
+            return Some(PrivCmd {
+                program: "sudo".to_string(),
+                pre_args: vec!["-n"],
+            });
+        }
+        if which_on_path("pkexec") {
+            return Some(PrivCmd {
+                program: "pkexec".to_string(),
+                pre_args: Vec::new(),
+            });
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// `sudo -n true` — succeeds only when sudo can run WITHOUT asking for a
+/// password (NOPASSWD or cached timestamp), which is all a daemon can use.
+#[cfg(unix)]
+fn sudo_n_ok() -> bool {
+    std::process::Command::new("sudo")
+        .arg("-n")
+        .arg("true")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Is `name` an executable file on `PATH`?
+#[cfg(unix)]
+fn which_on_path(name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        dir.join(name)
+            .metadata()
+            .map(|md| md.is_file() && md.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    })
 }
 
 /// Where to check for updates.
@@ -287,12 +379,20 @@ pub async fn apply(
     // Resolve the running binary + pick the swap strategy up front (fail
     // fast before spending time on the download).
     let exe = std::env::current_exe().map_err(|_| UpdateError::ExePath)?;
-    let escalate_with: Option<Option<&'static str>> = if can_swap_in_place(&exe) {
+    let escalate_with: Option<Option<PrivCmd>> = if can_swap_in_place(&exe) {
         Some(None) // direct swap, no privileges needed
     } else {
         match escalation {
             Escalation::Auto => Some(Some(
-                find_priv_tool().ok_or_else(|| root_needed(&exe, true))?,
+                find_priv_tool()
+                    .map(|program| PrivCmd {
+                        program: program.to_string(),
+                        pre_args: Vec::new(),
+                    })
+                    .ok_or_else(|| root_needed(&exe, true))?,
+            )),
+            Escalation::NonInteractive => Some(Some(
+                find_priv_tool_noninteractive().ok_or_else(|| root_needed(&exe, true))?,
             )),
             Escalation::Refuse => return Err(root_needed(&exe, false)),
         }
@@ -330,7 +430,7 @@ pub async fn apply(
         // can_swap_in_place() is only ever false on unix; on other targets
         // the arm is unreachable, but keep the code honest anyway.
         Some(Some(tool)) => {
-            swap_binary_escalated(&exe, &new_bytes, tool)?;
+            swap_binary_escalated(&exe, &new_bytes, &tool)?;
             true
         }
     };
@@ -348,8 +448,9 @@ pub async fn apply(
 fn root_needed(exe: &Path, no_tool: bool) -> UpdateError {
     let path = exe.to_string_lossy().into_owned();
     let hint = if no_tool {
-        "install sudo or doas, then run `sudo hyprfetch update` — or reinstall \
-         with the one-line installer (curl -fsSL https://istias.tech/hyprfetch/updates/install.sh | sh)"
+        "no usable privilege tool: open a terminal and run `sudo hyprfetch update` \
+         once, or reinstall with the one-line installer \
+         (curl -fsSL https://istias.tech/hyprfetch/updates/install.sh | sh)"
             .to_string()
     } else {
         "open a terminal and run `sudo hyprfetch update` once (the CLI asks for \
@@ -434,6 +535,182 @@ pub fn package_owner(exe: &Path) -> Option<String> {
         .map(|rest| rest.trim().trim_end_matches('.').to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Stale / shadowing copies
+//
+// A second `hyprfetch` on PATH (e.g. an old install.sh copy in
+// /usr/local/bin next to the pacman-managed /usr/bin one) silently wins
+// PATH resolution: `hyprfetch --version` keeps reporting the stale build,
+// desktop autostart keeps launching it, and freshly-updated installs look
+// "broken". These helpers FIND and REMOVE such copies.
+// ---------------------------------------------------------------------------
+
+/// A `hyprfetch` executable found on PATH that is not the running binary.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ShadowCopy {
+    /// Absolute path of the foreign copy.
+    pub path: String,
+    /// True when PATH resolves this copy BEFORE the running binary — shells
+    /// and desktop launchers keep starting the stale build.
+    pub shadows: bool,
+    /// Version that copy self-reports (`hyprfetch --version`), if it answers.
+    pub version: Option<String>,
+    /// pacman package owning the file (`hyprfetch-bin 0.4.4`), if any — such
+    /// copies must be removed through the package manager, not `rm`.
+    pub owned_by: Option<String>,
+}
+
+impl ShadowCopy {
+    /// One-line human description used by the CLI and the WebUI.
+    pub fn describe(&self) -> String {
+        match (&self.version, &self.owned_by) {
+            (Some(v), Some(o)) => format!("{} (version {v}, package {o})", self.path),
+            (Some(v), None) => format!("{} (version {v})", self.path),
+            (None, Some(o)) => format!("{} (package {o})", self.path),
+            (None, None) => self.path.clone(),
+        }
+    }
+}
+
+/// Scan `PATH` for other `hyprfetch` executables that shadow or duplicate
+/// `active` (the running binary). Symlinks resolving to the same file are
+/// not reported. Best-effort: unreadable PATH entries are skipped.
+pub async fn shadowed_copies(active: &Path) -> Vec<ShadowCopy> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(path_var) = std::env::var_os("PATH") else {
+            return Vec::new();
+        };
+        let active_canon = std::fs::canonicalize(active).unwrap_or_else(|_| active.to_path_buf());
+        let active_dir_canon = active_canon
+            .parent()
+            .and_then(|d| std::fs::canonicalize(d).ok());
+
+        let entries: Vec<std::path::PathBuf> = std::env::split_paths(&path_var).collect();
+        // Index of the running binary's dir on PATH; usize::MAX when it is
+        // NOT on PATH (started via absolute path) — then every PATH copy
+        // wins resolution and counts as shadowing.
+        let active_idx = active_dir_canon
+            .as_ref()
+            .and_then(|ad| {
+                entries
+                    .iter()
+                    .position(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()) == *ad)
+            })
+            .unwrap_or(usize::MAX);
+
+        let mut out: Vec<ShadowCopy> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (idx, dir) in entries.iter().enumerate() {
+            let candidate = dir.join("hyprfetch");
+            let Ok(md) = std::fs::metadata(&candidate) else {
+                continue;
+            };
+            if !md.is_file() || md.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+            let cand_canon =
+                std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+            if cand_canon == active_canon || !seen.insert(cand_canon.clone()) {
+                continue; // the running binary itself / duplicate PATH entry
+            }
+            let shadows = idx < active_idx;
+            let version = probe_version(&cand_canon).await;
+            let owned_by = package_owner(&cand_canon);
+            out.push(ShadowCopy {
+                path: cand_canon.to_string_lossy().into_owned(),
+                shadows,
+                version,
+                owned_by,
+            });
+        }
+        out
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = active;
+        Vec::new()
+    }
+}
+
+/// Ask a discovered copy for its version (`<path> --version`), with a hard
+/// 2s timeout so a foreign/hung file can never stall the caller.
+async fn probe_version(path: &Path) -> Option<String> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::process::Command::new(path).arg("--version").output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+    (!first.is_empty()).then_some(first)
+}
+
+/// Remove a stale copy found by [`shadowed_copies`].
+///
+/// Safety rails:
+/// - refuses to remove the running binary (or any path resolving to it),
+/// - refuses pacman-owned files — they must go through the package manager,
+/// - when the containing directory is not writable, removes it through
+///   `priv_cmd` (one `rm -f` under `sudo -n` / `pkexec`); without a tool it
+///   fails with an actionable hint.
+pub async fn remove_stale_copy(path: &Path, priv_cmd: Option<&PrivCmd>) -> Result<(), UpdateError> {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Ok(cur) = std::env::current_exe() {
+        let cur = std::fs::canonicalize(&cur).unwrap_or(cur);
+        if path == cur {
+            return Err(UpdateError::Other(
+                "refusing to remove the running hyprfetch binary".into(),
+            ));
+        }
+    }
+    if let Some(owner) = package_owner(&path) {
+        return Err(UpdateError::Other(format!(
+            "{path} is owned by package `{owner}` — remove it with the package \
+             manager (e.g. `sudo pacman -Rns {pkg}`), not directly",
+            path = path.display(),
+            pkg = owner.split_whitespace().next().unwrap_or("hyprfetch-bin"),
+        )));
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let tool = priv_cmd.ok_or_else(|| {
+                UpdateError::Other(format!(
+                    "cannot remove {path} — root-owned directory; re-run with \
+                     sudo or from the WebUI (pkexec)",
+                    path = path.display()
+                ))
+            })?;
+            let script = format!("rm -f {}", sh_quote(&path));
+            match tool.run_sh(&script) {
+                Ok(s) if s.success() => Ok(()),
+                Ok(s) => Err(UpdateError::Other(format!(
+                    "privileged removal via {} failed (exit {s})",
+                    tool.program
+                ))),
+                Err(e) => Err(UpdateError::Other(format!(
+                    "cannot run {}: {e}",
+                    tool.program
+                ))),
+            }
+        }
+        Err(e) => Err(UpdateError::Other(format!(
+            "cannot remove {path}: {e}",
+            path = path.display()
+        ))),
+    }
+}
+
 /// The release archive naming scheme is `hyprfetch-<ver>-<target>.tar.gz`.
 /// Derive the target triple candidates for the running binary (Linux-first).
 fn target_candidates() -> Vec<String> {
@@ -501,7 +778,11 @@ pub struct ApplyResult {
 /// 0755). A single script keeps the swap self-recovering: if `install`
 /// fails, the script moves the old binary back before exiting, so the
 /// system never ends up without a working `hyprfetch`.
-pub fn swap_binary_escalated(exe: &Path, new_bytes: &[u8], tool: &str) -> Result<(), UpdateError> {
+pub fn swap_binary_escalated(
+    exe: &Path,
+    new_bytes: &[u8],
+    tool: &PrivCmd,
+) -> Result<(), UpdateError> {
     // Stage the new binary where the CURRENT user can write it; the
     // privileged step then installs it into place (root-owned, 0755).
     let stage_dir: PathBuf = std::env::temp_dir().join(format!(
@@ -533,9 +814,7 @@ pub fn swap_binary_escalated(exe: &Path, new_bytes: &[u8], tool: &str) -> Result
     let old_path = exe.with_extension("old");
     let script = escalated_swap_script(exe, &old_path, &staged);
 
-    let run = std::process::Command::new(tool)
-        .args(["sh", "-c", &script])
-        .status();
+    let run = tool.run_sh(&script);
     // Best-effort staging cleanup (the script removes the staged file on
     // success; the dir may still be left over on failure).
     let _ = std::fs::remove_dir_all(&stage_dir);
@@ -543,12 +822,14 @@ pub fn swap_binary_escalated(exe: &Path, new_bytes: &[u8], tool: &str) -> Result
     match run {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(UpdateError::Other(format!(
-            "privileged swap via {tool} failed (exit {status}) — {path} was left untouched; \
+            "privileged swap via {} failed (exit {status}) — {path} was left untouched; \
              run `sudo hyprfetch update` manually if the problem persists",
+            tool.program,
             path = exe.display(),
         ))),
         Err(e) => Err(UpdateError::Other(format!(
-            "cannot run {tool}: {e} — install sudo/doas or run `sudo hyprfetch update` manually"
+            "cannot run {}: {e} — install sudo/pkexec or run `sudo hyprfetch update` manually",
+            tool.program
         ))),
     }
 }
@@ -715,7 +996,15 @@ mod tests {
         std::fs::write(&shim, "#!/bin/sh\nexec \"$@\"\n").unwrap();
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        swap_binary_escalated(&exe, b"new-binary", shim.to_str().unwrap()).unwrap();
+        swap_binary_escalated(
+            &exe,
+            b"new-binary",
+            &PrivCmd {
+                program: shim.to_str().unwrap().to_string(),
+                pre_args: Vec::new(),
+            },
+        )
+        .unwrap();
 
         assert_eq!(std::fs::read(&exe).unwrap(), b"new-binary");
         assert_eq!(
@@ -754,7 +1043,15 @@ mod tests {
         std::fs::write(&shim, "#!/bin/sh\nexit 3\n").unwrap();
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let err = swap_binary_escalated(&exe, b"new-binary", shim.to_str().unwrap()).unwrap_err();
+        let err = swap_binary_escalated(
+            &exe,
+            b"new-binary",
+            &PrivCmd {
+                program: shim.to_str().unwrap().to_string(),
+                pre_args: Vec::new(),
+            },
+        )
+        .unwrap_err();
         assert!(
             err.to_string().starts_with("privileged swap via ") && err.to_string().ends_with(
                 "was left untouched; run `sudo hyprfetch update` manually if the problem persists"
@@ -937,5 +1234,220 @@ mod tests {
         assert_eq!(v["asset"]["name"], "hyprfetch-0.5.0-linux-x64.tar.gz");
         assert!(v.get("via_git").is_none(), "git tier is gone");
         assert!(v.get("via_channel").is_none(), "channel is the only tier");
+    }
+
+    // -- stale / shadowing copies ------------------------------------------
+
+    /// Serializes tests that mutate `PATH` (process-global state). Async
+    /// mutex: guards are held across `.await` points by design.
+    static PATH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// `active` dir at `a/`, stale copy at `s/`, PATH = `s:a:rest`.
+    /// The stale copy prints a version so `probe_version` has data.
+    #[cfg(unix)]
+    fn shadow_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let a_dir = tmp.path().join("a");
+        let s_dir = tmp.path().join("s");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&s_dir).unwrap();
+        let active = a_dir.join("hyprfetch");
+        let stale = s_dir.join("hyprfetch");
+        std::fs::write(&active, b"#!/bin/sh\necho \"hyprfetch 9.9.9\"\n").unwrap();
+        std::fs::write(&stale, b"#!/bin/sh\necho \"hyprfetch 0.1.0\"\n").unwrap();
+        for p in [&active, &stale] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (tmp, active, stale)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shadowed_copies_finds_and_orders_foreign_copy() {
+        let _guard = PATH_LOCK.lock().await;
+        let (tmp, active, stale) = shadow_fixture();
+        let old_path = std::env::var_os("PATH").unwrap();
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                stale.parent().unwrap().display(),
+                active.parent().unwrap().display()
+            ),
+        );
+        let found = shadowed_copies(&active).await;
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(found.len(), 1, "exactly the one foreign copy: {found:?}");
+        let c = &found[0];
+        assert!(c.shadows, "stale dir precedes the active dir on PATH");
+        assert_eq!(c.version.as_deref(), Some("hyprfetch 0.1.0"));
+        assert!(c.owned_by.is_none(), "tempfile is never pacman-owned");
+        assert!(c.describe().contains(&c.path));
+        drop(tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shadowed_copies_reports_shadowed_active_copy() {
+        let _guard = PATH_LOCK.lock().await;
+        let (tmp, active, stale) = shadow_fixture();
+        let old_path = std::env::var_os("PATH").unwrap();
+        // Active dir FIRST — the foreign copy no longer shadows, but is
+        // still reported (it is a duplicate install that confuses users).
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                active.parent().unwrap().display(),
+                stale.parent().unwrap().display()
+            ),
+        );
+        let found = shadowed_copies(&active).await;
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(found.len(), 1);
+        assert!(!found[0].shadows, "foreign copy sits AFTER the active dir");
+        drop(tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shadowed_copies_ignores_the_active_binary_itself() {
+        let _guard = PATH_LOCK.lock().await;
+        let (tmp, active, _stale) = shadow_fixture();
+        let old_path = std::env::var_os("PATH").unwrap();
+        std::env::set_var("PATH", active.parent().unwrap().display().to_string());
+        let found = shadowed_copies(&active).await;
+        std::env::set_var("PATH", old_path);
+        assert!(found.is_empty(), "self must never be reported: {found:?}");
+        drop(tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remove_stale_copy_direct_and_refuses_running_binary() {
+        let _guard = PATH_LOCK.lock().await;
+        let (tmp, _active, stale) = shadow_fixture();
+        remove_stale_copy(&stale, None).await.unwrap();
+        assert!(!stale.exists(), "user-owned copy removed directly");
+
+        // The running binary (this test executable) must never be removable.
+        let cur = std::env::current_exe().unwrap();
+        let err = remove_stale_copy(&cur, None).await.unwrap_err();
+        assert!(err.to_string().contains("refusing to remove the running"));
+        drop(tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remove_stale_copy_routes_readonly_dir_to_the_priv_tool() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, active, _stale) = shadow_fixture();
+        let ro_dir = tmp.path().join("ro");
+        std::fs::create_dir_all(&ro_dir).unwrap();
+        let target = ro_dir.join("hyprfetch");
+        std::fs::write(&target, b"stale").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // A stand-in "sudo" that executes the privileged script as the
+        // current user (it cannot grant root here, but it exercises the
+        // exact Command plumbing the real sudo runs).
+        let shimdir = tempfile::tempdir().unwrap();
+        let shim = shimdir.path().join("fake-sudo");
+        std::fs::write(&shim, "#!/bin/sh\nexec \"$@\"\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tool = PrivCmd {
+            program: shim.to_str().unwrap().to_string(),
+            pre_args: Vec::new(),
+        };
+
+        // With a tool: the EPERM branch forwards the removal into the
+        // privileged script (its non-root exit surfaces as a tool failure,
+        // NOT the "no tool" hint).
+        let err = remove_stale_copy(&target, Some(&tool)).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("privileged removal via") && msg.contains("fake-sudo"),
+            "unexpected error: {msg}"
+        );
+
+        // Without a tool: same EPERM branch must fail with the actionable
+        // "root-owned directory" hint instead of trying to delete silently.
+        let err = remove_stale_copy(&target, None).await.unwrap_err();
+        assert!(err.to_string().contains("root-owned directory"));
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = active;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn noninteractive_discovery_prefers_passwordless_sudo_shim() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = PATH_LOCK.lock().await;
+        let old_path = std::env::var_os("PATH").unwrap();
+        // Shim sudo: `sudo -n true` → 0 (passwordless probe), anything else
+        // through. No pkexec on this PATH. `true` is handled explicitly
+        // because this shim-only PATH has no coreutils on it.
+        let tmp = tempfile::tempdir().unwrap();
+        let sudo = tmp.path().join("sudo");
+        std::fs::write(
+            &sudo,
+            "#!/bin/sh\nif [ \"$1\" = \"-n\" ]; then shift; fi\nif [ \"$1\" = \"true\" ]; then exit 0; fi\nexec \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("PATH", tmp.path().display().to_string());
+        let tool = find_priv_tool_noninteractive();
+        std::env::set_var("PATH", old_path);
+        assert_eq!(
+            tool,
+            Some(PrivCmd {
+                program: "sudo".to_string(),
+                pre_args: vec!["-n"],
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn noninteractive_discovery_falls_back_to_pkexec() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = PATH_LOCK.lock().await;
+        let old_path = std::env::var_os("PATH").unwrap();
+        // A sudo whose passwordless probe FAILS (like a real desktop sudo
+        // without NOPASSWD) + a pkexec present → pkexec must win.
+        let tmp = tempfile::tempdir().unwrap();
+        let sudo = tmp.path().join("sudo");
+        std::fs::write(&sudo, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let pkexec = tmp.path().join("pkexec");
+        std::fs::write(&pkexec, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&pkexec, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("PATH", tmp.path().display().to_string());
+        let tool = find_priv_tool_noninteractive();
+        std::env::set_var("PATH", old_path);
+        assert_eq!(
+            tool,
+            Some(PrivCmd {
+                program: "pkexec".to_string(),
+                pre_args: Vec::new(),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn noninteractive_discovery_none_without_tools() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = PATH_LOCK.lock().await;
+        let old_path = std::env::var_os("PATH").unwrap();
+        let tmp = tempfile::tempdir().unwrap(); // empty PATH dir: no sudo/pkexec
+        std::env::set_var("PATH", tmp.path().display().to_string());
+        let tool = find_priv_tool_noninteractive();
+        std::env::set_var("PATH", old_path);
+        assert_eq!(tool, None, "empty PATH must yield no tool");
     }
 }

@@ -13,6 +13,12 @@
 #   6. --channel "" disables the updater
 #   7. web UI /api/update/check answers from the channel
 #   8. malformed manifest → clean error, no crash
+#   9. system-owned location + real sudo (no tty) → clean error, binary intact
+#  10. web UI /api/update/apply on a system install → escalates (passwordless
+#      sudo: success) or refuses with an actionable hint
+#  11. user-owned install in a writable dir → no escalation noise
+#  12. web UI apply uses `sudo -n` plumbing (shim) + rollback keeps binary
+#  13. web UI detects + removes stale shadowing copies (one-click fix)
 #
 # Usage: scripts/e2e_update_channel.sh [path-to-hyprfetch-binary]
 # (defaults to building the debug binary itself)
@@ -240,7 +246,11 @@ else
 fi
 
 echo
-echo "=== 10. web UI /api/update/apply on a system install → actionable hint ==="
+echo "=== 10. web UI /api/update/apply on a system install → escalate or hint ==="
+# v0.4.5 behavior: the daemon tries passwordless `sudo -n`, then `pkexec`.
+# - passwordless sudo available (CI runners): apply SUCCEEDS via escalation
+# - neither usable (plain user box): refusal with an actionable hint
+write_manifest "9.9.9" "$CHANNEL/9.9.9/hyprfetch-9.9.9-linux-x64.tar.gz" "$SHA"
 mkdir -p "$WORK/serve2"
 HYPRFETCH_UPDATE_CHANNEL="$CHANNEL" "$LOCKED/hyprfetch" serve --db-path "$WORK/serve2/hyprfetch.db" --bind 127.0.0.1:7791 > "$WORK/serve2.log" 2>&1 &
 SERVE_PID=$!
@@ -253,11 +263,27 @@ done
 check "server came up (from the locked dir)" $UP
 curl -sf http://127.0.0.1:7791/api/update/check > /dev/null
 check "update check answers" $?
-PAYLOAD=$(curl -s -X POST http://127.0.0.1:7791/api/update/apply)
 HTTP_CODE=$(curl -s -o /tmp/apply_out.json -w '%{http_code}' -X POST http://127.0.0.1:7791/api/update/apply)
-echo "http $HTTP_CODE: $(cat /tmp/apply_out.json 2>/dev/null | head -c 300)"
-echo "$PAYLOAD$HTTP_CODE" | grep -qi "system location\|sudo hyprfetch update"
-check "refuses with an actionable sudo hint" $?
+echo "http $HTTP_CODE: $(head -c 300 /tmp/apply_out.json 2>/dev/null)"
+if sudo -n true 2>/dev/null; then
+  echo "[env] passwordless sudo present — expecting a SUCCESSFUL escalated apply"
+  [ "$HTTP_CODE" = "200" ]
+  check "apply succeeds via passwordless sudo" $?
+  jq -e '.installed == "9.9.9" and .escalated == true' /tmp/apply_out.json > /dev/null
+  check "reports installed 9.9.9 + escalated" $?
+  jq -e 'has("stale_copies")' /tmp/apply_out.json > /dev/null
+  check "apply response carries stale_copies" $?
+  grep -q "marker-available" "$LOCKED/hyprfetch"
+  check "binary content was swapped (system dir!)" $?
+  [ -f "$LOCKED/hyprfetch.old" ]
+  check "previous binary kept as .old" $?
+else
+  echo "[env] no passwordless sudo — expecting the actionable refusal"
+  grep -qi "system location\|sudo hyprfetch update" /tmp/apply_out.json
+  check "refuses with an actionable sudo hint" $?
+  cmp -s "$LOCKED/hyprfetch" "$BIN"
+  check "binary was left untouched" $?
+fi
 kill "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null; SERVE_PID=""
 chmod 755 "$LOCKED"
 
@@ -270,6 +296,75 @@ if echo "$OUT" | grep -q "is a system location"; then
 else
   check "no system-location note for user installs" 0
 fi
+
+echo
+echo "=== 12. web UI apply attempts `sudo -n` escalation (shim) + rollback ==="
+# Shim sudo: `sudo -n true` → ok (probe passes); `sudo -n <cmd>` → runs it as
+# the current user. In a locked dir the privileged script then FAILS (the
+# shim cannot grant root) — proving the API walked the sudo -n path and the
+# script rolled back without touching the binary.
+SHIM="$WORK/shim"
+mkdir -p "$SHIM"
+printf '#!/bin/sh\nif [ "$1" = "-n" ]; then shift; exec "$@"; fi\nexit 9\n' > "$SHIM/sudo"
+chmod 755 "$SHIM/sudo"
+LOCKED2="$WORK/locked2"
+mkdir -p "$LOCKED2"
+cp "$BIN" "$LOCKED2/hyprfetch"
+chmod 555 "$LOCKED2"
+mkdir -p "$WORK/serve3"
+PATH="$SHIM:$PATH" HYPRFETCH_UPDATE_CHANNEL="$CHANNEL" "$LOCKED2/hyprfetch" serve --db-path "$WORK/serve3/hyprfetch.db" --bind 127.0.0.1:7792 > "$WORK/serve3.log" 2>&1 &
+SERVE_PID=$!
+UP=1
+for _ in $(seq 1 60); do
+  curl -sf -o /dev/null http://127.0.0.1:7792/api/server && UP=0 && break
+  sleep 0.5
+done
+check "server came up (shimmed sudo)" $UP
+curl -sf http://127.0.0.1:7792/api/update/check > /dev/null
+HTTP_CODE=$(curl -s -o /tmp/apply2.json -w '%{http_code}' -X POST http://127.0.0.1:7792/api/update/apply)
+echo "http $HTTP_CODE: $(head -c 300 /tmp/apply2.json 2>/dev/null)"
+grep -q "privileged swap via sudo failed" /tmp/apply2.json
+check "escalation was ATTEMPTED via sudo (not refused)" $?
+cmp -s "$LOCKED2/hyprfetch" "$BIN"
+check "rollback left the binary untouched" $?
+[ ! -e "$LOCKED2/hyprfetch.old" ] && [ ! -e "$LOCKED2/hyprfetch.new" ]
+check "no .old/.new leftovers" $?
+kill "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null; SERVE_PID=""
+chmod 755 "$LOCKED2"
+
+echo
+echo "=== 13. web UI detects + removes stale shadowing copies ==="
+# Scenario 11 swapped $SWAP_TARGET to the marker script — restore a REAL
+# binary so `serve` can actually run here.
+cp "$BIN" "$SWAP_TARGET"
+SHADOW="$WORK/shadowbin"
+mkdir -p "$SHADOW"
+printf '#!/bin/sh\necho "hyprfetch 0.1.0"\n' > "$SHADOW/hyprfetch"
+chmod 755 "$SHADOW/hyprfetch"
+mkdir -p "$WORK/serve4"
+PATH="$SHADOW:$PATH" HYPRFETCH_UPDATE_CHANNEL="$CHANNEL" "$SWAP_TARGET" serve --db-path "$WORK/serve4/hyprfetch.db" --bind 127.0.0.1:7793 > "$WORK/serve4.log" 2>&1 &
+SERVE_PID=$!
+UP=1
+for _ in $(seq 1 60); do
+  curl -sf -o /dev/null http://127.0.0.1:7793/api/server && UP=0 && break
+  sleep 0.5
+done
+check "server came up (shadow on PATH)" $UP
+PAYLOAD=$(curl -sf http://127.0.0.1:7793/api/update/check)
+echo "$PAYLOAD"
+echo "$PAYLOAD" | jq -e --arg p "$SHADOW/hyprfetch" \
+  '.stale_copies | length == 1 and .[0].path == $p and .[0].shadows == true and .[0].version == "hyprfetch 0.1.0"' > /dev/null
+check "check reports the shadowing copy + its version" $?
+PAYLOAD=$(curl -sf -X POST http://127.0.0.1:7793/api/update/stale-copies/fix)
+echo "$PAYLOAD"
+echo "$PAYLOAD" | jq -e --arg p "$SHADOW/hyprfetch" '.removed | index($p) != null' > /dev/null
+check "fix removed the stale copy" $?
+[ ! -e "$SHADOW/hyprfetch" ]
+check "stale file is gone from disk" $?
+PAYLOAD=$(curl -sf http://127.0.0.1:7793/api/update/check)
+echo "$PAYLOAD" | jq -e '.stale_copies | length == 0' > /dev/null
+check "check now reports a clean PATH" $?
+kill "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null; SERVE_PID=""
 
 echo
 echo "==============================================="

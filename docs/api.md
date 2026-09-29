@@ -276,14 +276,31 @@ When the channel cannot be reached the response carries
 steps. Override/disable the channel with `[update] channel` or
 `HYPRFETCH_UPDATE_CHANNEL` (see `docs/update-channel.md`).
 
+Every check/apply response also carries `"stale_copies"`: other
+`hyprfetch` executables found on `PATH` that are not the running binary —
+each with `path`, `shadows` (whether `PATH` resolves that copy before the
+running one, so the old build keeps launching), `version` (self-reported
+via a 2 s-capped probe) and `owned_by` (pacman package, when applicable).
+
 `POST /api/update/apply?restart=true|false` → download → sha256 verify →
-atomic binary swap (`hyprfetch.old` kept as rollback). With `restart=true`
-(default) it then drains (pause) active downloads, re-execs a fresh server
-with the same arguments — which auto-resumes the paused tasks — and shuts
-this process down gracefully. Requires the server to have been started
-through `hyprfetch serve`/`dev` (CLI restarts keep their own args). Returns
-`400` when no check has been cached yet — a
-web request cannot rebuild the binary; run `hyprfetch update` instead.
+atomic binary swap (`hyprfetch.old` kept as rollback). System-owned
+install locations are escalated **without a TTY**: passwordless `sudo -n`
+first, then `pkexec` (the desktop polkit agent shows the graphical
+password prompt); when neither answers, `400` with the actionable
+`sudo hyprfetch update` hint. With `restart=true` (default) it then drains
+(pause) active downloads, re-execs a fresh server with the same arguments
+— which auto-resumes the paused tasks — and shuts this process down
+gracefully. Requires the server to have been started through
+`hyprfetch serve`/`dev` (CLI restarts keep their own args). Returns `400`
+when no check has been cached yet — a web request cannot rebuild the
+binary; run `hyprfetch update` instead.
+
+`POST /api/update/stale-copies/fix` → removes every non-package-owned
+stale copy reported by `stale_copies` (the classic case: an old
+`install.sh` build in `/usr/local/bin` shadowing the pacman-managed
+`/usr/bin` one). Returns `{ removed, failed, owned, message }`;
+package-owned files are only reported (remove them via the package
+manager).
 
 `POST /api/update/restart` → just the drain → re-exec → auto-resume part,
 without an update.
