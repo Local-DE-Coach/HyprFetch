@@ -1,23 +1,32 @@
 # Maintainer: HyprFetch Contributors <Local-DE-Coach@users.noreply.github.com>
 # Fast-install binary package for Arch Linux (generated for each release;
 # pkgver and sha256sums are pinned to that release by CI).
-# Usage: download PKGBUILD from a HyprFetch release, then run:  makepkg -si
+#
+# Usage:
+#     curl -fLO https://istias.tech/hyprfetch/updates/<version>/PKGBUILD
+#     makepkg -si
+#
+# The source tarball comes from the istias.tech update channel — the same
+# sha256-verified mirror the CLI updater uses. No GitHub involved.
+# Remove again with:  sudo pacman -Rns hyprfetch-bin
 pkgname=hyprfetch-bin
 pkgver=__VERSION__
 pkgrel=1
 pkgdesc="Minimal-RAM, fast, resumable download manager with a web UI (prebuilt binary)"
 arch=('x86_64')
-url="https://github.com/Local-DE-Coach/HyprFetch"
+url="https://istias.tech/hyprfetch"
 license=('MIT')
 depends=('glibc' 'gcc-libs')
 optdepends=('xdg-utils: open the web UI / download folder from the daemon')
 provides=('hyprfetch')
 conflicts=('hyprfetch')
-source=("hyprfetch-${pkgver}.tar.gz::https://github.com/Local-DE-Coach/HyprFetch/releases/download/v${pkgver}/hyprfetch-${pkgver}-linux-x64.tar.gz")
+source=("hyprfetch-${pkgver}.tar.gz::https://istias.tech/hyprfetch/updates/${pkgver}/hyprfetch-${pkgver}-linux-x64.tar.gz")
 sha256sums=('__SHA256__')
 
 package() {
-    local _srcdir="${srcdir}/hyprfetch-${pkgver}-x86_64-unknown-linux-gnu"
+    # CI renames the archive root to the clean "hyprfetch-<ver>-linux-x64"
+    # directory (same name as the tarball, minus the extension).
+    local _srcdir="${srcdir}/hyprfetch-${pkgver}-linux-x64"
     install -Dm755 "${_srcdir}/hyprfetch"   "${pkgdir}/usr/bin/hyprfetch"
     install -Dm644 "${_srcdir}/README.md"   "${pkgdir}/usr/share/doc/hyprfetch/README.md"
     install -Dm644 "${_srcdir}/CHANGELOG.md" "${pkgdir}/usr/share/doc/hyprfetch/CHANGELOG.md"

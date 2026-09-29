@@ -220,12 +220,22 @@ jobs:
 
           ## 📦 Fresh install (per platform)
 
+          Every artifact below is mirrored to the istias.tech update channel;
+          the commands use the SERVER so installs never touch GitHub.
+          `install.sh` detects CPU + libc, sha256-verifies and installs;
+          re-running it updates in place.
+
           | Platform | Command |
           |---|---|
-          | **Arch / CachyOS** | `curl -fLO https://github.com/Local-DE-Coach/HyprFetch/releases/latest/download/PKGBUILD && makepkg -si` |
-          | **Debian / Ubuntu** | download the `.deb` below → `sudo apt install ./hyprfetch_*.deb` |
-          | **Fedora / RHEL** | download the `.rpm` below → `sudo dnf install ./hyprfetch-*.rpm` |
-          | **Any Linux x64** | tarball below → `sudo install -Dm755 hyprfetch /usr/local/bin/hyprfetch` |
+          | **Any Linux (one line)** | `curl -fsSL {updates_page}/install.sh \\| sh` |
+          | **Arch / CachyOS** | `curl -fLO {updates_page}/{version}/PKGBUILD && makepkg -si` |
+          | **Debian / Ubuntu** | `curl -fLO {updates_page}/{version}/hyprfetch_{version}-1_amd64.deb && sudo apt install ./hyprfetch_{version}-1_amd64.deb` |
+          | **Fedora / RHEL** | `sudo dnf install {updates_page}/{version}/hyprfetch-{version}-1.x86_64.rpm` |
+          | **Any Linux x64 (manual)** | tarball below → `sudo install -Dm755 hyprfetch /usr/local/bin/hyprfetch` |
+
+          Uninstall: `curl -fsSL {updates_page}/install.sh | sh -s -- --uninstall`
+          (Arch: `sudo pacman -Rns hyprfetch-bin` · Debian: `sudo apt remove --purge hyprfetch` ·
+          Fedora: `sudo dnf remove hyprfetch`) — downloads in ~/Downloads are never touched.
 
           Full walkthroughs: <{product_page}> (install + test steps) · <{updates_page}> (update steps)
 
@@ -294,7 +304,13 @@ jobs:
   deploy-update-channel:
     name: Deploy update channel (istias.tech)
     needs: release
-    runs-on: ubuntu-latest
+    # Direct-SSH mirror: needs DEPLOY_SSH_KEY authorized for the DEPLOY_USER
+    # on the server. When the key/user combination isn't right (or org
+    # secrets aren't shared with this repo), the job reports a NOTICE and
+    # stays green — the primary mirror is the scheduled
+    # `hyprfetch-mirror.yml` workflow in Local-DE-Coach/Docs, which owns the
+    # working server credentials.
+    continue-on-error: true
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -344,7 +360,7 @@ jobs:
         run: |
           if [ -z "$KEY" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Update-channel deploy SKIPPED — add the DEPLOY_SSH_KEY repo secret (see docs/update-channel.md)."
+            echo "::notice::Update-channel deploy SKIPPED — add the DEPLOY_SSH_KEY repo secret (see docs/update-channel.md). The scheduled mirror in Local-DE-Coach/Docs picks the release up automatically."
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
