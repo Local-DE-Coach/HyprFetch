@@ -450,3 +450,28 @@ public roadmap page.
 `bunx tsc --noEmit` clean; all three pages smoke-tested on the standalone
 server (HTTP 200, hero/sections/counts verified in HTML). Docs commits
 `d9ec613` + `8e22d37`, deployed to istias.tech by the Docs deploy workflow.
+
+## 22 · Session 8 — tag-per-release flow + v0.4.1 cut through it (2026-09-30)
+
+Owner feedback: releases were being re-published on the OLD tag (the v0.4.0
+repair re-ran the workflow against the existing tag; nothing ever created a
+new tag per version). Requirement: every new update/release gets its own NEW
+tag; the Action must never create/update a release on an old tag.
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 22.1 | release.yml: new `prepare` job derives the tag from `[workspace.package]` version and creates + pushes the NEW annotated tag on dispatch | ✅ | run 36601404367 job 1 green; v0.4.1 on origin peels to 8d8deaa |
+| 22.2 | Hard guard: dispatch on an already-released version fails ("re-releasing on an old tag is not allowed"); stale-tag-at-other-commit fails; pushed tag must equal Cargo.toml version | ✅ | 33-check harness (guard decision table) |
+| 22.3 | Crash-recovery path: tag exists at HEAD without a release → run continues (no permanent lock-out after a failed build) | ✅ | harness scenario |
+| 22.4 | Build/release jobs checkout the resolved tag → artifacts correspond exactly to the tagged code; all `inputs.tag` usage removed | ✅ | workflow diff + yaml structure checks |
+| 22.5 | Validation harness `scripts/test_release_tagflow.py`: YAML/structure, bash -n of every run block, guard table, bare-origin e2e (create+push tag, second dispatch hits guard, peel==HEAD) | ✅ | 33/33 PASS |
+| 22.6 | v0.4.1 cut through the new flow: version bump 0.4.0→0.4.1 (Cargo.toml+lock), CHANGELOG [Unreleased]→[0.4.1], dispatch → NEW tag v0.4.1 + NEW release (9 assets) + channel deploy, all green | ✅ | run 36601404367, release v0.4.1, latest.json=0.4.1 |
+| 22.7 | Channel completeness for 0.4.1: tarballs+sha256 deployed directly by release.yml; PKGBUILD (pkgver=0.4.1, source=istias.tech) + install.sh via Docs mirror self-heal (dispatched) | ✅ | mirror run 36601843426; PKGBUILD 200 |
+
+**Measured:** Release run 36601404367 all jobs success (prepare/build×3/
+publish/deploy); `git ls-remote` shows `refs/tags/v0.4.1^{}` = 8d8deaa
+(release commit); `releases/tags/v0.4.1` returns 9 assets with notes
+containing the [0.4.1] changelog; https://istias.tech/hyprfetch/updates/
+latest.json serves version 0.4.1; 0.4.1/PKGBUILD 200 with server-only
+source; channel-root install.sh 200. v0.4.0 release left untouched on its
+old tag (history preserved).

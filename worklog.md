@@ -743,3 +743,46 @@ Stage Summary:
 - No Rust code changed; release channel untouched; no version bump needed.
 - Next sandbox: if feature-research.md changes, update the data lib and the
   counters update themselves.
+
+---
+Task ID: 9 (session 8 — tag-per-release flow + v0.4.1)
+Agent: Super Z (main session)
+Task: Owner: "you didn't change tag for new release — fix this. Make tag
+for each new update release. Fix GitHub Action: make release with new tag,
+not create new release on the old tag."
+
+Work Log:
+- Diagnosed release.yml: dispatch required an EXISTING tag (inputs.tag) so
+  re-runs re-published on the old tag (that is how v0.4.0 was repaired in
+  place); no step ever created a tag. v0.4.0 sat 3 commits behind main.
+- Reworked release.yml (commit 8d8deaa):
+  * new `prepare` job: version from [workspace.package] (Cargo.toml) →
+    tag v$VERSION; on dispatch creates + pushes the NEW annotated tag;
+    on tag push verifies tag == Cargo.toml version (else fail).
+  * guards: already-released version → hard FAIL (no old-tag re-release);
+    stale tag at another commit without release → FAIL; tag at HEAD without
+    release → recovery continue; stale LOCAL tag deleted before creation.
+  * build/release jobs checkout the resolved tag (artifacts == tagged code);
+    every `inputs.tag || github.ref_name` replaced by prepare outputs.
+- Built a 33-check validation harness (scripts/test_release_tagflow.py):
+  YAML + needs wiring, bash -n of all run blocks, guard decision table,
+  and a bare-origin e2e (tag create+push, second dispatch hits guard,
+  peel == HEAD). All green.
+- Cut v0.4.1 through the new flow: bumped 0.4.0→0.4.1 (Cargo.toml + 4
+  Cargo.lock entries), moved CHANGELOG [Unreleased]→[0.4.1], pushed main,
+  dispatched Release (run 36601404367): prepare created + pushed NEW tag
+  v0.4.1 at 8d8deaa, 3 builds + publish + channel deploy all SUCCESS.
+- Verified: GitHub release v0.4.1 (9 assets, notes carry the [0.4.1]
+  changelog + server-only commands); istias.tech latest.json → 0.4.1;
+  0.4.1/PKGBUILD 200 (pkgver=0.4.1, source=istias.tech) after dispatching
+  the Docs mirror self-heal (run 36601843426); channel-root install.sh 200.
+- Docs: worktasks 22.1–22.8, this worklog, CHANGELOG [0.4.1] section.
+
+Stage Summary:
+- Releasing is now: bump version → dispatch → NEW tag + NEW release +
+  channel mirror, automatically. Old-tag re-release is structurally
+  impossible (the workflow refuses).
+- v0.4.1 is live on GitHub and the update channel; existing 0.4.0 installs
+  will see the update via `hyprfetch update --check`.
+- Note for next sandbox: version bump MUST touch Cargo.toml AND the 4
+  workspace entries in Cargo.lock (CI builds with --locked).
