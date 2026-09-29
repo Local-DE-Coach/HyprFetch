@@ -59,7 +59,8 @@ Request:
 ```json
 {
   "urls": ["https://example.com/file.iso"],
-  "save_dir": "/home/user/Downloads",
+  "category": "auto",
+  "save_dir": null,
   "filename": null,
   "segments": 8,
   "qos_override": null,
@@ -68,7 +69,23 @@ Request:
 }
 ```
 
+Save-location resolution (in precedence order):
+
+1. `save_dir` — **direct save**: used verbatim (tilde-expanded), skips
+   auto-categorization.
+2. `category` set to a name (`video`, `pictures`, `music`, `compress`,
+   `documents`, `apps`, `other`) — saves into that category folder
+   (`category_dir_<name>` override or `<base>/<name>`). `none`/`base`
+   saves straight into the base dir.
+3. `category` omitted or `"auto"` — sorted by filename extension when the
+   `categorize` setting is on (default).
+4. Otherwise the base download dir (`~/Downloads` by default).
+
+The resolved directory is created if missing.
+
 Response: `201 Created` with the newly created task objects (one per URL).
+Each task object carries a read-only `category` field derived from the
+filename extension.
 
 ### Get task detail
 
@@ -122,9 +139,14 @@ If `target_bps` is omitted when enabling, defaults to 70% of measured max bandwi
 
 ### Settings
 
-`GET /api/settings` → returns the full settings object.
+`GET /api/settings` → returns the settings map. Secret keys
+(`github_token`, `api_token`) are **masked**: the raw value is replaced by
+a `<key>_set` boolean (`"true"`/`"false"`).
 
-`PATCH /api/settings` → partial update. Some settings require a restart to take effect (noted in the response).
+`PATCH /api/settings` → partial update; secrets are accepted in the patch
+and stored, but never echoed back. Patching any directory key
+(`download_dir`, `categorize`, `category_dir_*`) rebuilds the folder
+layout on disk immediately.
 
 Enforcement status of the seeded keys (be honest in the UI):
 
@@ -132,12 +154,37 @@ Enforcement status of the seeded keys (be honest in the UI):
 |---|---|
 | `qos_enabled`, `qos_target_bps` | yes — engine-wide limiter, restored at startup |
 | `download_dir`, `segments_default` | yes — used by `POST /api/tasks` defaults |
+| `categorize`, `category_dir_*` | yes — auto-sort + per-category folder overrides; folders auto-created |
+| `github_token` | yes — updater token (masked on GET; env/CLI/config take precedence) |
 | `max_concurrent_tasks` | yes — queue pump caps concurrently running tasks (0 = unlimited) |
 | `user_agent` | yes — applied to outgoing requests at startup |
 | `ssrf_block_private` | yes — combined with `--allow-private` at startup |
 | `bind` | informational — the actual bind comes from `--bind` / config / default |
 | `max_connections` | **not enforced yet** (planned global connection cap) |
 | `protocol_pref` | **not enforced yet** (planned HTTP/2/3 selection) |
+
+### Categories
+
+`GET /api/categories` — the folder layout used to auto-sort downloads:
+
+```json
+{
+  "base": "/home/user/Downloads",
+  "categorize": true,
+  "categories": [
+    { "name": "video", "dir": "/home/user/Downloads/video", "overridden": false },
+    { "name": "pictures", "dir": "/home/user/Downloads/pictures", "overridden": false },
+    { "name": "music", "dir": "/home/user/Downloads/music", "overridden": false },
+    { "name": "compress", "dir": "/home/user/Downloads/compress", "overridden": false },
+    { "name": "documents", "dir": "/home/user/Downloads/documents", "overridden": false },
+    { "name": "apps", "dir": "/home/user/Downloads/apps", "overridden": false },
+    { "name": "other", "dir": "/home/user/Downloads/other", "overridden": false }
+  ]
+}
+```
+
+Folders are created automatically at server startup, on settings changes,
+and when a task is created.
 
 ### Server info
 

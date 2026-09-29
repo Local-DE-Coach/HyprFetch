@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hyprfetch_core::categories::{
+    category_for_filename, dir_for_category, ensure_all_dirs, expand_tilde, is_valid_category,
+    override_key, CATEGORIES, SET_CATEGORIZE, SET_DOWNLOAD_DIR,
+};
 use hyprfetch_db::schema::{QosOverride, TaskState};
 use hyprfetch_db::{EventsRepo, SegmentRow, SegmentState, SettingsRepo, TaskRow, TasksRepo};
 
@@ -61,6 +65,10 @@ pub struct TaskDto {
     pub id: String,
     pub url: String,
     pub filename: String,
+    /// Category derived from the filename extension (video / pictures /
+    /// music / compress / documents / apps / other). Matches the folder the
+    /// download is sorted into when auto-categorization is on.
+    pub category: String,
     pub save_path: String,
     pub total_bytes: Option<i64>,
     pub downloaded_bytes: i64,
@@ -79,6 +87,7 @@ pub struct TaskDto {
 impl From<TaskRow> for TaskDto {
     fn from(r: TaskRow) -> Self {
         Self {
+            category: category_for_filename(&r.filename).to_string(),
             id: r.id,
             url: r.url,
             filename: r.filename,
@@ -124,7 +133,15 @@ pub async fn list_tasks(
 #[derive(Debug, Deserialize)]
 pub struct CreateTaskRequest {
     pub urls: Vec<String>,
+    /// Direct-save directory: used verbatim (tilde-expanded) for every task
+    /// in this request. When set, auto-categorization is skipped for these
+    /// tasks — the file lands exactly where you point it.
     pub save_dir: Option<String>,
+    /// `"auto"` (default) sorts by filename extension into the category
+    /// folders under the base download dir; an explicit category name
+    /// (`video`, `pictures`, …) forces that folder; `none` saves straight
+    /// into the base dir.
+    pub category: Option<String>,
     pub filename: Option<String>,
     pub segments: Option<i64>,
     pub qos_override: Option<QosOverride>,
@@ -133,6 +150,60 @@ pub struct CreateTaskRequest {
     /// auto-starting. Will be honored once the scheduler queue lands.
     #[allow(dead_code)]
     pub start_now: Option<bool>,
+}
+
+/// Resolve the save directory for a new task from the request + settings.
+///
+/// Precedence: explicit `save_dir` (direct save) → explicit `category` →
+/// auto-detect by extension (when `categorize` is on) → base download dir.
+/// The chosen directory is created if missing.
+pub(crate) fn resolve_save_dir(
+    save_dir: Option<&str>,
+    category: Option<&str>,
+    filename: &str,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> Result<String, ApiError> {
+    // 1. Direct save: the caller picks the exact directory.
+    if let Some(dir) = save_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(expand_tilde(dir).to_string_lossy().into_owned());
+    }
+
+    // Base dir: setting > $HOME/Downloads (the Linux-desktop default).
+    let base = settings
+        .get(SET_DOWNLOAD_DIR)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()) + "/Downloads");
+
+    // 2. Explicit category from the request.
+    if let Some(cat) = category.map(str::trim).filter(|s| !s.is_empty()) {
+        return match cat {
+            "none" | "base" => Ok(expand_tilde(&base).to_string_lossy().into_owned()),
+            c if is_valid_category(c) => Ok(dir_for_category(c, &base, settings)
+                .to_string_lossy()
+                .into_owned()),
+            other => Err(ApiError::InvalidRequest(format!(
+                "unknown category `{other}` (valid: {} or \"auto\"/\"none\")",
+                CATEGORIES.join(", ")
+            ))),
+        };
+    }
+
+    // 3. Auto-categorize by filename extension (default: on).
+    let categorize = settings
+        .get(SET_CATEGORIZE)
+        .map(|s| s.trim() != "false")
+        .unwrap_or(true);
+    if categorize {
+        let cat = category_for_filename(filename);
+        return Ok(dir_for_category(cat, &base, settings)
+            .to_string_lossy()
+            .into_owned());
+    }
+
+    // 4. Plain base directory.
+    Ok(expand_tilde(&base).to_string_lossy().into_owned())
 }
 
 /// Response shape for `POST /api/tasks`.
@@ -154,18 +225,8 @@ pub async fn create_task(
         ));
     }
 
-    let save_dir = req.save_dir.unwrap_or_else(|| {
-        SettingsRepo::new(&state.db)
-            .get("download_dir")
-            .ok()
-            .flatten()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                // Built-in default on Linux desktops: save onto the user's
-                // Desktop so finished downloads are immediately visible.
-                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()) + "/Desktop"
-            })
-    });
+    let settings_map: std::collections::BTreeMap<String, String> =
+        SettingsRepo::new(&state.db).all()?.into_iter().collect();
 
     let segments = req.segments.unwrap_or_else(|| {
         SettingsRepo::new(&state.db)
@@ -199,6 +260,19 @@ pub async fn create_task(
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "download.bin".into())
         });
+
+        // Directory resolution: direct save > explicit category >
+        // auto-detect by extension > base dir. Missing dirs are created so
+        // the folder exists the moment the task is queued.
+        let save_dir = resolve_save_dir(
+            req.save_dir.as_deref(),
+            req.category.as_deref(),
+            &filename,
+            &settings_map,
+        )?;
+        if let Err(e) = std::fs::create_dir_all(&save_dir) {
+            tracing::warn!(dir = %save_dir, error = %e, "could not pre-create save dir");
+        }
         let save_path = format!("{save_dir}/{filename}");
 
         let row = TaskRow {
@@ -526,15 +600,92 @@ pub async fn set_qos(
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/categories
+// ---------------------------------------------------------------------------
+
+/// One row of `GET /api/categories`.
+#[derive(Serialize)]
+pub struct CategoryInfo {
+    pub name: String,
+    /// Effective (tilde-expanded) directory for this category.
+    pub dir: String,
+    /// True when the user overrode the default `<base>/<name>` location.
+    pub overridden: bool,
+}
+
+/// `GET /api/categories` — the category folder layout used to sort
+/// downloads. Folders are created automatically (startup + settings change).
+pub async fn get_categories(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let settings: std::collections::BTreeMap<String, String> =
+        SettingsRepo::new(&state.db).all()?.into_iter().collect();
+    let base = base_download_dir(&settings);
+    let categorize = settings
+        .get(SET_CATEGORIZE)
+        .map(|s| s.trim() != "false")
+        .unwrap_or(true);
+    let cats: Vec<CategoryInfo> = CATEGORIES
+        .iter()
+        .map(|&c| {
+            let overridden = settings
+                .get(&override_key(c))
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            CategoryInfo {
+                name: c.to_string(),
+                dir: dir_for_category(c, &base, &settings)
+                    .to_string_lossy()
+                    .into_owned(),
+                overridden,
+            }
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "base": expand_tilde(&base).to_string_lossy(),
+        "categorize": categorize,
+        "categories": cats,
+    })))
+}
+
+/// Base download dir from settings, with the `~/Downloads` default.
+fn base_download_dir(settings: &std::collections::BTreeMap<String, String>) -> String {
+    settings
+        .get(SET_DOWNLOAD_DIR)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()) + "/Downloads")
+}
+
+// ---------------------------------------------------------------------------
 // GET/PATCH /api/settings
 // ---------------------------------------------------------------------------
 
+/// Settings values that must never be echoed back to clients verbatim.
+const SENSITIVE_SETTINGS: &[&str] = &["github_token", "api_token"];
+
+/// Return all settings with secret values masked out (replaced by a
+/// `<key>_set` boolean so the UI can show "configured" without the value).
+fn masked_settings(
+    repo: &SettingsRepo<'_>,
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+    let all = repo.all()?;
+    let mut out = std::collections::BTreeMap::new();
+    for (k, v) in all {
+        if SENSITIVE_SETTINGS.contains(&k.as_str()) {
+            out.insert(format!("{k}_set"), (!v.trim().is_empty()).to_string());
+        } else {
+            out.insert(k, v);
+        }
+    }
+    Ok(out)
+}
+
 pub async fn get_settings(
     State(state): State<AppState>,
-) -> Result<Json<HashMap<String, String>>, ApiError> {
-    Ok(Json(
-        SettingsRepo::new(&state.db).all()?.into_iter().collect(),
-    ))
+) -> Result<Json<std::collections::BTreeMap<String, String>>, ApiError> {
+    Ok(Json(masked_settings(&SettingsRepo::new(&state.db))?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -546,7 +697,7 @@ pub struct PatchSettings {
 pub async fn patch_settings(
     State(state): State<AppState>,
     Json(req): Json<PatchSettings>,
-) -> Result<Json<HashMap<String, String>>, ApiError> {
+) -> Result<Json<std::collections::BTreeMap<String, String>>, ApiError> {
     if req.changes.is_empty() {
         return Err(ApiError::InvalidRequest("no settings to patch".into()));
     }
@@ -559,7 +710,23 @@ pub async fn patch_settings(
     for (k, v) in &req.changes {
         s.set(k, v)?;
     }
-    Ok(Json(s.all()?.into_iter().collect()))
+
+    // Directory-relevant changes rebuild the folder layout immediately so
+    // the new location exists before the next download starts.
+    let touched_dirs = req
+        .changes
+        .keys()
+        .any(|k| k == SET_DOWNLOAD_DIR || k == SET_CATEGORIZE || k.starts_with("category_dir_"));
+    if touched_dirs {
+        let all: std::collections::BTreeMap<String, String> = s.all()?.into_iter().collect();
+        let base = base_download_dir(&all);
+        let created = ensure_all_dirs(&base, &all);
+        for d in created {
+            tracing::info!(dir = %d.display(), "created category folder");
+        }
+    }
+
+    Ok(Json(masked_settings(&s)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,6 +1260,262 @@ mod tests {
         assert!(body.contains("bind"));
         assert!(body.contains("127.0.0.1:7780"));
         assert!(body.contains("segments_default"));
+    }
+
+    // -- categories & save dirs ------------------------------------------
+
+    /// Seed `download_dir` to a fresh temp dir; returns its path string.
+    async fn seed_download_dir(state: &AppState) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dl").to_string_lossy().into_owned();
+        // Keep the tempdir alive for the process lifetime (tests are short).
+        std::mem::forget(dir);
+        let app = router(state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "download_dir": path,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        path
+    }
+
+    async fn post_task(state: &AppState, body: serde_json::Value) -> (StatusCode, String) {
+        let app = router(state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let body = body_str(res.into_body()).await;
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn create_task_auto_categorizes_by_extension() {
+        let state = test_state();
+        let base = seed_download_dir(&state).await;
+        let (status, body) = post_task(
+            &state,
+            serde_json::json!({"urls": ["https://example.com/movie.mkv"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let save_path = v["tasks"][0]["save_path"].as_str().unwrap();
+        let category = v["tasks"][0]["category"].as_str().unwrap();
+        assert_eq!(category, "video");
+        assert!(
+            save_path.starts_with(&format!("{base}/video/")),
+            "save_path {save_path} should live under {base}/video/"
+        );
+        assert!(std::path::Path::new(&format!("{base}/video")).is_dir());
+    }
+
+    #[tokio::test]
+    async fn create_task_direct_save_beats_category() {
+        let state = test_state();
+        let base = seed_download_dir(&state).await;
+        let direct = format!("{base}-direct");
+        let (status, body) = post_task(
+            &state,
+            serde_json::json!({
+                "urls": ["https://example.com/clip.mp4"],
+                "save_dir": direct,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let save_path = v["tasks"][0]["save_path"].as_str().unwrap();
+        assert!(
+            save_path.starts_with(&direct),
+            "direct save must win over auto-categorization"
+        );
+        assert!(!save_path.contains("/video/"));
+    }
+
+    #[tokio::test]
+    async fn create_task_explicit_category_and_unknown_rejected() {
+        let state = test_state();
+        let base = seed_download_dir(&state).await;
+        let (status, body) = post_task(
+            &state,
+            serde_json::json!({
+                "urls": ["https://example.com/whatever.bin"],
+                "category": "music",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["tasks"][0]["save_path"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{base}/music/")));
+
+        let (status, _) = post_task(
+            &state,
+            serde_json::json!({
+                "urls": ["https://example.com/x.iso"],
+                "category": "not-a-category",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn categorize_off_lands_in_base_dir() {
+        let state = test_state();
+        let base = seed_download_dir(&state).await;
+        let app = router(state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"categorize": "false"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let (status, body) = post_task(
+            &state,
+            serde_json::json!({"urls": ["https://example.com/song.mp3"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let save_path = v["tasks"][0]["save_path"].as_str().unwrap();
+        assert!(
+            save_path.starts_with(&format!("{base}/song.mp3")),
+            "categorize=false must save into the base dir, got {save_path}"
+        );
+    }
+
+    #[tokio::test]
+    async fn categories_endpoint_lists_all_with_dirs() {
+        let state = test_state();
+        let base = seed_download_dir(&state).await;
+        let app = router(state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/categories")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let cats = v["categories"].as_array().unwrap();
+        assert_eq!(cats.len(), 7);
+        assert!(v["base"].as_str().unwrap().starts_with(&base));
+        for c in cats {
+            assert!(!c["dir"].as_str().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn category_override_is_applied_and_created() {
+        let state = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let music_dir = tmp.path().join("my-music").to_string_lossy().into_owned();
+        std::mem::forget(tmp);
+        let app = router(state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "category_dir_music": music_dir,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            std::path::Path::new(&music_dir).is_dir(),
+            "override dir is auto-created"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_mask_github_token() {
+        let state = test_state();
+        let app = router(state.clone());
+        // Set a token through the API.
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "github_token": "super-secret-value-1234567890",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        assert!(
+            !body.contains("super-secret-value"),
+            "raw token must not leak"
+        );
+        assert!(body.contains("github_token_set"));
+        assert!(body.contains("true"));
+
+        // GET also masks.
+        let app = router(state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_str(res.into_body()).await;
+        assert!(!body.contains("super-secret-value"));
+        assert!(body.contains("github_token_set"));
     }
 
     // -- embedded SPA ---------------------------------------------------

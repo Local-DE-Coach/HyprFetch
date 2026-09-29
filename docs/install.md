@@ -110,8 +110,10 @@ hyprfetch --version   # → hyprfetch 0.2.0
 
 This also installs a desktop entry when you use the release `PKGBUILD`
 (`/usr/share/applications/hyprfetch.desktop`), so "HyprFetch" shows up in
-your desktop menu; the default download directory is `~/Desktop` (override
-with `--download-dir`, the config file, or the UI settings).
+your desktop menu. The default download directory is `~/Downloads`, and
+auto-sort folders (`video`, `pictures`, `music`, `compress`, `documents`,
+`apps`, `other`) are created for you — every folder is editable in the UI
+settings.
 
 See [`development.md`](development.md) for frontend development, tests, and
 code style.
@@ -129,7 +131,7 @@ Useful flags (all have `HYPRFETCH_*` env equivalents — see `--help`):
 | Flag | Default | Meaning |
 |---|---|---|
 | `--bind` | `127.0.0.1:7780` | listen address (keep loopback unless you add auth) |
-| `--download-dir` | `~/Desktop` | where downloads land |
+| `--download-dir` | `~/Downloads` | base folder; category sub-folders are created inside |
 | `--segments` | `8` | default segments per task |
 | `--db-path` | `~/.local/share/hyprfetch/hyprfetch.db` | SQLite state file |
 

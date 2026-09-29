@@ -280,6 +280,28 @@ segmented download, no leak after completion.
 
 ---
 
+## 16. Multi-page UI + category folders + zero-config updates (v0.3.1 re-cut — owner request, APPLIED 2026-09-29)
+
+| ID | Feature | Status | Proof |
+|---|---|---|---|
+| 16.1 | Multi-page web UI: hash router + Dashboard / Tasks / Settings / Updates pages | ✅ | E2E UI phase (index + hashed assets + SPA deep-link fallback); pages build in one tiny bundle |
+| 16.2 | Dashboard: live speed, per-state counters, active downloads, recent finished, folder overview | ✅ | manual smoke + E2E server endpoints feeding it |
+| 16.3 | Tasks page: full table (filters, search, progress, save path, per-task controls) | ✅ | E2E task lifecycle phases |
+| 16.4 | Category model: 7 folders (video/pictures/music/compress/documents/apps/other), extension map in `hyprfetch-core/src/categories.rs` | ✅ | unit tests `categories::*` (13 cases) |
+| 16.5 | Folders auto-created at startup, on settings change, and at task creation | ✅ | E2E "all category folders auto-created on disk" + "category override dir auto-created" |
+| 16.6 | Auto-sort by file type (default on), explicit `category` per task, `none` = base dir | ✅ | E2E: zip→compress/, music category, none→base |
+| 16.7 | Direct save (`save_dir`) wins over categorization | ✅ | E2E "direct save beats category" |
+| 16.8 | Per-category overrides `category_dir_<name>` + Settings page editors | ✅ | E2E override dir created; unit test `dir_for_category_prefers_override` |
+| 16.9 | `GET /api/categories` endpoint; `category` field on task DTOs | ✅ | E2E categories phase |
+| 16.10 | Default base dir `~/Desktop` → `~/Downloads` | ✅ | docs + E2E base check |
+| 16.11 | Zero-config updater for clone installs: PAT parsed from clone origin URL (`~/HyprFetch` + common paths + `[update] source_dir`) | ✅ | unit tests `pat_parsing_from_git_urls`; live `update --check` authenticated with only a clone in `$HOME` |
+| 16.12 | GitHub token settable from UI settings, masked on `GET /api/settings` (`<key>_set`) | ✅ | unit test `settings_mask_github_token`; E2E mask check |
+| 16.13 | E2E suite rebuilt post-sandbox-recycle: 43/43 full + 4/4 large (1 GiB sha256-exact) | ✅ | `/home/z/my-project/scripts/e2e_full_test.py`, `e2e_large_test.py` |
+
+**Measured:** E2E full suite 43/43 green; 1 GiB download byte-exact with
+mid-flight pause/resume (16 MB/s loopback incl. per-chunk pattern
+generation); cargo test 130 green; clippy `-D warnings` clean.
+
 ## Bug tracker (open)
 
 | ID | Bug | Status | Notes |

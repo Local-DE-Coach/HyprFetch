@@ -136,6 +136,55 @@ pub fn resolve_or_generate_token(
     Ok((token, true))
 }
 
+/// Common clone locations scanned when the updater has no explicit token.
+/// `git clone https://<PAT>@github.com/…` (the documented install path) puts
+/// the PAT right into the origin URL, so a plain clone install needs zero
+/// extra configuration for `hyprfetch update` to work.
+const CLONE_SCAN_PATHS: &[&str] = &[
+    "HyprFetch",
+    "Projects/HyprFetch",
+    "src/HyprFetch",
+    "code/HyprFetch",
+    "Developer/HyprFetch",
+];
+
+/// Try to find a GitHub PAT in the origin URL of a local HyprFetch clone.
+/// Checks the configured `[update] source_dir` first, then the well-known
+/// clone locations under `$HOME`. Returns `None` when nothing is found.
+pub fn detect_token_from_source_clones(source_dir: Option<&Path>) -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(d) = source_dir {
+        candidates.push(d.to_path_buf());
+    }
+    for rel in CLONE_SCAN_PATHS {
+        candidates.push(Path::new(&home).join(rel));
+    }
+    for dir in candidates {
+        if !dir.join(".git").exists() {
+            continue;
+        }
+        let url = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .arg("config")
+            .arg("--get")
+            .arg("remote.origin.url")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        if let Some(token) = url
+            .as_deref()
+            .and_then(hyprfetch_core::update::parse_pat_from_git_url)
+        {
+            tracing::debug!(clone = %dir.display(), "resolved updater token from clone origin URL");
+            return Some(token);
+        }
+    }
+    None
+}
+
 /// Resolve the updater config from CLI flags, env vars, the config file's
 /// `[update]` section and the settings DB (in that precedence order).
 pub fn resolve_update_cfg(repo_flag: Option<&str>, token_flag: Option<&str>) -> UpdateConfig {
@@ -190,7 +239,14 @@ pub fn resolve_update_cfg_with_db(
                 .and_then(|u| u.token.clone())
                 .filter(|s| !s.trim().is_empty())
         })
-        .or(db_token);
+        .or(db_token)
+        // Last resort for clone-based installs: the PAT lives in the origin
+        // URL of the local source clone, so reuse it (zero-config updates).
+        .or_else(|| {
+            detect_token_from_source_clones(
+                cfg_update.as_ref().and_then(|u| u.source_dir.as_deref()),
+            )
+        });
 
     let api_base = std::env::var("HYPRFETCH_UPDATE_API")
         .ok()

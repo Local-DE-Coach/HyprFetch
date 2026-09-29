@@ -255,16 +255,44 @@ async fn run_serve(
         .with_context(|| format!("opening db at {}", db_path.display()))?;
 
     // Persist the download_dir override into settings if provided.
-    if let Some(dir) = &download_dir {
+    {
         let s = hyprfetch_db::SettingsRepo::new(&db);
-        s.set("download_dir", &dir.to_string_lossy())
-            .context("writing download_dir setting")?;
-    }
-    // Persist the segments override into settings if provided.
-    if let Some(segs) = segments {
-        let s = hyprfetch_db::SettingsRepo::new(&db);
-        s.set("segments_default", &segs.to_string())
-            .context("writing segments_default setting")?;
+        if let Some(dir) = &download_dir {
+            s.set(hyprfetch_core::SET_DOWNLOAD_DIR, &dir.to_string_lossy())
+                .context("writing download_dir setting")?;
+        }
+        // Persist the segments override into settings if provided.
+        if let Some(segs) = segments {
+            s.set("segments_default", &segs.to_string())
+                .context("writing segments_default setting")?;
+        }
+
+        // Category folders: created automatically so the user never has to
+        // mkdir anything. Runs on every startup (idempotent) and whenever
+        // directory settings change via the API.
+        let all: std::collections::BTreeMap<String, String> = s
+            .all()
+            .context("reading settings for folder layout")?
+            .into_iter()
+            .collect();
+        let base = all
+            .get(hyprfetch_core::SET_DOWNLOAD_DIR)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                // Seed the default so the settings UI shows the real value.
+                let def = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()) + "/Downloads";
+                s.set(hyprfetch_core::SET_DOWNLOAD_DIR, &def).ok();
+                def
+            });
+        let created = hyprfetch_core::categories::ensure_all_dirs(&base, &all);
+        if !created.is_empty() {
+            for d in &created {
+                tracing::info!(dir = %d.display(), "created category folder");
+            }
+            tracing::info!(base = %base, "download folder layout ensured");
+        }
     }
 
     let addr: SocketAddr = bind

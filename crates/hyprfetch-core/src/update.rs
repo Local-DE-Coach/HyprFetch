@@ -142,6 +142,36 @@ pub fn version_newer(candidate: &str, current: &str) -> bool {
     false
 }
 
+/// Parse a PAT out of a git remote URL. Clone-based installs carry the
+/// token right in the origin URL (`https://<PAT>@github.com/…`), which lets
+/// `hyprfetch update` work with zero extra configuration.
+///
+/// Accepted shapes:
+/// - `https://<token>@github.com/owner/repo.git`
+/// - `https://x-access-token:<token>@github.com/…`
+/// - `https://<any-user>:<token>@github.com/…` (GitHub accepts any username
+///   with a PAT — e.g. `https://myuser:<PAT>@github.com/…`)
+///
+/// Anything else (SSH remotes, token-less URLs) returns `None`.
+pub fn parse_pat_from_git_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let (creds, host) = rest.split_once('@')?;
+    if !host.starts_with("github.com") {
+        return None;
+    }
+    let token = match creds.split_once(':') {
+        // user:pass form — the password part is the token.
+        Some((_user, pass)) if !pass.is_empty() => pass,
+        Some(_) => return None,
+        None => creds,
+    };
+    let token = token.trim();
+    if token.len() < 20 {
+        return None; // too short to be a PAT — avoid picking up junk
+    }
+    Some(token.to_string())
+}
+
 /// The release tarball naming scheme is `hyprfetch-<ver>-<target>.tar.gz`.
 /// Derive the target triple candidates for the running binary (Linux-first).
 fn target_candidates() -> Vec<String> {
@@ -513,5 +543,46 @@ mod tests {
         assert!(cfg.validate().is_ok());
         cfg.repo = "just-a-name".into();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn pat_parsing_from_git_urls() {
+        let pat = "t".repeat(44); // synthetic 44-char token, not a real credential
+        assert_eq!(
+            parse_pat_from_git_url(&format!(
+                "https://{pat}@github.com/Local-DE-Coach/HyprFetch.git"
+            )),
+            Some(pat.to_string())
+        );
+        assert_eq!(
+            parse_pat_from_git_url(&format!("https://x-access-token:{pat}@github.com/o/r.git")),
+            Some(pat.to_string())
+        );
+        assert_eq!(
+            parse_pat_from_git_url(&format!("https://oauth2:{pat}@github.com/o/r")),
+            Some(pat.to_string())
+        );
+        assert_eq!(
+            // Any username works with a PAT on GitHub — the common
+            // `git clone https://<user>:<PAT>@…` shape.
+            parse_pat_from_git_url(&format!("https://someuser:{pat}@github.com/o/r.git")),
+            Some(pat.to_string())
+        );
+        // Negative cases.
+        assert_eq!(parse_pat_from_git_url("https://github.com/o/r.git"), None);
+        assert_eq!(
+            parse_pat_from_git_url("git@github.com:Local-DE-Coach/HyprFetch.git"),
+            None
+        );
+        assert_eq!(
+            parse_pat_from_git_url("https://short@github.com/o/r"),
+            None,
+            "tiny strings are not PATs"
+        );
+        assert_eq!(
+            parse_pat_from_git_url("https://user:pass@gitlab.com/o/r"),
+            None,
+            "non-github hosts are ignored"
+        );
     }
 }

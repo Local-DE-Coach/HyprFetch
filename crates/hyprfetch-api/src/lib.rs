@@ -157,6 +157,10 @@ pub fn router_with_token(state: AppState, token: impl Into<Option<String>>) -> R
             "/api/settings",
             axum::routing::get(routes::get_settings).patch(routes::patch_settings),
         )
+        .route(
+            "/api/categories",
+            axum::routing::get(routes::get_categories),
+        )
         .route("/api/server", axum::routing::get(routes::server_info))
         .route(
             "/api/update/check",

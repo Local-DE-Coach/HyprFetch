@@ -32,6 +32,47 @@ which commit**.
 
 ## Sessions
 
+### [2026-09-29] v0.3.1 RE-CUT — multi-page UI, category folders, zero-config clone updates, 43/43 + 1 GiB E2E — Super Z sandbox
+- **Commit(s):** (this commit) — re-tag `v0.3.1` after CI build; supersedes the earlier `v0.3.1` cut.
+- **Did (owner feedback applied — "aply it, test before commit"):**
+  - **Multi-page web UI** (`ui/src/lib/{router,store,format}.js`, `lib/TaskCard.svelte`,
+    `pages/{Dashboard,Tasks,Settings,Updates}.svelte`, rewritten `App.svelte`): hash-routed
+    4-page SPA — Dashboard (speed, per-state counters, active downloads, recent finished,
+    folder overview), Tasks (filter/search table + per-task controls), Settings (folders,
+    auto-sort, queue, QoS, SSRF, GitHub token), Updates (version check + install & restart).
+    Still pure Svelte + rust-embed — DaisyUI/Tailwind remain build-time only (no SvelteKit
+    runtime; keeps RAM minimal).
+  - **Category save folders** (`hyprfetch-core/src/categories.rs`, routes, binary startup):
+    7 folders `video/pictures/music/compress/documents/apps/other` under `~/Downloads`,
+    auto-created at startup / settings change / task creation; extension-based auto-sort
+    (default on), explicit `category` per task, `save_dir` direct-save wins, per-category
+    `category_dir_<name>` overrides; `GET /api/categories`; `category` field on task DTOs;
+    default base dir `~/Desktop` → `~/Downloads`.
+  - **Zero-config updates for clone installs** (`update.rs::parse_pat_from_git_url`,
+    `helpers.rs::detect_token_from_source_clones`): when no token is configured the updater
+    reads the PAT from the local clone's origin URL (`~/HyprFetch`, `~/Projects/…`,
+    `~/src/…`, `~/code/…`, `~/Developer/…`, `[update] source_dir`). Verified live:
+    authenticated `update --check` with only a clone in `$HOME`. Also: `github_token`
+    settable from the UI settings and **masked** on `GET /api/settings` (`<key>_set`).
+  - **Docs:** README defaults, `docs/install.md` (defaults table + update token chain),
+    `docs/api.md` (category resolution, categories endpoint, settings masking).
+  - **E2E rebuilt after full sandbox recycle** (rustup reinstalled, repo re-cloned):
+    `scripts/e2e_full_test.py` 43 checks green (incl. categories, direct save, masking,
+    WS frames, restart hand-off, cold-restart resume), `scripts/e2e_large_test.py` 4/4
+    (1 GiB sha256-exact, mid-flight pause/resume, 16 MB/s loopback).
+- **Why:** owner reported the web UI had only one page, wanted per-type save folders
+  (auto-created), a working `hyprfetch update` for a clone-based install, and the update
+  version visible in the UI; earlier v0.3.1 cut shipped run modes/updater/sleep mode but
+  not these, so v0.3.1 is re-cut to be the true "last webUI+backend" release.
+- **Result / state:** cargo test 130 green; clippy `-D warnings` clean; fmt clean;
+  E2E 43/43 + 4/4. All owner requests from the latest message implemented and tested.
+- **Notes for next sandbox:** UI dist is committed (rust-embed) — run `npm ci && npm run
+  build` in `crates/hyprfetch-api/ui/` after UI edits, then `cargo build`. Unit tests pin
+  `HOME=/tmp/hf-test-home` in the two HOME-touching `categories.rs` tests (parallel-safe).
+  E2E uses ports 7783/7893 (full) and 7785/7895 (large) — set `HF_PORT`/`HF_FSRV_PORT`
+  to override. The updater's clone scan reads `git config remote.origin.url` only; it
+  never logs the token.
+
 ### [2026-09-29] v0.3.1 — run modes + in-app updater APPLIED, DaisyUI UI, sleep mode, full E2E (73/73) — Super Z sandbox
 - **Commit(s):** (this commit) — tag `v0.3.1`.
 - **Did:**

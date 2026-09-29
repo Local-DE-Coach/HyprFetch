@@ -10,7 +10,48 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 - Nothing yet.
 
-## [0.3.1] — 2026-09-29
+## [0.3.1] — 2026-09-29 (re-cut with the multi-page UI + category folders)
+
+### Added — multi-page web UI (owner request, applied)
+- The web UI is now a **4-page app** (hash-routed SPA, still one tiny
+  embedded bundle — no SvelteKit runtime):
+  - **Dashboard** — live speed, per-state counters (downloading / queued /
+    paused / done / errors), every active download with progress, recent
+    finished list, and a "save folders" overview.
+  - **Tasks** — full table of all tasks with filters (all / active /
+    downloading / done / errors), search, progress, speed, save path, and
+    per-task controls (pause / resume / retry / cancel / remove).
+  - **Settings** — save folders, auto-sort toggle, per-category folder
+    overrides, queue defaults, QoS cap, SSRF protection toggle, and the
+    GitHub token for updates.
+  - **Updates** — current version vs latest release, one-click
+    install-and-restart, plain restart, and the CLI equivalents.
+
+### Added — category save folders (owner request, applied)
+- Downloads are **auto-sorted by file type** into
+  `~/Downloads/{video,pictures,music,compress,documents,apps,other}`.
+- The folders are **created automatically** at server startup, whenever
+  directory settings change, and when a task is created — nothing to mkdir.
+- Default base dir moved from `~/Desktop` to **`~/Downloads`** (the
+  standard Linux location; still overridable via `--download-dir`,
+  config, or the UI).
+- Each category folder can be **overridden individually**
+  (`category_dir_<name>` setting / Settings page); a task can force a
+  category (`POST /api/tasks` `category`) or **direct-save** to an exact
+  folder (`save_dir`) — direct save always wins.
+- `GET /api/categories` exposes the effective layout for the UI and scripts.
+- Task DTOs carry a read-only `category` field (extension-derived).
+
+### Added — updater works out-of-the-box for clone installs (owner request, applied)
+- When no token is configured anywhere (`--token` → env → config →
+  settings DB), the updater now **reads the PAT from the local source
+  clone's origin URL** (`~/HyprFetch`, `~/Projects/HyprFetch`, `~/src/…`,
+  `~/code/…`, `~/Developer/…`, or `[update] source_dir`). A
+  `git clone https://<USER>:<PAT>@github.com/…` install needs **zero extra
+  configuration** for `hyprfetch update --check` / `hyprfetch update`.
+- The GitHub token can be saved from the UI settings page
+  (`github_token`); it is stored locally and **masked on
+  `GET /api/settings`** (`github_token_set`), never echoed back.
 
 ### Added — run modes, in-app updates, resource footprint (owner request, applied)
 - **Node.js-style run modes:**

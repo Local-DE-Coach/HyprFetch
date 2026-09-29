@@ -23,13 +23,15 @@ export async function listTasks(state = 'active') {
   return body.tasks ?? []
 }
 
-export async function createTasks({ urls, saveDir, segments }) {
+export async function createTasks({ urls, saveDir, category, filename, segments }) {
   const res = await fetch('/api/tasks', {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify({
       urls,
       save_dir: saveDir || undefined,
+      category: category || undefined,
+      filename: filename || undefined,
       segments: segments || undefined,
     }),
   })
@@ -77,6 +79,23 @@ export async function setQos(enabled, targetBps) {
 
 export async function getServerInfo() {
   return handle(await fetch('/api/server'))
+}
+
+export async function getCategories() {
+  return handle(await fetch('/api/categories'))
+}
+
+export async function getSettings() {
+  return handle(await fetch('/api/settings'))
+}
+
+export async function patchSettings(patch) {
+  const res = await fetch('/api/settings', {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(patch),
+  })
+  return handle(res)
 }
 
 export async function checkUpdate() {

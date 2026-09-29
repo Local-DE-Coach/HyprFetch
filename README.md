@@ -158,7 +158,8 @@ HyprFetch reads a config file if present — default location
 
 Key defaults:
 - Bind: `127.0.0.1:7780` (loopback only by default — non-loopback binds require the API token, see `docs/api.md`)
-- Default download dir: `~/Desktop` (falls back to `/tmp/Desktop` when `HOME` is unset; override with `--download-dir`, the config file, or the UI settings)
+- Default download dir: `~/Downloads` (override with `--download-dir`, the config file, or the UI settings)
+- Category folders: `~/Downloads/{video,pictures,music,compress,documents,apps,other}` — created automatically at startup, downloads auto-sorted by file type (each folder is overridable in the UI settings)
 - Default segments per task: 8
 - Max concurrent tasks: 3 (queue pump; 0 = unlimited)
 - QoS: off by default

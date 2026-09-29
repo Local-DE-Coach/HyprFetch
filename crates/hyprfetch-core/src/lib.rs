@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod categories;
 pub mod engine;
 pub mod events;
 pub mod http_client;
@@ -15,6 +16,10 @@ pub mod ssrf;
 pub mod task;
 pub mod update;
 
+pub use categories::{
+    category_for_filename, ensure_all_dirs, override_key, CATEGORIES, SET_CATEGORIZE,
+    SET_DOWNLOAD_DIR,
+};
 pub use engine::{Engine, EngineError};
 pub use events::{EngineEvent, EventBus};
 pub use http_client::{ExtraHeaders, HttpClient, HttpError, ProbeResult, DEFAULT_USER_AGENT};
