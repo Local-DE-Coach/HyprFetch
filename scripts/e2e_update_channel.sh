@@ -239,7 +239,23 @@ cmp -s "$LOCKED/hyprfetch" "$BIN"
 check "binary was left untouched" $?
 [ ! -e "$LOCKED/hyprfetch.old" ] && [ ! -e "$LOCKED/hyprfetch.new" ]
 check "no .old/.new leftovers in the system dir" $?
-if [ -n "$(ls /tmp 2>/dev/null | grep '^hyprfetch-update-')" ]; then
+# v0.4.7 design: a needs_password outcome KEEPS the staged binary on disk
+# (the one-time one-click setup consumes it without re-downloading). So a
+# leftover is acceptable ONLY when it carries that payload; anything else
+# (tarballs, empty dirs) is a leak.
+STAGING_OK=0
+for D in /tmp/hyprfetch-update-*; do
+  [ -e "$D" ] || continue
+  if [ -f "$D/hyprfetch" ] && [ ! -e "$D/asset.tar.gz" ]; then
+    STAGING_OK=1
+  else
+    STAGING_OK=0
+    break
+  fi
+done
+if [ -n "$(ls /tmp 2>/dev/null | grep '^hyprfetch-update-')" ] && [ "$STAGING_OK" = "1" ]; then
+  check "staging leftovers are a valid pending one-click update payload" 0
+elif [ -n "$(ls /tmp 2>/dev/null | grep '^hyprfetch-update-')" ]; then
   check "no staging leftovers in /tmp" 1
 else
   check "no staging leftovers in /tmp" 0

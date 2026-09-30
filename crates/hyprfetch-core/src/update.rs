@@ -768,6 +768,7 @@ pub async fn apply_with_progress(
 
 /// A unique user-writable staging directory for one update attempt.
 fn staging_dir() -> PathBuf {
+    sweep_stale_staging();
     std::env::temp_dir().join(format!(
         "hyprfetch-update-{}-{}",
         std::process::id(),
@@ -776,6 +777,34 @@ fn staging_dir() -> PathBuf {
             .map(|d| d.as_nanos())
             .unwrap_or(0),
     ))
+}
+
+/// Best-effort hygiene: staging dirs older than 1 h are dead weight — a
+/// pending one-click update expires after 1 h anyway (the WebUI asks the
+/// user to re-run Check + Install). Never fails the update.
+fn sweep_stale_staging() {
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .saturating_sub(3600);
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for e in entries.flatten() {
+            if !e.file_name().to_string_lossy().starts_with("hyprfetch-update-") {
+                continue;
+            }
+            let old = e
+                .metadata()
+                .and_then(|md| md.modified())
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if old < cutoff {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
 }
 
 /// Privilege ladder for a system-owned binary. Each rung is tried in order;
