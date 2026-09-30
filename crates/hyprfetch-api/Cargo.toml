@@ -27,6 +27,9 @@ uuid.workspace = true
 rusqlite.workspace = true
 anyhow.workspace = true
 futures.workspace = true
+reqwest.workspace = true
+tar.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

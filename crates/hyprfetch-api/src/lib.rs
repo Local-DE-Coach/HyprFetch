@@ -9,6 +9,7 @@ mod error;
 mod routes;
 mod ui;
 mod usage;
+mod widget;
 mod ws;
 
 pub use auth::require_bearer;
@@ -238,6 +239,18 @@ pub fn router_with_token(state: AppState, token: impl Into<Option<String>>) -> R
         .route(
             "/api/update/stale-copies/fix",
             axum::routing::post(routes::update_fix_stale_copies),
+        )
+        .route(
+            "/api/widget/status",
+            axum::routing::get(widget::widget_status),
+        )
+        .route(
+            "/api/widget/install",
+            axum::routing::post(widget::widget_install),
+        )
+        .route(
+            "/api/widget/uninstall",
+            axum::routing::post(widget::widget_uninstall),
         )
         .route("/api/open-folder", axum::routing::post(routes::open_folder))
         .route(

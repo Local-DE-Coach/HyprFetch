@@ -28,20 +28,31 @@ From an extracted release tree (this directory):
 ./install.sh
 ```
 
-Or directly from the update channel (no download needed):
+Or directly from the update channel (no download needed) — works under
+`sh`, `dash`, `bash`, `zsh` or any POSIX shell:
 
 ```bash
-curl -fsSL https://istias.tech/hyprfetch/updates/widget-install.sh | sh
+curl -fsSL https://istias.tech/hyprfetch/updates/install.sh | sh   # HyprFetch itself
+curl -fsSL https://istias.tech/hyprfetch/updates/widget-install.sh | sh   # this widget
 ```
 
-Then add one line to `~/.config/quickshell/ii/modules/bar/Bar.qml` inside the
-bar layout (see the installer output) and reload:
+The installer copies the QML files into
+`~/.config/quickshell/ii/modules/downloadManager` and **automatically wires
+the widget into the ii bar** (it edits `modules/ii/bar/BarContent.qml`,
+inserting the import and a marked `DownloadWidget {}` block after the
+`layoutDirection: Qt.RightToLeft` anchor; the original is saved once as
+`BarContent.qml.bak-hyprfetch`). If your layout is unusual it prints the
+exact two lines to add instead of touching the file. You can also install
+it with one click from the WebUI: **Settings → Desktop widget**.
+
+Reload the shell and the icon appears in the bar's right section:
 
 ```bash
-qs -c illogical-impulse kill && qs -c illogical-impulse &
+qs -c ii kill; qs -c ii &
 ```
 
-Uninstall: `./install.sh --uninstall`
+Uninstall: `./install.sh --uninstall` (or the WebUI Remove button) — it
+removes the files AND reverts the bar edit to the byte.
 
 ## Files
 

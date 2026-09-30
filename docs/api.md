@@ -370,6 +370,36 @@ manager).
 `POST /api/update/restart` → just the drain → re-exec → auto-resume part,
 without an update.
 
+## Desktop widget (v0.5.0)
+
+The Quickshell bar widget (illogical-impulse) is manageable from the WebUI
+(Settings → Desktop widget). Everything lives under `$HOME` — the endpoints
+never touch privileged paths.
+
+`GET /api/widget/status` →
+`{ qs_root, qs_found, quickshell_found, hyprfetch_found, installed,
+integrated, bar_file, version, up_to_date, reload_hint }` — `qs_root` is
+`~/.config/quickshell/ii` (override via `HYPRFETCH_QS_ROOT`), `installed`
+means `modules/downloadManager/DownloadWidget.qml` exists, `integrated`
+means the bar QML references `DownloadWidget`.
+
+`POST /api/widget/install` → downloads `widget.tar.gz` from the update
+channel (same channel as the app updater — no GitHub), extracts the
+`downloadManager/` tree (regular files only, traversal refused), wires the
+bar QML with a marker-based edit (import + `DownloadWidget {}` after the
+`layoutDirection: Qt.RightToLeft` anchor; `.bak-hyprfetch` backup kept;
+unknown layouts are left untouched and reported in `note`) and records the
+state in `~/.local/share/download-manager/widget.json`. Returns the status
+body plus `note` when the bar could not be auto-edited.
+
+`POST /api/widget/uninstall` → removes the module dir, strips the marker
+block + import from the bar QML (restoring it byte-identically) and deletes
+the state file. Returns the status body plus `bar_reverted`.
+
+The POSIX installer (`curl …/widget-install.sh | sh`) performs the same two
+edits — the battery proves installer and API produce byte-identical bar
+files.
+
 ## WebSocket
 
 `GET /ws` — upgrade to WebSocket; the server pushes engine events as JSON

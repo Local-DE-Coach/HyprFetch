@@ -217,8 +217,14 @@ jobs:
         run: |
           VERSION="${{ needs.prepare.outputs.tag }}"
           VERSION="${VERSION#v}"
+          # The documented install command is `curl … | sh` — the script MUST
+          # be POSIX sh (v0.5.0: the bash-only version crashed under dash).
+          # `sh -n` is the real gate; `bash -n` is kept as a bonus.
+          sh -n widget/install.sh
           bash -n widget/install.sh
           test -f widget/downloadManager/DownloadWidget.qml
+          test -f widget/downloadManager/components/RecentPopup.qml
+          test -f widget/downloadManager/utils/DownloadProcess.qml
           tar czf "hyprfetch-widget-${VERSION}.tar.gz" -C widget install.sh README.md downloadManager
           sha256sum "hyprfetch-widget-${VERSION}.tar.gz" > "hyprfetch-widget-${VERSION}.tar.gz.sha256"
           ls -la "hyprfetch-widget-${VERSION}.tar.gz"*

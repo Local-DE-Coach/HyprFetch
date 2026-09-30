@@ -13,6 +13,10 @@
   } from '../lib/theme.js'
   import { getServerInfo } from '../api.js'
 
+  import {
+    getWidgetStatus, installWidget, uninstallWidget,
+  } from '../api.js'
+
   // ---- save folders ----
   let baseDir = ''
   let categorize = true
@@ -144,7 +148,41 @@
 
   onMount(async () => {
     try { quietState = (await getServerInfo()).quiet ?? false } catch (_) { /* ignore */ }
+    try { widget = await getWidgetStatus() } catch (_) { /* widget card stays hidden */ }
   })
+
+  // ---- desktop widget (Quickshell bar, v0.5.0) ----
+  // One card to set up the illogical-impulse bar widget: install the QML
+  // files into ~/.config/quickshell/ii/modules/downloadManager and wire
+  // DownloadWidget into the bar layout — all under $HOME, no terminal.
+  let widget = null
+  let widgetBusy = false
+
+  async function doWidgetInstall() {
+    widgetBusy = true
+    try {
+      widget = await installWidget()
+      notify(widget.integrated
+        ? 'desktop widget installed and wired into your bar ✓ — reload the shell to see it'
+        : 'desktop widget installed — check the note in the card')
+    } catch (e) {
+      notify(`widget install failed: ${e.message}`)
+    } finally {
+      widgetBusy = false
+    }
+  }
+
+  async function doWidgetUninstall() {
+    widgetBusy = true
+    try {
+      widget = await uninstallWidget()
+      notify('desktop widget removed — reload your shell')
+    } catch (e) {
+      notify(`widget uninstall failed: ${e.message}`)
+    } finally {
+      widgetBusy = false
+    }
+  }
 
   async function saveApp() {
     savingApp = true
@@ -163,13 +201,14 @@
   // ---- appearance (themes) ----
   // 5 styles × dark/light, all static CSS — switching costs nothing.
 
-  // Representative daisyUI colors per style for the picker swatches.
+  // Representative daisyUI colors per style for the picker swatches
+  // (matches the custom palettes in tailwind.config.js, v0.5.0).
   const SWATCH = {
-    slate: { primary: '#22c55e', base: '#1d232a', accent: '#71ccdf' },
-    ocean: { primary: '#38bdf8', base: '#0f172a', accent: '#60a5fa' },
-    forest: { primary: '#4ade80', base: '#171d1a', accent: '#2f7461' },
-    coffee: { primary: '#fbbd23', base: '#291c16', accent: '#d19a66' },
-    cyber: { primary: '#e879f9', base: '#1a1032', accent: '#7c3aed' },
+    slate: { primary: '#8d7bfa', base: '#191831', accent: '#35d0e8' },
+    ocean: { primary: '#4cc3fa', base: '#0c1b2c', accent: '#2dd4bf' },
+    forest: { primary: '#52d983', base: '#0f1f16', accent: '#a3e635' },
+    coffee: { primary: '#ffb224', base: '#211710', accent: '#c084fc' },
+    cyber: { primary: '#e879f9', base: '#1b1038', accent: '#22d3ee' },
   }
 
 </script>
@@ -312,6 +351,69 @@
       </div>
     </div>
   </section>
+
+  <!-- Desktop widget (v0.5.0): set up the Quickshell bar widget in one click -->
+  {#if widget}
+    <section class="card border border-base-300 bg-base-200 shadow-sm lg:col-span-2">
+      <div class="card-body gap-3 p-5">
+        <h2 class="card-title text-base">
+          Desktop widget
+          <span class="badge badge-sm badge-ghost">Hyprland bar · near-zero RAM</span>
+        </h2>
+        <p class="text-xs opacity-60">
+          A download icon for your <a class="link" href="https://ii.clsty.link/en/dev/project-contrib/" target="_blank" rel="noreferrer">illogical-impulse</a> bar:
+          hover for recent downloads, click to paste a URL, live progress while
+          anything downloads. It watches a tiny status file — no polling, no
+          extra processes (~0.5 MB at idle).
+        </p>
+
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <span class="badge {widget.qs_found ? 'badge-success' : 'badge-error'} badge-outline">
+            ii config {widget.qs_found ? 'found' : 'missing'}
+          </span>
+          <span class="badge {widget.quickshell_found ? 'badge-success' : 'badge-warning'} badge-outline">
+            quickshell {widget.quickshell_found ? 'found' : 'not on PATH'}
+          </span>
+          <span class="badge {widget.hyprfetch_found ? 'badge-success' : 'badge-warning'} badge-outline">
+            hyprfetch CLI {widget.hyprfetch_found ? 'found' : 'not on PATH'}
+          </span>
+          {#if widget.installed}
+            <span class="badge {widget.integrated ? 'badge-success' : 'badge-warning'} badge-outline">
+              {widget.integrated ? 'wired into bar ✓' : 'files only — not wired'}
+            </span>
+            <span class="badge badge-ghost badge-outline">v{widget.version ?? '?'}</span>
+          {/if}
+        </div>
+
+        {#if widget.note}
+          <div class="alert alert-warning py-2 px-3 text-xs" role="alert">
+            <span>{widget.note}</span>
+          </div>
+        {/if}
+
+        <div class="flex flex-wrap items-center gap-2">
+          {#if widget.installed && widget.up_to_date && widget.integrated}
+            <span class="text-xs opacity-60">installed at <code class="font-mono">{widget.qs_root}/modules/downloadManager</code></span>
+          {:else}
+            <button class="btn btn-primary btn-sm" disabled={widgetBusy} on:click={doWidgetInstall}>
+              {widgetBusy ? 'Installing…'
+                : widget.installed ? (widget.up_to_date ? 'Reinstall' : 'Update widget') : 'Install widget'}
+            </button>
+          {/if}
+          {#if widget.installed}
+            <button class="btn btn-ghost btn-sm" disabled={widgetBusy} on:click={doWidgetUninstall}>Remove</button>
+          {/if}
+        </div>
+
+        {#if widget.installed}
+          <p class="text-xs opacity-60">
+            Apply now by reloading the shell:
+            <code class="font-mono select-all">{widget.reload_hint}</code>
+          </p>
+        {/if}
+      </div>
+    </section>
+  {/if}
 
   <!-- Appearance: 5 theme styles × dark/light, synced on the server -->
   <section class="card border border-base-300 bg-base-200 shadow-sm lg:col-span-2">

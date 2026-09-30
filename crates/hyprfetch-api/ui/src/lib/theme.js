@@ -10,11 +10,11 @@ import { writable } from 'svelte/store'
 import { patchSettings } from '../api.js'
 
 export const THEME_STYLES = [
-  { id: 'slate', label: 'Slate', desc: 'neutral gray · the classic look', dark: 'dim', light: 'light' },
-  { id: 'ocean', label: 'Ocean', desc: 'calm blue', dark: 'night', light: 'winter' },
-  { id: 'forest', label: 'Forest', desc: 'deep green', dark: 'forest', light: 'garden' },
-  { id: 'coffee', label: 'Coffee', desc: 'warm brown & amber', dark: 'coffee', light: 'autumn' },
-  { id: 'cyber', label: 'Cyber', desc: 'violet neon', dark: 'synthwave', light: 'valentine' },
+  { id: 'slate', label: 'Indigo', desc: 'vivid indigo · the colorful default', dark: 'dim', light: 'light' },
+  { id: 'ocean', label: 'Ocean', desc: 'sky blue on deep sea', dark: 'night', light: 'winter' },
+  { id: 'forest', label: 'Forest', desc: 'fresh emerald green', dark: 'forest', light: 'garden' },
+  { id: 'coffee', label: 'Sunset', desc: 'warm amber & cream', dark: 'coffee', light: 'autumn' },
+  { id: 'cyber', label: 'Neon', desc: 'fuchsia & violet glow', dark: 'synthwave', light: 'valentine' },
 ]
 
 const STYLE_KEY = 'hf_theme_style'

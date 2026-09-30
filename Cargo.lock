@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "hyprfetch"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -946,21 +946,24 @@ dependencies = [
 
 [[package]]
 name = "hyprfetch-api"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
  "bytes",
+ "flate2",
  "futures",
  "hyper",
  "hyprfetch-core",
  "hyprfetch-db",
  "mime_guess",
  "percent-encoding",
+ "reqwest",
  "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "thiserror",
  "tokio",
@@ -974,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "hyprfetch-core"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "flate2",
@@ -1000,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "hyprfetch-db"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "include_dir",
  "rusqlite",

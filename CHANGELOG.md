@@ -8,6 +8,56 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-01 (widget installer fixed + in-app widget setup + colorful UI)
+
+### Fixed — the widget installer (the `curl | sh` crash)
+- **`widget-install.sh` is now POSIX sh.** The previous script used
+  bash-only constructs (`BASH_SOURCE[0]`, arrays, `pipefail`) but the
+  documented command pipes it into `sh` (dash on most distros), so it died
+  immediately with `BASH_SOURCE[0]: unbound variable` / `cd: null
+  directory`. The rewrite runs under sh, dash, bash, zsh and busybox ash;
+  CI now gates it with `sh -n` (the old `bash -n` could not catch this).
+- **The bar integration actually works now.** The installer edits the REAL
+  illogical-impulse bar file (`modules/ii/bar/BarContent.qml`) and inserts
+  the import + a marked `DownloadWidget {}` block right after the
+  `layoutDirection: Qt.RightToLeft` anchor, with a one-time
+  `.bak-hyprfetch` backup. No more "one manual step" hand-editing. Unknown
+  layouts are left untouched and get exact instructions instead.
+
+### Added — the "set widget" feature (WebUI → Settings → Desktop widget)
+- One card shows the widget state (ii config found? quickshell on PATH?
+  installed? wired into the bar?) and installs everything with one click:
+  the daemon downloads `widget.tar.gz` from the update channel, extracts
+  the module into `~/.config/quickshell/ii/modules/downloadManager` and
+  wires the bar with the same marker-based edit as the installer. All
+  paths are user-owned — no privileges, no terminal.
+- New API: `GET /api/widget/status`, `POST /api/widget/install`,
+  `POST /api/widget/uninstall`. Uninstall removes the module and restores
+  the bar file byte-identically (verified by tests).
+- The installer and the in-app install produce IDENTICAL bar edits
+  (proven by `scripts/test_v050_battery.sh`).
+
+### Changed — colorful UI (no more plain white/dark)
+- All 10 themes (5 styles × dark/light) are now custom colorful palettes:
+  tinted bases instead of flat white/gray and vivid primary/secondary/
+  accent colors. Style names keep their IDs, so a theme chosen earlier
+  keeps working — it just looks colorful now. Indigo is the new default
+  look; Ocean / Forest / Sunset / Neon round out the palette.
+- The Updates page is rebuilt as ONE clean flow: current → latest at a
+  glance, a single primary action, help banners only when something needs
+  attention, and the terminal alternative collapsed into a details panel
+  (the old page duplicated the same info across three cards).
+
+### Testing
+- `scripts/test_v050_widget_battery.sh` (30 checks): the exact
+  `curl | sh` user flow under sh/dash, idempotent re-runs, uninstall
+  restoring the bar byte-identically, unknown-layout fallback, missing
+  ii config failing cleanly.
+- `scripts/test_v050_battery.sh` (27 checks): boots the real daemon
+  against a mock channel and exercises the widget API end-to-end,
+  including byte-identical parity between installer and API.
+- Existing v0.4.7 / v0.4.8 / v0.4.9 batteries all green (11 + 24 + 36).
+
 ## [0.4.9] — 2026-10-01 (the FINAL update fix: one canonical binary, zero passwords)
 
 ### Changed — updates never need privileges again

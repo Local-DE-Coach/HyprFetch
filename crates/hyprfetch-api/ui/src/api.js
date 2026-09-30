@@ -189,6 +189,24 @@ export async function fixStaleCopies() {
   return handle(await fetch('/api/update/stale-copies/fix', { method: 'POST' }))
 }
 
+// ---- desktop widget (Quickshell bar, v0.5.0) ------------------------------
+
+// Install state: { qs_root, qs_found, quickshell_found, hyprfetch_found,
+// installed, integrated, bar_file, version, up_to_date, reload_hint }.
+export async function getWidgetStatus() {
+  return handle(await fetch('/api/widget/status'))
+}
+
+// Download from the update channel, install into the ii config and wire
+// the bar — everything under $HOME, nothing privileged.
+export async function installWidget() {
+  return handle(await fetch('/api/widget/install', { method: 'POST' }))
+}
+
+export async function uninstallWidget() {
+  return handle(await fetch('/api/widget/uninstall', { method: 'POST' }))
+}
+
 export function connectEvents(onEvent) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const ws = new WebSocket(`${proto}://${location.host}/ws`)
