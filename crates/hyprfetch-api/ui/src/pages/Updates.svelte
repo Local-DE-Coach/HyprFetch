@@ -17,6 +17,7 @@
 
   let updateInfo = null
   let staleCopies = []
+  let systemFixHint = ''
   let busy = false
   let msg = ''
 
@@ -59,8 +60,15 @@
         return
       }
       staleCopies = res.stale_copies ?? []
-      msg = `installed ${res.installed} — restarting… page reloads in a few seconds`
-      setTimeout(() => location.reload(), 4000)
+      if (res.migrated) {
+        msg = `installed ${res.installed} — moved to ${res.new_path ?? '~/.local/bin'}; every later update installs silently — restarting…`
+      } else {
+        msg = `installed ${res.installed} — restarting… page reloads in a few seconds`
+      }
+      if (res.system_fix_hint) {
+        systemFixHint = res.system_fix_hint
+      }
+      setTimeout(() => location.reload(), 6000)
       await refreshServer()
     } catch (e) {
       msg = `install failed: ${e.message}`
@@ -228,6 +236,20 @@
         </div>
       {/if}
 
+      {#if systemFixHint}
+        <div class="alert alert-info py-2 px-3 text-xs" role="alert">
+          <div class="min-w-0">
+            <div class="font-semibold">
+              One step left (once): an old system copy could not be relinked automatically
+            </div>
+            <p class="opacity-80">
+              Run this line in a terminal — afterwards every update installs silently:
+            </p>
+            <div class="mt-1 font-mono break-all select-all opacity-90">{systemFixHint}</div>
+          </div>
+        </div>
+      {/if}
+
       {#if staleCopies.length}
         <div class="alert alert-warning py-2 px-3 text-xs" role="alert">
           <div class="min-w-0">
@@ -254,10 +276,10 @@
         Updates are served by the project's own server (istias.tech) as
         sha256-verified archives — no GitHub account or token needed, ever.
         Slow or flaky networks are fine: downloads stream with no time limit
-        and resume automatically. System installs are handled by the
-        one-click update rule (enable it above once) or the desktop pkexec
-        prompt; the banner above appears when an old copy would otherwise
-        keep launching the previous version.
+        and resume automatically. Since 0.4.9 an install in a system location
+        moves itself to ~/.local/bin once (passwordless) so every later
+        update is silent; the banners above appear when an old copy would
+        otherwise keep launching the previous version.
       </p>
     </div>
   </section>

@@ -720,30 +720,37 @@ pub async fn apply_with_progress(
     }
     let _ = std::fs::remove_file(&tarball);
 
-    // Swap — direct when the location is writable, otherwise walk the
-    // privilege ladder. Every rung below is self-recovering: a failed rung
-    // leaves the installed binary untouched.
-    let escalated = if can_swap_in_place(&exe) {
+    // Swap — direct when the location is writable, otherwise (v0.4.9)
+    // passwordless in-place routes first, then MIGRATE to ~/.local/bin.
+    // Package-managed installs keep the classic privilege ladder. Every
+    // path below is self-recovering: a failed rung leaves the installed
+    // binary untouched.
+    let (escalated, migration, system_fix) = if can_swap_in_place(&exe) {
         swap_binary_from_staged(&exe, &staged)?;
         let _ = std::fs::remove_dir_all(&stage_dir);
-        false
+        (false, None, None)
     } else {
-        match escalate_and_swap(&exe, &staged, escalation) {
-            Ok(()) => {
+        match swap_or_migrate(&exe, &staged, escalation) {
+            Ok(SwapOutcome::Escalated) => {
                 let _ = std::fs::remove_dir_all(&stage_dir);
-                true
+                (true, None, None)
             }
-            Err(UpdateError::PasswordRequired { .. }) => {
+            Ok(SwapOutcome::Migrated(m, fix)) => {
+                let _ = std::fs::remove_dir_all(&stage_dir);
+                (false, Some(m), Some(fix))
+            }
+            Err(UpdateError::PasswordRequired {
+                staged,
+                target,
+                hint,
+            }) => {
                 // KEEP the staging dir: the one-time setup (or a manual
                 // `sudo hyprfetch update`) can finish the swap from it.
+                // (Only package-managed installs can still hit this.)
                 return Err(UpdateError::PasswordRequired {
-                    staged: staged.to_string_lossy().into_owned(),
-                    target: exe.to_string_lossy().into_owned(),
-                    hint: format!(
-                        "open the WebUI → Updates → “Enable one-click updates” (one password \
-                         entry, updates stay silent forever), or run `sudo hyprfetch update` \
-                         in a terminal, or reinstall: curl -fsSL {UPDATES_PAGE_URL}/install.sh | sh"
-                    ),
+                    staged,
+                    target,
+                    hint,
                 });
             }
             Err(e) => {
@@ -756,9 +763,24 @@ pub async fn apply_with_progress(
     Ok(ApplyResult {
         current: chk.current.clone(),
         installed: chk.latest.clone(),
-        backup_path: Some(exe.with_extension("old").to_string_lossy().into_owned()),
+        // In-place/escalated swaps keep the rollback at `<exe>.old`; a
+        // migration rolls back at `~/.local/bin/hyprfetch.old` (the system
+        // dir was never touched, so no `.old` exists there).
+        backup_path: match &migration {
+            Some(m) => m
+                .backup_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            None => Some(exe.with_extension("old").to_string_lossy().into_owned()),
+        },
         sha256: verified_sha,
         escalated,
+        migrated: migration.is_some(),
+        new_path: migration
+            .as_ref()
+            .map(|m| m.new_path.to_string_lossy().into_owned()),
+        path_fixes: migration.map(|m| m.path_fixes).unwrap_or_default(),
+        system_fix_hint: system_fix.as_ref().and_then(SystemCopyFix::hint),
     })
 }
 
@@ -1435,8 +1457,19 @@ pub struct ApplyResult {
     pub installed: String,
     pub backup_path: Option<String>,
     pub sha256: String,
-    /// True when the swap needed sudo/doas (system-owned install location).
+    /// True when the swap needed sudo/doas (package-managed system install).
     pub escalated: bool,
+    /// True when the binary MOVED to `~/.local/bin` because the old
+    /// location was not user-writable (v0.4.9). After this one migration
+    /// every later update is a plain in-place swap — passwordless forever.
+    pub migrated: bool,
+    /// New binary location after a migration (`~/.local/bin/hyprfetch`).
+    pub new_path: Option<String>,
+    /// PATH fixes applied during migration (rc files, fish universal var).
+    pub path_fixes: Vec<String>,
+    /// When a stale system copy could NOT be relinked automatically: the
+    /// exact one-liner that finishes the job (run once, then silence).
+    pub system_fix_hint: Option<String>,
 }
 
 /// Replace a system-owned binary via a privilege tool (`sudo`/`doas`).
@@ -1576,6 +1609,471 @@ pub fn swap_binary(exe: &Path, new_bytes: &[u8]) -> Result<(), UpdateError> {
     }
     std::fs::rename(&new_path, exe)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// User-directory migration (v0.4.9) — the FINAL answer to system-location
+// updates. Instead of fighting polkit/pkexec/sudoers for the right to write
+// a root-owned directory, the updater MOVES itself to `~/.local/bin`
+// (always user-writable, on PATH) and — best effort — turns any old system
+// copy into a symlink pointing at it. After one migration every future
+// update is a plain in-place swap: no password, no helper, no pkexec, ever.
+// ---------------------------------------------------------------------------
+
+/// Outcome of the "binary lives in a non-writable location" branch.
+enum SwapOutcome {
+    /// The system binary was replaced through a privilege route.
+    Escalated,
+    /// The binary moved to `~/.local/bin` (+ system-copy dedupe result).
+    Migrated(Migration, SystemCopyFix),
+}
+
+/// Decide how to replace `exe` with the staged binary when the current
+/// location is NOT user-writable:
+///
+/// 1. passwordless in-place routes (one-click helper, `sudo -n`) — setups
+///    that already authorized once keep their exact silent behaviour;
+/// 2. package-managed binaries (pacman/deb/rpm own the file) keep the
+///    classic privilege ladder — migrating would fight the package manager;
+/// 3. everything else MIGRATES to `~/.local/bin` — passwordless, and the
+///    last update that ever needs any thought about locations.
+fn swap_or_migrate(
+    exe: &Path,
+    staged: &Path,
+    escalation: Escalation,
+) -> Result<SwapOutcome, UpdateError> {
+    if escalation == Escalation::Refuse {
+        return Err(root_needed(exe, false));
+    }
+
+    // 1. Passwordless in-place routes (never ask, never block).
+    if priv_helper_ready() {
+        let cmd = PrivCmd {
+            program: "sudo".to_string(),
+            pre_args: vec!["-n", PRIV_HELPER_PATH],
+        };
+        if swap_via_helper(staged, exe, &cmd).is_ok() {
+            return Ok(SwapOutcome::Escalated);
+        }
+    }
+    if which_on_path("sudo") && sudo_n_ok() {
+        let bytes = std::fs::read(staged).map_err(UpdateError::Io)?;
+        let cmd = PrivCmd {
+            program: "sudo".to_string(),
+            pre_args: vec!["-n"],
+        };
+        if swap_binary_escalated(exe, &bytes, &cmd).is_ok() {
+            return Ok(SwapOutcome::Escalated);
+        }
+    }
+
+    // 2. Package-managed installs: the file belongs to pacman/deb/rpm.
+    if package_owner(exe).is_some() {
+        return escalate_and_swap(exe, staged, escalation).map(|_| SwapOutcome::Escalated);
+    }
+
+    // 3. THE FINAL ROUTE: move to ~/.local/bin (no password, ever), then
+    //    turn any stale system copy into a link to the new location.
+    match migrate_to_user_bin(staged) {
+        Ok(m) => {
+            let fix = link_system_copies_to_user(
+                &system_copy_paths_from_env(),
+                &m.new_path,
+                escalation == Escalation::Auto, // only the CLI may prompt
+            );
+            Ok(SwapOutcome::Migrated(m, fix))
+        }
+        Err(migrate_err) => {
+            // No $HOME / unusable user dir → last resort: the classic ladder.
+            match escalate_and_swap(exe, staged, escalation) {
+                Ok(()) => Ok(SwapOutcome::Escalated),
+                Err(e) => Err(if matches!(e, UpdateError::PasswordRequired { .. }) {
+                    e
+                } else {
+                    migrate_err
+                }),
+            }
+        }
+    }
+}
+
+/// The canonical per-user install directory (`$HOME/.local/bin`).
+pub fn user_bin_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())?;
+    Some(home.join(".local").join("bin"))
+}
+
+/// What one migration changed on disk.
+#[derive(Debug, Clone, Serialize)]
+pub struct Migration {
+    /// Where the new binary now lives (`~/.local/bin/hyprfetch`).
+    pub new_path: PathBuf,
+    /// Rollback copy of the previous binary, when one existed.
+    pub backup_path: Option<PathBuf>,
+    /// PATH fixes applied (rc files / fish universal var), human-readable.
+    pub path_fixes: Vec<String>,
+}
+
+/// Move the staged binary into `~/.local/bin` — atomic (write `.new` →
+/// rename), keeps the previous binary as `.old` rollback, then makes sure
+/// the directory is on PATH for the user's future shells.
+pub fn migrate_to_user_bin(staged: &Path) -> Result<Migration, UpdateError> {
+    let bin_dir = user_bin_dir().ok_or_else(|| {
+        UpdateError::Other("cannot determine $HOME — cannot migrate to ~/.local/bin".into())
+    })?;
+    migrate_to_user_bin_into(&bin_dir, staged)
+}
+
+/// [`migrate_to_user_bin`] with an explicit target directory (testable).
+pub fn migrate_to_user_bin_into(bin_dir: &Path, staged: &Path) -> Result<Migration, UpdateError> {
+    std::fs::create_dir_all(bin_dir)?;
+    let target = bin_dir.join("hyprfetch");
+    let new_path = target.with_extension("new");
+    std::fs::copy(staged, &new_path)?;
+    {
+        let f = std::fs::File::open(&new_path)?;
+        f.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let mut backup = None;
+    if target.exists() {
+        let old = target.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&target, &old)?;
+        backup = Some(old);
+    }
+    std::fs::rename(&new_path, &target)?;
+    let path_fixes = ensure_user_path(bin_dir);
+    Ok(Migration {
+        new_path: target,
+        backup_path: backup,
+        path_fixes,
+    })
+}
+
+/// Make sure `~/.local/bin` is on PATH for the user's future shells:
+/// a guarded block in `~/.profile` / `~/.bashrc` / `~/.zshrc` (POSIX
+/// shells) plus `fish_add_path -U` (universal variable — persists across
+/// fish sessions) and a guarded block in `~/.config/fish/config.fish`.
+/// Returns the files/vars that were CHANGED (empty when everything was
+/// already in place). Never fails the update.
+pub fn ensure_user_path(bin_dir: &Path) -> Vec<String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_default();
+    ensure_user_path_under(&home, bin_dir)
+}
+
+/// [`ensure_user_path`] with an explicit home — the testable core.
+pub fn ensure_user_path_under(home: &Path, bin_dir: &Path) -> Vec<String> {
+    let mut touched = Vec::new();
+    let bin_str = bin_dir.to_string_lossy().into_owned();
+
+    // POSIX shells: one guarded export line per rc file.
+    for name in [".profile", ".bashrc", ".zshrc"] {
+        let f = home.join(name);
+        match std::fs::read_to_string(&f) {
+            Ok(content) if content.contains(".local/bin") => {} // already covered
+            Ok(content) => {
+                let mut next = content;
+                if !next.ends_with('\n') {
+                    next.push('\n');
+                }
+                next.push_str(&posix_path_block(&bin_str));
+                if std::fs::write(&f, next).is_ok() {
+                    touched.push(format!("~/{}", name));
+                }
+            }
+            Err(_) => {
+                // Missing file: create it (a fresh rc entry is harmless and
+                // helps shells that DO read it).
+                if std::fs::write(&f, posix_path_block(&bin_str)).is_ok() {
+                    touched.push(format!("~/{} (new)", name));
+                }
+            }
+        }
+    }
+
+    // fish: universal variable right now (persists across sessions), plus a
+    // guarded block in config.fish for shells that never see our `fish -c`
+    // (and for fresh installs where fish is not yet on PATH here).
+    if which_on_path("fish") {
+        let ok = std::process::Command::new("fish")
+            .args(["-c", &format!("fish_add_path -U {}", sh_quote(bin_dir))])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            touched.push("fish (universal PATH)".to_string());
+        }
+    }
+    let fish_cfg = home.join(".config").join("fish").join("config.fish");
+    match std::fs::read_to_string(&fish_cfg) {
+        Ok(content) if content.contains(".local/bin") => {}
+        Ok(content) => {
+            let mut next = content;
+            if !next.ends_with('\n') {
+                next.push('\n');
+            }
+            next.push_str(&fish_path_block(&bin_str));
+            if std::fs::write(&fish_cfg, next).is_ok() {
+                touched.push("~/.config/fish/config.fish".to_string());
+            }
+        }
+        Err(_) => {
+            // Only create config.fish when fish is actually in use.
+            if which_on_path("fish")
+                && std::fs::create_dir_all(fish_cfg.parent().unwrap_or(home)).is_ok()
+                && std::fs::write(&fish_cfg, fish_path_block(&bin_str)).is_ok()
+            {
+                touched.push("~/.config/fish/config.fish (new)".to_string());
+            }
+        }
+    }
+
+    touched
+}
+
+/// Guarded POSIX block appended to rc files (idempotent via the markers).
+fn posix_path_block(bin: &str) -> String {
+    format!(
+        "# >>> hyprfetch PATH >>> (added by the HyprFetch installer)\n\
+         export PATH=\"{bin}:$PATH\"\n\
+         # <<< hyprfetch PATH <<<\n"
+    )
+}
+
+/// Guarded fish block appended to config.fish.
+fn fish_path_block(bin: &str) -> String {
+    format!(
+        "# >>> hyprfetch PATH >>> (added by the HyprFetch installer)\n\
+         fish_add_path \"{bin}\"\n\
+         # <<< hyprfetch PATH <<<\n"
+    )
+}
+
+/// Result of turning old system copies into links to the user install.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SystemCopyFix {
+    /// No system copy existed — nothing to do.
+    NotNeeded,
+    /// Every system path already resolves to the user binary.
+    AlreadyLinked,
+    /// At least one system path now links to the user binary.
+    Linked { via: String, linked: Vec<String> },
+    /// A package manager owns a copy — untouched (remove it via the
+    /// package manager; `pacman -Rns hyprfetch-bin` and friends).
+    PackageOwned { owner: String, path: String },
+    /// A copy remains and could not be replaced — `hint` carries the exact
+    /// one-liner that finishes the job.
+    Failed { path: String, hint: String },
+}
+
+impl SystemCopyFix {
+    /// The one-liner to run when a system copy could not be linked.
+    pub fn hint(&self) -> Option<String> {
+        match self {
+            SystemCopyFix::Failed { hint, .. } => Some(hint.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// System locations older install.sh builds may have used. Test override:
+/// `HYPRFETCH_SYSTEM_COPY` (colon-separated) replaces them.
+pub fn system_copy_paths_from_env() -> Vec<PathBuf> {
+    std::env::var_os("HYPRFETCH_SYSTEM_COPY")
+        .map(|v| {
+            v.to_string_lossy()
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_else(default_system_copy_paths)
+}
+
+pub fn default_system_copy_paths() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/usr/local/bin/hyprfetch"),
+        PathBuf::from("/usr/bin/hyprfetch"),
+    ]
+}
+
+/// Replace every stale system copy with a SYMLINK to the user binary, so
+/// each old PATH entry keeps working AND nothing can shadow the fresh
+/// install. Passwordless routes first (`sudo -n`, then `pkexec`); plain
+/// filesystem ops when the directory is actually writable; interactive
+/// `sudo` only when the caller owns a TTY (the CLI — a daemon must never
+/// block on a prompt). A package-owned copy is never touched.
+///
+/// Uses [`system_copy_paths_from_env`] (honours the test override).
+pub fn link_system_copy_to_user(user_bin: &Path) -> SystemCopyFix {
+    link_system_copies_to_user(
+        &system_copy_paths_from_env(),
+        user_bin,
+        std::io::IsTerminal::is_terminal(&std::io::stdin()),
+    )
+}
+
+/// [`link_system_copy_to_user`] with explicit paths — the testable core.
+pub fn link_system_copies_to_user(
+    system_paths: &[PathBuf],
+    user_bin: &Path,
+    allow_prompt: bool,
+) -> SystemCopyFix {
+    let user_target = std::fs::canonicalize(user_bin).unwrap_or_else(|_| user_bin.to_path_buf());
+    let mut todo: Vec<PathBuf> = Vec::new();
+    let mut any_present = false;
+    for p in system_paths {
+        let Ok(md) = std::fs::symlink_metadata(p) else {
+            continue;
+        };
+        let _ = md;
+        any_present = true;
+        // Already pointing at the user binary (symlink or hardlink)?
+        if std::fs::canonicalize(p)
+            .map(|c| c == user_target)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if let Some(owner) = package_owner(p) {
+            return SystemCopyFix::PackageOwned {
+                owner,
+                path: p.to_string_lossy().into_owned(),
+            };
+        }
+        todo.push(p.clone());
+    }
+    if todo.is_empty() {
+        return if any_present {
+            SystemCopyFix::AlreadyLinked
+        } else {
+            SystemCopyFix::NotNeeded
+        };
+    }
+    let mut linked = Vec::new();
+    let mut via = String::new();
+    for p in &todo {
+        match link_one_system_copy(p, user_bin, allow_prompt) {
+            Ok(how) => {
+                if via.is_empty() {
+                    via = how.clone();
+                }
+                linked.push(format!(
+                    "{} → {} ({})",
+                    p.display(),
+                    user_bin.display(),
+                    how
+                ));
+            }
+            Err(hint) => {
+                return SystemCopyFix::Failed {
+                    path: p.to_string_lossy().into_owned(),
+                    hint,
+                }
+            }
+        }
+    }
+    SystemCopyFix::Linked { via, linked }
+}
+
+/// Link ONE system path to the user binary. Tries: direct filesystem ops →
+/// `sudo -n` → `pkexec` → interactive `sudo` (only with a TTY). Returns
+/// how it linked, or the exact one-liner for the user.
+fn link_one_system_copy(
+    system: &Path,
+    user_bin: &Path,
+    allow_prompt: bool,
+) -> Result<String, String> {
+    let script = link_script(system, user_bin);
+
+    // 1. The directory is actually writable by us — plain ops suffice.
+    if can_swap_in_place(system) && direct_link(system, user_bin).is_ok() {
+        return Ok("direct".to_string());
+    }
+    // 2. Passwordless sudo.
+    if which_on_path("sudo") {
+        let cmd = PrivCmd {
+            program: "sudo".to_string(),
+            pre_args: vec!["-n"],
+        };
+        if cmd.run_sh(&script).map(|s| s.success()).unwrap_or(false) {
+            return Ok("sudo".to_string());
+        }
+    }
+    // 3. pkexec (may pop a GUI password prompt via the polkit agent).
+    if which_on_path("pkexec") {
+        let cmd = PrivCmd {
+            program: "pkexec".to_string(),
+            pre_args: Vec::new(),
+        };
+        if cmd.run_sh(&script).map(|s| s.success()).unwrap_or(false) {
+            return Ok("pkexec".to_string());
+        }
+    }
+    // 4. Interactive sudo — the CLI owns a TTY and may ask once.
+    if allow_prompt && which_on_path("sudo") {
+        let cmd = PrivCmd {
+            program: "sudo".to_string(),
+            pre_args: Vec::new(),
+        };
+        if cmd.run_sh(&script).map(|s| s.success()).unwrap_or(false) {
+            return Ok("sudo (password)".to_string());
+        }
+    }
+    Err(link_one_liner(system, user_bin))
+}
+
+/// Direct (unprivileged) relink of one system path.
+fn direct_link(system: &Path, user_bin: &Path) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(system);
+    let _ = std::fs::remove_file(system.with_extension("old"));
+    let _ = std::fs::remove_file(system.with_extension("new"));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(user_bin, system)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (system, user_bin);
+        unreachable!()
+    }
+    Ok(())
+}
+
+/// The one privileged script for the relink: drop the old real file (and
+/// any .old/.new leftovers), then symlink to the user binary.
+fn link_script(system: &Path, user_bin: &Path) -> String {
+    format!(
+        "set -e\nrm -f {sys} {old} {new}\nln -sf {user} {sys}\n",
+        sys = sh_quote(system),
+        old = sh_quote(&system.with_extension("old")),
+        new = sh_quote(&system.with_extension("new")),
+        user = sh_quote(user_bin),
+    )
+}
+
+/// The copy-paste one-liner when every automatic route failed.
+fn link_one_liner(system: &Path, user_bin: &Path) -> String {
+    format!(
+        "sudo rm -f {sys} {old} {new} && sudo ln -sf {user} {sys}",
+        sys = sh_quote(system),
+        old = sh_quote(&system.with_extension("old")),
+        new = sh_quote(&system.with_extension("new")),
+        user = sh_quote(user_bin),
+    )
 }
 
 #[cfg(test)]
@@ -2484,5 +2982,211 @@ mod tests {
         std::env::set_var("PATH", empty.path().display().to_string());
         assert!(terminal_candidate("echo hi").is_none());
         std::env::set_var("PATH", old_path);
+    }
+
+    #[test]
+    fn migrate_moves_binary_and_keeps_rollback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join(".local").join("bin");
+        let staged = tmp.path().join("staged-bin");
+        std::fs::write(&staged, b"NEWBIN").unwrap();
+
+        // First migration: no previous binary → no backup.
+        let m = migrate_to_user_bin_into(&bin_dir, &staged).unwrap();
+        assert_eq!(m.new_path, bin_dir.join("hyprfetch"));
+        assert_eq!(std::fs::read(&m.new_path).unwrap(), b"NEWBIN");
+        assert!(m.backup_path.is_none());
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&m.new_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "installed with the usual mode");
+
+        // Second migration over an existing binary keeps the .old rollback.
+        std::fs::write(&staged, b"NEWBIN2").unwrap();
+        let m2 = migrate_to_user_bin_into(&bin_dir, &staged).unwrap();
+        assert_eq!(
+            std::fs::read(m2.backup_path.as_ref().unwrap()).unwrap(),
+            b"NEWBIN",
+            "previous binary kept as ~/.local/bin/hyprfetch.old"
+        );
+        assert_eq!(std::fs::read(&m2.new_path).unwrap(), b"NEWBIN2");
+        assert!(!bin_dir.join("hyprfetch.new").exists());
+    }
+
+    #[test]
+    fn ensure_user_path_writes_guarded_blocks_once() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".profile"), b"export FOO=bar\n").unwrap();
+        let bin_dir = home.path().join(".local").join("bin");
+
+        let touched = ensure_user_path_under(home.path(), &bin_dir);
+        assert!(
+            touched.iter().any(|t| t.contains(".profile")),
+            "profile reported as touched: {touched:?}"
+        );
+        for name in [".profile", ".bashrc", ".zshrc"] {
+            let content = std::fs::read_to_string(home.path().join(name)).unwrap();
+            assert!(
+                content.contains("# >>> hyprfetch PATH >>>"),
+                "{name}: {content}"
+            );
+            assert!(content.contains("export PATH="), "{name}: {content}");
+            assert!(content.contains(".local/bin"), "{name}: {content}");
+        }
+        // Pre-existing content survives.
+        let profile = std::fs::read_to_string(home.path().join(".profile")).unwrap();
+        assert!(profile.starts_with("export FOO=bar\n"));
+
+        // Idempotent: a second run changes nothing (files already cover it).
+        let touched2 = ensure_user_path_under(home.path(), &bin_dir);
+        assert!(
+            touched2.iter().all(|t| !t.ends_with(".profile")
+                && !t.ends_with(".bashrc")
+                && !t.ends_with(".zshrc")),
+            "rc files must not be touched twice: {touched2:?}"
+        );
+    }
+
+    #[test]
+    fn link_relinks_writable_system_copy_directly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sys_dir = tmp.path().join("system");
+        std::fs::create_dir_all(&sys_dir).unwrap();
+        let sys = sys_dir.join("hyprfetch");
+        std::fs::write(&sys, b"OLD").unwrap();
+        std::fs::write(sys_dir.join("hyprfetch.old"), b"OLDER").unwrap();
+        let user = tmp.path().join("user").join("hyprfetch");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(&user, b"NEW").unwrap();
+
+        let fix = link_system_copies_to_user(std::slice::from_ref(&sys), &user, false);
+        let via = match &fix {
+            SystemCopyFix::Linked { via, linked } => {
+                assert_eq!(linked.len(), 1, "{linked:?}");
+                via.clone()
+            }
+            other => panic!("expected Linked, got {other:?}"),
+        };
+        let md = std::fs::symlink_metadata(&sys).unwrap();
+        assert!(md.file_type().is_symlink(), "system copy is now a symlink");
+        assert_eq!(
+            std::fs::canonicalize(&sys).unwrap(),
+            std::fs::canonicalize(&user).unwrap()
+        );
+        assert!(
+            !sys.with_extension("old").exists(),
+            "stale .old backups are cleaned by the relink"
+        );
+        assert!(!via.is_empty());
+
+        // Second call: everything already points at the user binary.
+        let fix2 = link_system_copies_to_user(std::slice::from_ref(&sys), &user, false);
+        assert_eq!(fix2, SystemCopyFix::AlreadyLinked);
+
+        // No system copy at all → NotNeeded.
+        let missing = tmp.path().join("nowhere").join("hyprfetch");
+        let fix3 = link_system_copies_to_user(std::slice::from_ref(&missing), &user, false);
+        assert_eq!(fix3, SystemCopyFix::NotNeeded);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn link_reports_one_liner_when_unwritable_and_no_priv_tool() {
+        let _guard = PATH_LOCK.lock().await;
+        let old_path = std::env::var_os("PATH").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        // PATH with NO sudo and NO pkexec → every privilege rung declines.
+        let empty = tempfile::tempdir().unwrap();
+        std::env::set_var("PATH", empty.path().display().to_string());
+
+        let sys_dir = tmp.path().join("system");
+        std::fs::create_dir_all(&sys_dir).unwrap();
+        let sys = sys_dir.join("hyprfetch");
+        std::fs::write(&sys, b"OLD").unwrap();
+        let user = tmp.path().join("user").join("hyprfetch");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(&user, b"NEW").unwrap();
+
+        // A read-only parent dir blocks the direct route too.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sys_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let fix = link_system_copies_to_user(std::slice::from_ref(&sys), &user, false);
+
+        // Restore BEFORE asserting so a panic can never leave bad state.
+        std::fs::set_permissions(&sys_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("PATH", old_path);
+
+        match fix {
+            SystemCopyFix::Failed { path, hint } => {
+                assert_eq!(path, sys.to_string_lossy());
+                assert!(hint.starts_with("sudo rm -f"), "hint: {hint}");
+                assert!(hint.contains("ln -sf"), "hint: {hint}");
+                assert!(
+                    hint.contains(user.to_string_lossy().as_ref()),
+                    "hint: {hint}"
+                );
+                // The copy must be UNTOUCHED (self-recovering failure).
+                assert!(std::fs::read(&sys).unwrap() == b"OLD");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn link_uses_passwordless_sudo_shim_when_available() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = PATH_LOCK.lock().await;
+        let old_path = std::env::var_os("PATH").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        // A sudo SHIM that records its arguments and exits 0 — the sandbox
+        // has no real root, so the assertion is about rung selection and
+        // the script handed to sudo (the real linking is covered by the
+        // direct-route test and the battery script).
+        let spy = tmp.path().join("spy.log");
+        let shim_dir = tempfile::tempdir().unwrap();
+        let shim = shim_dir.path().join("sudo");
+        std::fs::write(
+            &shim,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n", spy.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("PATH", shim_dir.path().display().to_string());
+
+        // NOTE: parent dir NOT writable → the direct route is skipped and
+        // the sudo rung must be picked.
+        let sys_dir_ro = tempfile::tempdir().unwrap();
+        let sys = sys_dir_ro.path().join("hyprfetch");
+        std::fs::write(&sys, b"OLD").unwrap();
+        std::fs::set_permissions(sys_dir_ro.path(), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+
+        let user = tmp.path().join("user").join("hyprfetch");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(&user, b"NEW").unwrap();
+
+        let fix = link_system_copies_to_user(std::slice::from_ref(&sys), &user, false);
+
+        let spy_contents = std::fs::read_to_string(&spy).unwrap_or_default();
+        std::fs::set_permissions(sys_dir_ro.path(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::env::set_var("PATH", old_path);
+
+        match fix {
+            SystemCopyFix::Linked { via, .. } => assert_eq!(via, "sudo", "sudo rung chosen"),
+            other => panic!("expected Linked via sudo shim, got {other:?}"),
+        }
+        // The shim must have received the full rm+ln script for BOTH paths.
+        assert!(spy_contents.contains("/bin/sh"), "spy: {spy_contents}");
+        assert!(spy_contents.contains("-c"), "spy: {spy_contents}");
+        assert!(spy_contents.contains("rm -f"), "spy: {spy_contents}");
+        assert!(spy_contents.contains("ln -sf"), "spy: {spy_contents}");
+        assert!(
+            spy_contents.contains(user.to_string_lossy().as_ref()),
+            "spy: {spy_contents}"
+        );
     }
 }

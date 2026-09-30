@@ -519,6 +519,16 @@ async fn doctor() -> Result<()> {
         }
         println!("    → remove from the WebUI (Updates → stale copies) or: sudo rm -f <path>");
     }
+    // v0.4.9: a binary in a non-writable system location is the root cause
+    // of every "update asks for rights / fails with pkexec" report — point
+    // at the passwordless migration.
+    if !hyprfetch_core::update::can_swap_in_place(&exe)
+        && hyprfetch_core::update::package_owner(&exe).is_none()
+    {
+        println!("  install location = {} (system-owned)", exe.display());
+        println!("    → run `hyprfetch update` once: it moves hyprfetch to ~/.local/bin");
+        println!("      (passwordless) — every later update then installs silently");
+    }
     println!("  foreign_keys = ON (verified at open)");
     println!("  journal_mode = WAL (verified at open)");
     println!("OK");

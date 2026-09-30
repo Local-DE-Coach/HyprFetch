@@ -116,13 +116,23 @@ fn resolve_bind(flags: &[String]) -> String {
 
 /// Start a detached `hyprfetch serve <flags>` child and wait for readiness.
 pub fn start(flags: &[String]) -> Result<()> {
+    start_exe(flags, None)
+}
+
+/// [`start`] with an explicit binary — used after a migration, when the
+/// freshly updated binary lives at a NEW path (`~/.local/bin/hyprfetch`)
+/// while `current_exe()` still points at the old location.
+pub fn start_exe(flags: &[String], exe_override: Option<&Path>) -> Result<()> {
     if let Some(entry) = is_running() {
         bail!(
             "daemon already running (pid {}, logs: `hyprfetch logs -f`)",
             entry.pid
         );
     }
-    let exe = std::env::current_exe().context("resolving current exe")?;
+    let exe = match exe_override {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_exe().context("resolving current exe")?,
+    };
     let log_path = log_file_path();
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)
@@ -214,17 +224,27 @@ pub fn stop() -> Result<()> {
 /// Restart: stop (if running), then start with the given flags — or the
 /// stored ones when `flags` is empty.
 pub fn restart(flags: &[String]) -> Result<()> {
+    restart_exe(flags, None)
+}
+
+/// [`restart`] with an explicit binary — used after a migration so the new
+/// daemon actually runs the freshly installed `~/.local/bin/hyprfetch`
+/// instead of the old (possibly still-shadowed) system path.
+pub fn restart_exe(flags: &[String], exe: Option<&Path>) -> Result<()> {
+    // Read the STORED serve flags BEFORE stop() — stop removes the pid file,
+    // and reading it afterwards silently lost `--bind` and friends (the
+    // restarted daemon then fell back to the default bind).
+    let stored_flags: Vec<String> = if flags.is_empty() {
+        read_pid_file().map(|e| e.args).unwrap_or_default()
+    } else {
+        flags.to_vec()
+    };
     if is_running().is_some() {
         stop()?;
         // Give the kernel a beat to release the listen port.
         std::thread::sleep(Duration::from_millis(500));
     }
-    let flags: Vec<String> = if flags.is_empty() {
-        read_pid_file().map(|e| e.args).unwrap_or_default()
-    } else {
-        flags.to_vec()
-    };
-    start(&flags)
+    start_exe(&stored_flags, exe)
 }
 
 /// Print a human-readable status line set.

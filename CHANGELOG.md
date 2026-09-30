@@ -8,6 +8,58 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.4.9] — 2026-10-01 (the FINAL update fix: one canonical binary, zero passwords)
+
+### Changed — updates never need privileges again
+- **The updater now migrates instead of escalating.** When the running
+  binary sits in a non-writable system location (`/usr/local/bin` from an
+  old installer run), the update **moves** HyprFetch to
+  `~/.local/bin/hyprfetch` — always user-writable — instead of walking the
+  sudo/pkexec ladder. After this ONE migration every future update (WebUI
+  one-click, `hyprfetch update`, installer) is a plain in-place atomic
+  swap: **no password, no helper, no pkexec, ever**.
+- **Multi-copy mess is healed, not just reported.** During a migration the
+  updater turns old standalone copies (`/usr/local/bin/hyprfetch`,
+  `/usr/bin/hyprfetch`) into **symlinks** to the canonical user binary:
+  every PATH entry keeps working, nothing shadows anything, and the next
+  `hyprfetch` launch is always the fresh version. Passwordless routes are
+  tried first (`sudo -n`, `pkexec`, direct filesystem ops); the CLI (with a
+  TTY) may ask for the password once via `sudo` for this single relink; if
+  everything declines, the update still succeeds and prints the exact
+  one-liner that finishes the job (also shown in the WebUI Updates page).
+- The daemon restarts from the NEW location after a migration
+  (`daemon::restart_exe` / `trigger_restart_from`), so the fresh binary is
+  actually what keeps running.
+- `~/.local/bin` is put on PATH automatically for **bash, zsh AND fish**
+  (guarded blocks in `~/.profile`/`~/.bashrc`/`~/.zshrc`,
+  `fish_add_path -U` for fish, guarded block in `config.fish`) — fish
+  users no longer get a `.profile` hint that their shell ignores.
+- Package-managed installs (pacman/deb/rpm own the binary) keep the
+  existing privilege ladder + one-click helper — the package manager stays
+  the owner; migration never fights it.
+- `hyprfetch doctor` now points at the migration when the install location
+  is system-owned ("run `hyprfetch update` once → moves to ~/.local/bin,
+  passwordless").
+
+### Fixed — the reported failures
+- WebUI update failing with `privileged swap via pkexec failed` on systems
+  without a usable polkit agent: pkexec is no longer load-bearing for
+  plain (non-package) installs — the migration path replaces it.
+- `su` + `hyprfetch: command not found`: with the canonical layout the
+  system path is a symlink into the user's `~/.local/bin`, so root shells
+  resolve the same binary.
+- Fish users' `~/.local/bin` never landing on PATH after install.
+
+### install.sh (the channel installer) — same philosophy
+- Installs the canonical binary to `~/.local/bin` **always** (running it
+  via sudo/su targets the real user via `SUDO_USER`/`logname`, chowns
+  properly) and relinks `/usr/local/bin/hyprfetch` (and `/usr/bin` when
+  unowned) to it — the script now also acts as the one-command **repair
+  tool** for multi-copy installs. `--no-system-link` skips the relink.
+- Desktop entry, icon and docs land per-user; daemon restart runs as the
+  owning user; the final shadow check uses `readlink -f` so a healthy
+  symlink is recognized as "this install".
+
 ## [0.4.8] — 2026-09-30 (Quickshell bar widget: the download manager in your panel, at near-zero RAM)
 
 ### Added — unified Quickshell bar widget (illogical-impulse / end4)

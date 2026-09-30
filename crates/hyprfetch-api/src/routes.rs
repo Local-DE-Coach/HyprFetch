@@ -1396,7 +1396,15 @@ pub async fn update_apply(
 
     let restart = q.restart.unwrap_or(true);
     let restarted = if restart {
-        trigger_restart(&state).await.is_ok()
+        // After a migration the NEW binary lives at applied.new_path — spawn
+        // the replacement server from there (current_exe is still the old
+        // location).
+        trigger_restart_from(
+            &state,
+            applied.new_path.as_deref().map(std::path::Path::new),
+        )
+        .await
+        .is_ok()
     } else {
         false
     };
@@ -1408,6 +1416,10 @@ pub async fn update_apply(
         "sha256": applied.sha256,
         "backup": applied.backup_path,
         "escalated": applied.escalated,
+        "migrated": applied.migrated,
+        "new_path": applied.new_path,
+        "path_fixes": applied.path_fixes,
+        "system_fix_hint": applied.system_fix_hint,
         "restarting": restarted,
         "stale_copies": stale,
     })))
@@ -1631,6 +1643,16 @@ pub async fn update_fix_stale_copies(
 
 /// Shared restart logic: drain → spawn replacement → notify shutdown.
 async fn trigger_restart(state: &AppState) -> Result<(), String> {
+    trigger_restart_from(state, None).await
+}
+
+/// [`trigger_restart`] with an explicit binary — used after a migration so
+/// the replacement server runs the freshly installed `~/.local/bin`
+/// binary instead of the old (possibly still-shadowed) system path.
+async fn trigger_restart_from(
+    state: &AppState,
+    exe_override: Option<&std::path::Path>,
+) -> Result<(), String> {
     let args = crate::SERVE_ARGS
         .get()
         .ok_or_else(|| {
@@ -1646,7 +1668,10 @@ async fn trigger_restart(state: &AppState) -> Result<(), String> {
     }
 
     // 2. Spawn the replacement server, detached from this process.
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe = match exe_override {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?,
+    };
     tracing::info!(exe = %exe.display(), "spawning replacement server");
     #[allow(clippy::zombie_processes)]
     let child = {

@@ -187,8 +187,8 @@ enum Confirm {
 }
 
 /// Tell the user up front what kind of install this is and how the swap
-/// will happen, so the sudo password prompt (if any) never comes as a
-/// surprise. Runs before the download.
+/// will happen, so a password prompt (if any) never comes as a surprise.
+/// Runs before the download.
 fn explain_swap_strategy() {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -197,27 +197,36 @@ fn explain_swap_strategy() {
     if can_swap_in_place(&exe) {
         return; // user-owned install — the plain atomic swap just works
     }
-    match find_priv_tool() {
-        Some(tool) => {
-            println!(
-                "note: {} is a system location — the update will ask for rights via {tool}",
-                exe.display()
-            );
+    if package_owner(&exe).is_some() {
+        match find_priv_tool() {
+            Some(tool) => {
+                println!(
+                    "note: {} is a system location — the update will ask for rights via {tool}",
+                    exe.display()
+                );
+            }
+            None => {
+                println!(
+                    "note: {} is a system location but neither sudo nor doas was found — \
+                     the update will fail; install sudo or run it as root",
+                    exe.display()
+                );
+            }
         }
-        None => {
-            println!(
-                "note: {} is a system location but neither sudo nor doas was found — \
-                 the update will fail; install sudo or run it as root",
-                exe.display()
-            );
-        }
-    }
-    if let Some(owner) = package_owner(&exe) {
         println!(
-            "note: this file belongs to pacman package `{owner}` — pacman may \
-             list it as modified after the update"
+            "note: this file belongs to pacman package `{}` — pacman may \
+             list it as modified after the update",
+            package_owner(&exe).unwrap_or_default()
         );
+        return;
     }
+    // v0.4.9: plain system files (install.sh leftovers in /usr/local/bin…)
+    // no longer need ANY password — the update moves the app to ~/.local/bin.
+    println!(
+        "note: {} is a system location — this update will MOVE hyprfetch to",
+        exe.display()
+    );
+    println!("      ~/.local/bin (no password needed — every later update is silent)");
 }
 
 /// Install: download the manifest-listed archive from the server →
@@ -280,7 +289,16 @@ async fn install(args: &UpdateArgs, cfg: &UpdateConfig, chk: &UpdateCheck) -> Re
         applied.installed,
         &applied.sha256[..16]
     );
-    if applied.escalated {
+    if applied.migrated {
+        // v0.4.9: the binary moved out of the system location — say so.
+        if let Some(np) = &applied.new_path {
+            println!("moved to {np} (the old location was not writable by you)");
+        }
+        for f in &applied.path_fixes {
+            println!("PATH updated: {f}");
+        }
+        println!("every later update now installs in place — no password, ever");
+    } else if applied.escalated {
         println!("system binary replaced via privilege escalation (mode 0755 kept)");
     }
 
@@ -289,15 +307,27 @@ async fn install(args: &UpdateArgs, cfg: &UpdateConfig, chk: &UpdateCheck) -> Re
     }
     if daemon::is_running().is_some() {
         println!("restarting daemon to apply…");
-        daemon::restart(&[])?;
+        // After a migration the NEW binary lives at applied.new_path — start
+        // it from there (current_exe still resolves to the old location).
+        daemon::restart_exe(&[], applied.new_path.as_deref().map(std::path::Path::new))?;
         println!("daemon restarted with the new version");
     } else {
         println!("restart any running `hyprfetch serve` to apply the new binary");
     }
 
     // A stale copy elsewhere on PATH would keep launching the old version
-    // (the "updated but nothing changed" trap) — offer to clean it up.
+    // (the "updated but nothing changed" trap). When the migration could
+    // not relink it automatically, show the ONE line that finishes the job;
+    // otherwise offer the interactive cleanup as before.
     let interactive = unsafe { libc::isatty(0) } == 1;
-    cleanup_stale_copies(interactive).await;
+    if let Some(hint) = &applied.system_fix_hint {
+        println!();
+        println!("⚠ ONE step left (once): the old system copy still shadows this install.");
+        println!("  run this line and you are done forever:");
+        println!("    {hint}");
+        println!("  afterwards every update — in-app, terminal, or installer — stays silent.");
+    } else {
+        cleanup_stale_copies(interactive).await;
+    }
     Ok(())
 }
