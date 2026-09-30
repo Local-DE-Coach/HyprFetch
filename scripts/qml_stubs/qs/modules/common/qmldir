@@ -1,0 +1,2 @@
+module qs.modules.common
+singleton MaterialTheme 1.0 MaterialTheme.qml

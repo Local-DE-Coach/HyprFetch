@@ -270,7 +270,11 @@ async fn install(args: &UpdateArgs, cfg: &UpdateConfig, chk: &UpdateCheck) -> Re
         },
     )
     .await?;
-    println!("\r  100% ({} / {} MiB)", fmt_mib(asset_total), fmt_mib(asset_total));
+    println!(
+        "\r  100% ({} / {} MiB)",
+        fmt_mib(asset_total),
+        fmt_mib(asset_total)
+    );
     println!(
         "installed {} (sha256 {})",
         applied.installed,

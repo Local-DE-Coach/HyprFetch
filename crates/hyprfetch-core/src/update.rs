@@ -279,12 +279,8 @@ pub fn version_newer(candidate: &str, current: &str) -> bool {
             .trim_start_matches('v')
             .split('.')
             .map(|c| {
-                let digits: String =
-                    c.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-                (
-                    digits.parse::<u64>().unwrap_or(0),
-                    c.to_string(),
-                )
+                let digits: String = c.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+                (digits.parse::<u64>().unwrap_or(0), c.to_string())
             })
             .collect()
     };
@@ -790,7 +786,11 @@ fn sweep_stale_staging() {
         .saturating_sub(3600);
     if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
         for e in entries.flatten() {
-            if !e.file_name().to_string_lossy().starts_with("hyprfetch-update-") {
+            if !e
+                .file_name()
+                .to_string_lossy()
+                .starts_with("hyprfetch-update-")
+            {
                 continue;
             }
             let old = e
@@ -818,16 +818,14 @@ fn escalate_and_swap(exe: &Path, staged: &Path, escalation: Escalation) -> Resul
         // historic behaviour (and still the best terminal experience).
         Escalation::Auto => {
             return match find_priv_tool() {
-                Some(program) => {
-                    swap_binary_escalated(
-                        exe,
-                        &std::fs::read(staged).map_err(UpdateError::Io)?,
-                        &PrivCmd {
-                            program: program.to_string(),
-                            pre_args: Vec::new(),
-                        },
-                    )
-                }
+                Some(program) => swap_binary_escalated(
+                    exe,
+                    &std::fs::read(staged).map_err(UpdateError::Io)?,
+                    &PrivCmd {
+                        program: program.to_string(),
+                        pre_args: Vec::new(),
+                    },
+                ),
                 None => Err(root_needed(exe, true)),
             };
         }
@@ -835,22 +833,31 @@ fn escalate_and_swap(exe: &Path, staged: &Path, escalation: Escalation) -> Resul
         Escalation::NonInteractive => {
             let mut v = Vec::new();
             if priv_helper_ready() {
-                v.push(("helper", PrivCmd {
-                    program: "sudo".to_string(),
-                    pre_args: vec!["-n", PRIV_HELPER_PATH],
-                }));
+                v.push((
+                    "helper",
+                    PrivCmd {
+                        program: "sudo".to_string(),
+                        pre_args: vec!["-n", PRIV_HELPER_PATH],
+                    },
+                ));
             }
             if which_on_path("sudo") && sudo_n_ok() {
-                v.push(("sudo -n", PrivCmd {
-                    program: "sudo".to_string(),
-                    pre_args: vec!["-n"],
-                }));
+                v.push((
+                    "sudo -n",
+                    PrivCmd {
+                        program: "sudo".to_string(),
+                        pre_args: vec!["-n"],
+                    },
+                ));
             }
             if which_on_path("pkexec") {
-                v.push(("pkexec", PrivCmd {
-                    program: "pkexec".to_string(),
-                    pre_args: Vec::new(),
-                }));
+                v.push((
+                    "pkexec",
+                    PrivCmd {
+                        program: "pkexec".to_string(),
+                        pre_args: Vec::new(),
+                    },
+                ));
             }
             v
         }
@@ -862,11 +869,7 @@ fn escalate_and_swap(exe: &Path, staged: &Path, escalation: Escalation) -> Resul
             // The helper takes the staged path DIRECTLY (no `sh -c`): its
             // whitelist only ever touches a `hyprfetch` binary.
             "helper" => swap_via_helper(staged, exe, tool),
-            _ => swap_binary_escalated(
-                exe,
-                &std::fs::read(staged).map_err(UpdateError::Io)?,
-                tool,
-            ),
+            _ => swap_binary_escalated(exe, &std::fs::read(staged).map_err(UpdateError::Io)?, tool),
         };
         match res {
             Ok(()) => return Ok(()),
@@ -2366,8 +2369,7 @@ mod tests {
             hex(&h.finalize())
         };
         let srv = MockAsset::spawn(body);
-        srv.stall
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        srv.stall.store(true, std::sync::atomic::Ordering::SeqCst);
         let dest = tmp.path().join("asset.bin");
         let err = download_asset_limits(
             &cfg,
@@ -2454,9 +2456,7 @@ mod tests {
         assert!(script.contains("visudo -cf"), "sudoers must be validated");
         assert!(script.contains("install -m 0440"));
         // finishes the pending swap with the staged binary
-        assert!(
-            script.contains("install '/tmp/hyprfetch-update-x/hyprfetch' '/usr/bin/hyprfetch'")
-        );
+        assert!(script.contains("install '/tmp/hyprfetch-update-x/hyprfetch' '/usr/bin/hyprfetch'"));
         // the helper heredoc is quoted so nothing expands inside it
         assert!(script.contains("<<'HYPRFETCH_HELPER_EOF'"));
     }

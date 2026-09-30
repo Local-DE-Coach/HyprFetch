@@ -8,6 +8,74 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.4.8] — 2026-09-30 (Quickshell bar widget: the download manager in your panel, at near-zero RAM)
+
+### Added — unified Quickshell bar widget (illogical-impulse / end4)
+- A single widget, one state machine: **idle → hover/recent → input →
+  downloading → completed toast → idle**. Hover the bar icon for recent
+  downloads (last 5), click `+` to paste a URL, watch live progress bars
+  with speed + ETA, and a 2.5 s completion toast auto-returns to idle.
+- **Near-zero RAM by construction**: at idle only the bar icon + one file
+  watcher are alive (~0.5 MB); every popup lives in a `LazyLoader` and is
+  DESTROYED when its state ends (≤ ~2 MB peak, freed on close); no extra
+  processes, no polling — the widget watches
+  `$XDG_DATA_HOME/download-manager/status.json` with `FileView
+  { watchChanges: true }` and the daemon pushes changes into it.
+- Material Design 3 styling from the existing `MaterialTheme` singleton
+  (surfaceContainer 80% popups, radius 16, primary progress, 200 ms
+  OutCubic transitions); status file written in place so the file watch
+  never silently breaks; JSON parse failures self-heal.
+- Install: `curl -fsSL https://istias.tech/hyprfetch/updates/widget-install.sh | sh`
+  (or `widget/install.sh` from the tarball/checkout — same script, it
+  bootstraps from the channel when no local files are present), then add
+  `DownloadWidget {}` to the bar layout and reload the shell. Files:
+  `widget/downloadManager/{DownloadWidget.qml,components/,utils/}` +
+  `widget/install.sh` + `widget/README.md`.
+- New release asset `hyprfetch-widget-<version>.tar.gz`, mirrored to a
+  **version-less stable URL** (`updates/widget.tar.gz` +
+  `updates/widget-install.sh`) by the Docs-repo channel mirror.
+
+### Added — the daemon mirrors a widget status file (event-driven)
+- New `hyprfetch-core::widget_status`: a task that subscribes to the engine
+  event bus and rewrites
+  `$XDG_DATA_HOME/download-manager/status.json` (default
+  `~/.local/share/download-manager/status.json`) with the exact schema the
+  widget reads: `active_downloads` (id/filename/progress/speed/eta/state),
+  `recent_downloads` (capped at 5, newest first, unix-SECOND timestamps) and
+  `last_completed`.
+- Event-driven with no polling: the writer parks until the next engine
+  event or a pending throttled-write deadline; progress storms coalesce to
+  at most one write per 500 ms and only when content actually changed; a
+  lagged broadcast subscriber resyncs from the DB instead of guessing;
+  writes are in-place (truncate + single write) so QFileSystemWatcher-based
+  watches keep working; the initial snapshot is written at startup so a
+  freshly launched widget always reads valid JSON.
+
+### Added — `hyprfetch add` / `hyprfetch reveal` (terminal + widget entry points)
+- `hyprfetch add <URL>…` queues downloads on the daemon — starting the
+  daemon when it isn't running (same path as `open`) — with optional
+  `--dir <path>` direct-save. Prints one `→ filename (id)` line per task.
+  Rejects non-http(s) URLs client-side before contacting the daemon.
+- `hyprfetch reveal <task-id>` opens a finished download's folder in the
+  file manager (the daemon picks a real GUI file manager) — used by the
+  widget's recent list, handy in scripts.
+
+### Tests — everything is verified before release
+- 7 new `widget_status` unit tests (schema exactness, speed/eta formats,
+  cap/dedupe, in-place write parse-back, XDG path resolution); workspace
+  suite green (189 tests), clippy zero warnings, cargo fmt clean.
+- New QML gate `scripts/qml_syntax_gate.py`: compiles every widget file in
+  a REAL QML engine (PySide6) against quickshell API stubs and asserts
+  cross-file references (controller members, MaterialTheme roles,
+  DownloadProcess API) — catches syntax + property typos in CI.
+- New battery `scripts/test_v048_battery.sh` — 24/24 checks against the
+  release binary: schema strict-parse, live progress + human speed observed
+  in the status file during a throttled download, completion empties
+  active/fills recent, add auto-start + multi-URL + bad-URL rejection,
+  reveal 404 + success, NO file writes while idle (event-driven), daemon
+  restart rebuilds state from the DB, doctor/update unaffected. The v0.4.7
+  updater battery still passes 11/11 (no regression).
+
 ## [0.4.7] — 2026-09-30 (Bulletproof updater: slow-network downloads + one-click update authorization)
 
 ### Fixed — `hyprfetch update` died on slow networks: "asset read: error decoding response body"

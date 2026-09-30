@@ -1,12 +1,15 @@
-//! Background-mode commands (v0.4.6): `hyprfetch open` / `hyprfetch close`.
+//! Background-mode commands (v0.4.6/v0.4.8): `hyprfetch open` / `close` /
+//! `add`.
 //!
 //! The daemon is a server — it never really "closes". These commands give
-//! it app-like close/reopen behavior:
+//! it app-like behavior:
 //! - `close` puts the running daemon into low-usage background mode
 //!   (downloads keep running, own wakeups drop 10×) and tells the user
 //!   how to come back.
 //! - `open` starts the daemon when needed and opens the web UI in the
 //!   default browser.
+//! - `add URL…` starts the daemon when needed and queues downloads —
+//!   the terminal/widget entry point (the Quickshell widget calls this).
 
 use anyhow::{bail, Context, Result};
 use std::time::Duration;
@@ -142,6 +145,86 @@ pub fn close() -> Result<()> {
     }
 }
 
+/// `hyprfetch reveal <task-id>` — open a download's folder in the file
+/// manager (the daemon picks a real GUI file manager). Used by the
+/// Quickshell widget's recent list.
+pub fn reveal(task_id: &str) -> Result<()> {
+    let (base, token) = running_base_or_start()?;
+    let (status, body_text) = post_json(
+        &base,
+        &format!("/api/tasks/{task_id}/reveal"),
+        &serde_json::json!({}),
+        token.as_deref(),
+    )?;
+    if status == 200 {
+        println!("opened the folder for {task_id}");
+        Ok(())
+    } else if status == 404 {
+        bail!("no such download: {task_id}")
+    } else {
+        bail!(
+            "server answered {status}: {}",
+            body_text.lines().next().unwrap_or("")
+        )
+    }
+}
+
+/// Daemon base + token, starting the daemon when it isn't running.
+fn running_base_or_start() -> Result<(String, Option<String>)> {
+    match daemon::is_running() {
+        Some(entry) => {
+            let token = std::fs::read_to_string(crate::helpers::token_file_path())
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            Ok((local_base(&entry.bind)?, token))
+        }
+        None => {
+            println!("HyprFetch is not running — starting it in the background…");
+            daemon::start(&[])?;
+            let entry = daemon::is_running().context("daemon exited right after start")?;
+            let token = std::fs::read_to_string(crate::helpers::token_file_path())
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            Ok((local_base(&entry.bind)?, token))
+        }
+    }
+}
+
+/// POST a JSON body with bearer-token retry on 401 (same policy as
+/// `http_call`, but with a body).
+fn post_json(
+    base: &str,
+    path: &str,
+    body: &serde_json::Value,
+    token: Option<&str>,
+) -> Result<(u16, String)> {
+    let client = client()?;
+    let url = format!("{base}{path}");
+    let send = |tok: Option<&str>| -> Result<(u16, String)> {
+        let mut req = client.post(&url).json(body);
+        if let Some(t) = tok {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().context("request to the running server failed")?;
+        let status = resp.status().as_u16();
+        let text = resp.text().unwrap_or_default();
+        Ok((status, text))
+    };
+    let (status, text) = send(token)?;
+    if status == 401 {
+        let fresh = std::fs::read_to_string(crate::helpers::token_file_path())
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if fresh.as_deref() != token {
+            return send(fresh.as_deref());
+        }
+    }
+    Ok((status, text))
+}
+
 fn human_bytes(n: u64) -> String {
     let v = n as f64;
     if v >= 1024.0 * 1024.0 {
@@ -149,4 +232,56 @@ fn human_bytes(n: u64) -> String {
     } else {
         format!("{:.0} KiB", v / 1024.0)
     }
+}
+
+/// `hyprfetch add URL…` — queue downloads on the daemon (starting it when
+/// it isn't running). This is what the Quickshell bar widget calls; it is
+/// also handy from scripts and keybindings.
+pub fn add(urls: &[String], dir: Option<&std::path::Path>) -> Result<()> {
+    if urls.is_empty() {
+        bail!("nothing to add — pass one or more http(s) URLs");
+    }
+    for u in urls {
+        let lowered = u.trim().to_lowercase();
+        if !(lowered.starts_with("http://") || lowered.starts_with("https://")) {
+            bail!("invalid URL `{u}` — hyprfetch add accepts http(s) URLs");
+        }
+    }
+
+    // Start the daemon when it isn't running (same path as `open`).
+    let (base, token) = running_base_or_start()?;
+
+    let mut body = serde_json::json!({ "urls": urls });
+    if let Some(d) = dir {
+        body["save_dir"] = serde_json::json!(d.to_string_lossy());
+    }
+    let (status, body_text) = post_json(&base, "/api/tasks", &body, token.as_deref())?;
+    if status != 200 && status != 201 {
+        bail!(
+            "server answered {status}: {}",
+            body_text.lines().next().unwrap_or("")
+        );
+    }
+
+    // Friendly per-file output: `→ arch.iso  (t_ab12)`.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
+    let mut n = 0usize;
+    if let Some(tasks) = parsed.get("tasks").and_then(|t| t.as_array()) {
+        for t in tasks {
+            n += 1;
+            let name = t
+                .get("filename")
+                .and_then(|f| f.as_str())
+                .unwrap_or("download");
+            let id = t.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+            println!("  → {name}  ({id})");
+        }
+    }
+    if n == 0 {
+        println!("added {len} download(s)", len = urls.len());
+    } else {
+        println!("{n} download(s) queued — watch them in the widget or the web UI.");
+    }
+    Ok(())
 }

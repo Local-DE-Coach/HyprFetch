@@ -209,6 +209,20 @@ jobs:
           sha256sum "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
           ls -la "$ARCHIVE.tar.gz" "$ARCHIVE.tar.gz.sha256"
 
+      # Quickshell bar widget — a source-only archive (QML + installer).
+      # Built ONCE (on the native target) so the release has a stable asset
+      # the Docs mirror re-publishes as the version-less widget.tar.gz.
+      - name: Package widget (Quickshell bar)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          VERSION="${{ needs.prepare.outputs.tag }}"
+          VERSION="${VERSION#v}"
+          bash -n widget/install.sh
+          test -f widget/downloadManager/DownloadWidget.qml
+          tar czf "hyprfetch-widget-${VERSION}.tar.gz" -C widget install.sh README.md downloadManager
+          sha256sum "hyprfetch-widget-${VERSION}.tar.gz" > "hyprfetch-widget-${VERSION}.tar.gz.sha256"
+          ls -la "hyprfetch-widget-${VERSION}.tar.gz"*
+
       # .deb for Ubuntu/Debian — only on the native x86_64 GNU target.
       # cargo-deb re-packages the already-built binary (--no-build); the
       # "target/release/hyprfetch" asset entry in [package.metadata.deb]
@@ -247,7 +261,6 @@ jobs:
             hyprfetch_*.deb
             hyprfetch-*.rpm
           retention-days: 14
-
   release:
     name: Publish release
     needs: [prepare, build]
@@ -394,6 +407,7 @@ jobs:
           | `hyprfetch_{version}-1_amd64.deb` | Debian / Ubuntu |
           | `hyprfetch-{version}-1.x86_64.rpm` | Fedora / RHEL |
           | `PKGBUILD` | Arch Linux (makepkg -si) |
+          | `hyprfetch-widget-{version}.tar.gz` | Quickshell bar widget (any distro) |
 
           ## 🔐 Verify
 

@@ -62,6 +62,7 @@ See [`docs/architecture.md`](docs/architecture.md) for what the system is,
 │   ├── hyprfetch-db/      # SQLite persistence + migrations
 │   └── hyprfetch-api/     # axum HTTP server + WebSocket
 │       └── ui/            # Svelte SPA (src + committed dist/, embedded at compile time)
+├── widget/                # Quickshell bar widget (illogical-impulse) + its installer
 ├── packaging/             # deb/rpm/Arch packaging used by the release workflow
 ├── docs/                  # architecture, design rationale, API, install, dev guide
 └── .github/               # CI: fmt + clippy + test + audit; release builds packages
@@ -82,6 +83,9 @@ Already installed? This is the whole day-to-day:
 | Follow the log | `hyprfetch logs -f` |
 | Check for a new release | `hyprfetch update --check` |
 | Update to the latest release | `hyprfetch update` |
+| Add a download from the terminal | `hyprfetch add <URL>` (starts the daemon when it isn't running) |
+| Open a download's folder | `hyprfetch reveal <task-id>` |
+| Install the Quickshell bar widget | `curl -fsSL https://istias.tech/hyprfetch/updates/widget-install.sh \| sh` |
 | Uninstall | `curl -fsSL https://istias.tech/hyprfetch/updates/install.sh \| sh -s -- --uninstall` |
 
 Downloads land in `~/Downloads` by default; paused tasks survive restarts.
@@ -144,11 +148,36 @@ hyprfetch daemon restart      # stop + start again (same args)
 hyprfetch daemon stop         # graceful SIGTERM (SIGKILL fallback)
 hyprfetch logs -f             # follow the daemon log (like tail -f)
 
+hyprfetch add <URL>…          # queue downloads (starts the daemon when needed)
+hyprfetch reveal <task-id>    # open a download's folder in the file manager
+
 hyprfetch serve --exit-when-idle 30   # sleep mode: exit after 30 idle minutes
 ```
 
 Daemon state lives under `~/.local/state/hyprfetch/` (logs rotate at 5 MiB,
 3 files kept). `daemon start` returns only after `/healthz` answers.
+
+## Bar widget (Quickshell, illogical-impulse)
+
+A single unified download-manager widget for the end4 bar — a state machine
+(idle → recent → input → downloading → completed toast → idle) with
+near-zero RAM: at idle only the icon + one file watcher exist (~0.5 MB),
+every popup is a `LazyLoader` that is destroyed when it closes, and updates
+arrive by watching a status file the daemon mirrors — never by polling, and
+no extra processes.
+
+```bash
+curl -fsSL https://istias.tech/hyprfetch/updates/widget-install.sh | sh
+```
+
+Then add one line — `DownloadWidget {}` — into the bar layout in
+`~/.config/quickshell/ii/modules/bar/Bar.qml` and reload the shell
+(`qs -c illogical-impulse kill && qs -c illogical-impulse &`). Hover shows
+recent downloads, `+` opens a URL field, live progress/speed/ETA appear
+while anything is downloading, a toast confirms completion. From a checkout
+or a release tarball, `widget/install.sh` does the same thing. See
+[`widget/README.md`](widget/README.md) for the file layout and the exact
+status-file contract.
 
 ## Self-update
 

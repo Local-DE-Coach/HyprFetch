@@ -1270,10 +1270,9 @@ pub async fn update_check(
     let stale = stale_copies_json().await;
     // One-click update helper state (a process probe — cheap, but keep it
     // off the async reactor).
-    let one_click_ready =
-        tokio::task::spawn_blocking(hyprfetch_core::update::priv_helper_ready)
-            .await
-            .unwrap_or(false);
+    let one_click_ready = tokio::task::spawn_blocking(hyprfetch_core::update::priv_helper_ready)
+        .await
+        .unwrap_or(false);
     match hyprfetch_core::update::check(&state.update_cfg).await {
         Ok(chk) => {
             let available = chk.available;
@@ -1483,11 +1482,10 @@ pub async fn update_authorize(
     }
 
     // Spawn the terminal window (fire-and-forget) and watch for the swap.
-    let spawned = tokio::task::spawn_blocking(move || {
-        hyprfetch_core::update::spawn_terminal_script(&script)
-    })
-    .await
-    .map_err(|e| ApiError::InternalError(format!("authorize join: {e}")))?;
+    let spawned =
+        tokio::task::spawn_blocking(move || hyprfetch_core::update::spawn_terminal_script(&script))
+            .await
+            .map_err(|e| ApiError::InternalError(format!("authorize join: {e}")))?;
 
     match spawned {
         Ok(terminal) => {
@@ -1550,9 +1548,7 @@ pub async fn update_authorize(
 }
 
 /// `GET /api/update/authorize/status` — poll for the one-time setup result.
-pub async fn update_authorize_status(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn update_authorize_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let auth = state.authorize_state.lock().await;
     Json(serde_json::to_value(&*auth).unwrap_or(serde_json::json!({})))
 }

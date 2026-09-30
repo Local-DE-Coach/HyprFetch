@@ -15,6 +15,7 @@ pub mod segment;
 pub mod ssrf;
 pub mod task;
 pub mod update;
+pub mod widget_status;
 
 pub use categories::{
     category_for_filename, ensure_all_dirs, ext_for_content_type, override_key, sanitize_filename,
@@ -29,3 +30,4 @@ pub use segment::{open_target_file, Segment, SegmentEvent, SegmentWorker, Segmen
 pub use ssrf::{check_url, is_private_ip, private_range_name, SsrfPolicy, UrlSafetyError};
 pub use task::{TaskId, TaskState};
 pub use update::{ApplyResult, UpdateCheck, UpdateConfig, UpdateError};
+pub use widget_status::{spawn as spawn_widget_status, status_dir, status_file_path};

@@ -33,7 +33,7 @@ use logger::LogMode;
     name = "hyprfetch",
     version,
     about = "Minimal-RAM download manager with a browser UI",
-    after_help = "Run modes:\n  hyprfetch dev                 verbose dev console + auto-open UI\n  hyprfetch serve               prod server in the foreground\n  hyprfetch daemon start [--…]  run detached (logs via `hyprfetch logs -f`)\n  hyprfetch daemon stop|restart|status\n  hyprfetch open                start if needed + open the web UI\n  hyprfetch close               keep running in the background (low usage)\n  hyprfetch logs [-f] [-n 100]  tail daemon logs\n  hyprfetch update [--check]    in-app self-update"
+    after_help = "Run modes:\n  hyprfetch dev                 verbose dev console + auto-open UI\n  hyprfetch serve               prod server in the foreground\n  hyprfetch daemon start [--…]  run detached (logs via `hyprfetch logs -f`)\n  hyprfetch daemon stop|restart|status\n  hyprfetch open                start if needed + open the web UI\n  hyprfetch close               keep running in the background (low usage)\n  hyprfetch add <URL>…          add download(s) from the terminal / widgets\n  hyprfetch reveal <id>         open a download's folder in the file manager\n  hyprfetch logs [-f] [-n 100]  tail daemon logs\n  hyprfetch update [--check]    in-app self-update"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -77,6 +77,19 @@ enum Command {
     /// Start the daemon if it isn't running, then open the web UI in the
     /// default browser. The app-like way to come back after `close`.
     Open,
+    /// Add download(s) to the running (or freshly started) daemon from the
+    /// terminal or from desktop widgets — no browser needed.
+    Add {
+        /// One or more http(s) URLs to download.
+        #[arg(required = true)]
+        urls: Vec<String>,
+        /// Optional save directory (direct save; auto-categorization is
+        /// skipped for these tasks).
+        #[arg(long, short = 'd')]
+        dir: Option<PathBuf>,
+    },
+    /// Open a finished download's folder in the file manager.
+    Reveal { task_id: String },
     /// Put the running daemon into low-usage background mode — it looks
     /// closed but stays alive (downloads keep running) at its usual few
     /// MiB of RAM. Reopen with `hyprfetch open`.
@@ -186,6 +199,12 @@ fn main() -> Result<()> {
         Command::Logs { follow, lines } => return daemon::logs(*follow, *lines),
         Command::Open => return background::open(),
         Command::Close => return background::close(),
+        Command::Add { urls, dir } => {
+            return background::add(urls, dir.as_deref());
+        }
+        Command::Reveal { task_id } => {
+            return background::reveal(task_id);
+        }
         _ => {}
     }
 
@@ -225,7 +244,12 @@ async fn run_async(cli: Cli, orig_args: Vec<String>) -> Result<()> {
             })
             .await
         }
-        Command::Daemon { .. } | Command::Logs { .. } | Command::Open | Command::Close => {
+        Command::Daemon { .. }
+        | Command::Logs { .. }
+        | Command::Open
+        | Command::Close
+        | Command::Add { .. }
+        | Command::Reveal { .. } => {
             unreachable!("handled in main()")
         }
     }
@@ -331,6 +355,11 @@ async fn run_serve(
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "startup resume pass failed"),
     }
+
+    // Widget status file (v0.4.8): mirror download state into
+    // ~/.local/share/download-manager/status.json for Quickshell bar
+    // widgets — event-driven, throttled, zero extra RAM when idle.
+    hyprfetch_core::spawn_widget_status(Arc::clone(&db), Arc::clone(&engine));
 
     // API token: auto-generated on first run and stored at
     // `~/.config/hyprfetch/token`. Enforced only on non-loopback
