@@ -239,10 +239,38 @@ async fn install(args: &UpdateArgs, cfg: &UpdateConfig, chk: &UpdateCheck) -> Re
     }
 
     println!("downloading + verifying {} (update channel)…", asset.name);
-    // The user already consented above, so the updater may escalate via
-    // sudo/doas when the binary lives in a system location.
-    let applied =
-        hyprfetch_core::update::apply(cfg, chk, hyprfetch_core::update::Escalation::Auto).await?;
+    // Streamed with NO total deadline (slow networks now succeed), retried
+    // with resume on stalls; the user already consented above, so the swap
+    // may escalate via sudo/doas when the binary lives in a system location.
+    let mut last_printed = 0u64;
+    let asset_total = asset.size;
+    let fmt_mib = |b: u64| format!("{:.1}", b as f64 / (1024.0 * 1024.0));
+    let applied = hyprfetch_core::update::apply_with_progress(
+        cfg,
+        chk,
+        hyprfetch_core::update::Escalation::Auto,
+        |done, total| {
+            let total = if total == 0 { asset_total } else { total };
+            // print at most every 256 KiB
+            if done.saturating_sub(last_printed) < 256 * 1024 && done != total {
+                return;
+            }
+            last_printed = done;
+            if let Some(pct) = done.checked_mul(100).and_then(|v| v.checked_div(total)) {
+                print!(
+                    "\r  {:>3}% ({} / {} MiB)",
+                    pct,
+                    fmt_mib(done),
+                    fmt_mib(total)
+                );
+            } else {
+                print!("\r  {} MiB", fmt_mib(done));
+            }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        },
+    )
+    .await?;
+    println!("\r  100% ({} / {} MiB)", fmt_mib(asset_total), fmt_mib(asset_total));
     println!(
         "installed {} (sha256 {})",
         applied.installed,

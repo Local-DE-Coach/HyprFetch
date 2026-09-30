@@ -1268,6 +1268,12 @@ pub async fn update_check(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let stale = stale_copies_json().await;
+    // One-click update helper state (a process probe — cheap, but keep it
+    // off the async reactor).
+    let one_click_ready =
+        tokio::task::spawn_blocking(hyprfetch_core::update::priv_helper_ready)
+            .await
+            .unwrap_or(false);
     match hyprfetch_core::update::check(&state.update_cfg).await {
         Ok(chk) => {
             let available = chk.available;
@@ -1279,6 +1285,7 @@ pub async fn update_check(
                 "available": available,
             }));
             v["stale_copies"] = stale;
+            v["one_click_ready"] = serde_json::Value::Bool(one_click_ready);
             Ok(Json(v))
         }
         Err(e) => Ok(Json(serde_json::json!({
@@ -1288,6 +1295,7 @@ pub async fn update_check(
             "error": format!("update channel unreachable: {e}"),
             "updates_page": hyprfetch_core::update::UPDATES_PAGE_URL,
             "stale_copies": stale,
+            "one_click_ready": one_click_ready,
         }))),
     }
 }
@@ -1328,18 +1336,52 @@ pub async fn update_apply(
     };
 
     // Download from the project mirror → sha256-verify → swap atomically.
-    // The daemon has no TTY, so a system-owned install location is updated
-    // through passwordless `sudo -n` when available, then `pkexec` (the
-    // desktop polkit agent shows the graphical password prompt); when
-    // neither can run it fails with an actionable terminal hint.
-    let applied = match hyprfetch_core::update::apply(
+    // The download itself works for ANY user (streamed, resumable — no
+    // total deadline); only the final swap on a system-owned install needs
+    // privileges, walking the ladder: one-click helper (silent) →
+    // `sudo -n` (silent) → `pkexec` (GUI password prompt when a polkit
+    // agent runs) → `needs_password` (staged binary kept for the one-time
+    // setup below).
+    let download_result = hyprfetch_core::update::apply_with_progress(
         &state.update_cfg,
         &chk,
         hyprfetch_core::update::Escalation::NonInteractive,
+        |done, total| {
+            // progress lands in the daemon log every ~1 MiB
+            if total > 0 && (done % (1024 * 1024)) < 64 * 1024 {
+                tracing::debug!(done, total, "update download progress");
+            }
+        },
     )
-    .await
-    {
+    .await;
+
+    let applied = match download_result {
         Ok(a) => a,
+        Err(hyprfetch_core::update::UpdateError::PasswordRequired {
+            staged,
+            target,
+            hint,
+        }) => {
+            // Keep the staged binary and answer needs_password so the UI
+            // can offer the ONE-TIME setup (one password entry → silent
+            // in-app updates forever after).
+            let latest_for_stage = latest.clone();
+            *state.staged_update.lock().await = Some(crate::StagedUpdate {
+                staged,
+                target,
+                latest: latest_for_stage,
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            });
+            return Ok(Json(serde_json::json!({
+                "needs_password": true,
+                "one_click_ready": false,
+                "hint": hint,
+                "manual_command": "sudo hyprfetch update",
+            })));
+        }
         Err(hyprfetch_core::update::UpdateError::RootNeeded { path, hint }) => {
             return Err(ApiError::InvalidRequest(format!(
                 "this HyprFetch was installed in a system location ({path}) and \
@@ -1349,6 +1391,9 @@ pub async fn update_apply(
         }
         Err(e) => return Err(ApiError::InternalError(format!("update apply: {e}"))),
     };
+
+    // A successful swap invalidates any pending one-click staging.
+    *state.staged_update.lock().await = None;
 
     let restart = q.restart.unwrap_or(true);
     let restarted = if restart {
@@ -1367,6 +1412,149 @@ pub async fn update_apply(
         "restarting": restarted,
         "stale_copies": stale,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/update/authorize  +  GET /api/update/authorize/status
+// ---------------------------------------------------------------------------
+
+/// `POST /api/update/authorize` — the ONE-TIME one-click update setup.
+///
+/// Requires a pending staged update (i.e. `POST /api/update/apply` answered
+/// `needs_password` first). Spawns a TERMINAL WINDOW running the narrow
+/// privileged setup under `sudo`: it installs the root-owned
+/// `/usr/lib/hyprfetch/privileged-update` helper + a validated sudoers
+/// drop-in for THIS user, then finishes the pending swap with the staged
+/// binary. One password entry — every future in-app update runs silently
+/// through the helper. The daemon polls for completion and restarts itself.
+pub async fn update_authorize(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Exactly one authorize run at a time.
+    {
+        let auth = state.authorize_state.lock().await;
+        if auth.running && !auth.done && auth.error.is_none() {
+            return Err(ApiError::InvalidRequest(
+                "an update authorization is already running — check /api/update/authorize/status"
+                    .into(),
+            ));
+        }
+    }
+    let staged = {
+        let s = state.staged_update.lock().await;
+        s.clone().ok_or_else(|| {
+            ApiError::InvalidRequest(
+                "no pending update to authorize — run Check now → Install & restart first".into(),
+            )
+        })?
+    };
+    // Staging entries expire after 1 h (the temp dir may have been cleaned).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now.saturating_sub(staged.created_at) > 3600
+        || !std::path::Path::new(&staged.staged).exists()
+    {
+        *state.staged_update.lock().await = None;
+        return Err(ApiError::InvalidRequest(
+            "the staged update expired — run Check now → Install & restart again".into(),
+        ));
+    }
+
+    let user = hyprfetch_core::update::invoking_user().unwrap_or_else(|| "root".to_string());
+    let script = hyprfetch_core::update::setup_script(
+        &user,
+        std::path::Path::new(&staged.staged),
+        std::path::Path::new(&staged.target),
+    );
+
+    // Reset + mark running.
+    {
+        let mut auth = state.authorize_state.lock().await;
+        *auth = crate::AuthorizeState {
+            running: true,
+            terminal: None,
+            started_at: Some(now),
+            done: false,
+            restarted: false,
+            error: None,
+        };
+    }
+
+    // Spawn the terminal window (fire-and-forget) and watch for the swap.
+    let spawned = tokio::task::spawn_blocking(move || {
+        hyprfetch_core::update::spawn_terminal_script(&script)
+    })
+    .await
+    .map_err(|e| ApiError::InternalError(format!("authorize join: {e}")))?;
+
+    match spawned {
+        Ok(terminal) => {
+            state.authorize_state.lock().await.terminal = Some(terminal.clone());
+            // Watcher: poll until the helper consumed the staged binary
+            // (success) or the 6-minute window closes.
+            let watch_state = state.clone();
+            let staged_path = staged.staged.clone();
+            let started = now;
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let consumed = !std::path::Path::new(&staged_path).exists();
+                    let expired = now.saturating_sub(started) > 360;
+                    let mut auth = watch_state.authorize_state.lock().await;
+                    if consumed && hyprfetch_core::update::priv_helper_ready() {
+                        auth.done = true;
+                        auth.running = false;
+                        drop(auth);
+                        tracing::info!("one-click update setup finished — restarting daemon");
+                        let restarted = trigger_restart(&watch_state).await.is_ok();
+                        watch_state.authorize_state.lock().await.restarted = restarted;
+                        return;
+                    }
+                    if expired {
+                        auth.running = false;
+                        auth.error = Some(
+                            "timed out waiting for the terminal setup — did the password \
+                             prompt complete? try again or run `sudo hyprfetch update`"
+                                .into(),
+                        );
+                        return;
+                    }
+                }
+            });
+            Ok(Json(serde_json::json!({
+                "spawned": true,
+                "terminal": terminal,
+                "message": format!(
+                    "a {terminal} window opened — enter your password there once; \
+                     the app updates and restarts by itself"
+                ),
+            })))
+        }
+        Err(e) => {
+            let mut auth = state.authorize_state.lock().await;
+            auth.running = false;
+            auth.error = Some(e.to_string());
+            Ok(Json(serde_json::json!({
+                "spawned": false,
+                "error": e.to_string(),
+                "manual_command": "sudo hyprfetch update",
+            })))
+        }
+    }
+}
+
+/// `GET /api/update/authorize/status` — poll for the one-time setup result.
+pub async fn update_authorize_status(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let auth = state.authorize_state.lock().await;
+    Json(serde_json::to_value(&*auth).unwrap_or(serde_json::json!({})))
 }
 
 // ---------------------------------------------------------------------------

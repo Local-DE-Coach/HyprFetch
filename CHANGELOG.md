@@ -8,6 +8,65 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.4.7] — 2026-09-30 (Bulletproof updater: slow-network downloads + one-click update authorization)
+
+### Fixed — `hyprfetch update` died on slow networks: "asset read: error decoding response body"
+- Root cause (owner's exact 1m04s failure, reproduced in a sandbox on a
+  throttled channel): the whole release archive was buffered behind ONE
+  60-second HTTP timeout with no retries — any download slower than
+  ~65 KB/s, or a single stalled moment, aborted the update with a cryptic
+  error. The server was never at fault; the channel itself serves at full
+  speed whenever the network lets it.
+- The archive download is now STREAMED to disk with NO total deadline:
+  - a slow connection simply takes as long as it takes;
+  - an attempt is abandoned only when NO bytes arrive for 30s;
+  - up to 3 attempts, each RESUMING from where the bytes stopped
+    (`Range: bytes=N-`), so a dropped connection costs seconds, not the
+    whole download;
+  - sha256 is verified at the end; a corrupt body is wiped and retried
+    fresh before any error surfaces — a bad swap stays impossible;
+  - the CLI shows a live progress percentage while downloading.
+- Verified: the same 40 KB/s channel that killed 0.4.6 at 60s now completes
+  in 100s; unit tests cover drop-resume, stall-retry and corrupt-body
+  retry paths against a raw-socket mock server.
+
+### Fixed — in-app update asks for a password (or fails) on system installs
+- How other apps update inside the app: they ship a SYSTEM RULE (a polkit
+  action / sudoers entry) that grants their updater root rights for exactly
+  one narrow job. HyprFetch now does the same, with a one-time setup:
+  - the WebUI update walks a ladder: one-click helper (silent) →
+    passwordless `sudo -n` (silent) → `pkexec` (GUI password prompt when a
+    polkit agent runs) → and, when none answers, a clear
+    "Enable one-click updates (password once)" card;
+  - clicking it opens a TERMINAL WINDOW where the password is typed ONCE:
+    a narrow root-owned helper (`/usr/lib/hyprfetch/privileged-update`,
+    allowed to touch only `/usr/bin/hyprfetch` and
+    `/usr/local/bin/hyprfetch`) and a visudo-validated sudoers drop-in are
+    installed, and the pending update finishes immediately;
+  - every future in-app update then swaps the binary silently — no
+    terminal, no password, exactly like GUI package managers;
+  - the Updates page shows a "one-click updates ✓" badge and a polling
+    status while the terminal setup runs.
+- `GET /api/update/check` reports `one_click_ready`;
+  `POST /api/update/authorize` (+ `/status`) drive the setup; the staged
+  binary from a `needs_password` update is reused so nothing is
+  re-downloaded.
+
+### Fixed — version comparison for pre-release-ish tags
+- `0.4.7-beta` compared as 7, not 0: version chunks now use their leading
+  digits, so a prerelease of the NEXT version is correctly "newer".
+
+### Changed — the one main install command (removes the old app first)
+- `curl -fsSL https://istias.tech/hyprfetch/updates/install.sh | sh`
+  remains the version-less main install command (the server's latest.json
+  always points at the newest release), and it now REPLACES any previous
+  install: a package-manager copy (pacman / deb / rpm) is removed through
+  the package manager first (with an explicit `| sudo sh` instruction when
+  root rights are required), a running daemon is stopped before the swap
+  and restarted with the new binary afterwards, and the previous binary is
+  kept as `.old` for rollback. Uninstall also removes the one-click update
+  helper and its sudoers drop-in.
+
 ## [0.4.6] — 2026-09-30 (Auto-save extensions from Content-Type, cross-browser theme sync, real file managers, resource usage + background mode)
 
 ### Fixed — images saved as `images?q=tbn:ANd9Gc…` in `other/` instead of Pictures

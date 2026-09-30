@@ -6,12 +6,27 @@
   // version after an update) with a one-click fix.
   import { serverInfo, settings, refreshServer, notify } from '../lib/store.js'
   import { fmtUptime } from '../lib/format.js'
-  import { checkUpdate, applyUpdate, restartServer, fixStaleCopies } from '../api.js'
+  import {
+    checkUpdate,
+    applyUpdate,
+    restartServer,
+    fixStaleCopies,
+    authorizeUpdate,
+    authorizeStatus,
+  } from '../api.js'
 
   let updateInfo = null
   let staleCopies = []
   let busy = false
   let msg = ''
+
+  // needs_password: the update downloaded fine but the system location
+  // needs the user's password once (no passwordless route answered).
+  let needsPassword = false
+  let oneClickReady = false
+  let authorizing = false
+  let authorizeMsg = ''
+  let authorizePoll = null
 
   async function doCheck() {
     busy = true
@@ -19,6 +34,7 @@
     try {
       updateInfo = await checkUpdate()
       staleCopies = updateInfo.stale_copies ?? []
+      oneClickReady = !!updateInfo.one_click_ready
       msg = updateInfo.available
         ? `version ${updateInfo.latest} is available`
         : updateInfo.latest
@@ -36,6 +52,12 @@
     msg = 'installing… the server will restart and auto-resume downloads'
     try {
       const res = await applyUpdate(true)
+      if (res.needs_password) {
+        needsPassword = true
+        oneClickReady = false
+        msg = `the update downloaded, but installing it in a system location needs your password once`
+        return
+      }
       staleCopies = res.stale_copies ?? []
       msg = `installed ${res.installed} — restarting… page reloads in a few seconds`
       setTimeout(() => location.reload(), 4000)
@@ -44,6 +66,49 @@
       msg = `install failed: ${e.message}`
     } finally {
       busy = false
+    }
+  }
+
+  // The one-time setup: opens a terminal window; the user types their
+  // password ONCE; the helper + sudoers rule land, the pending update
+  // finishes and the server restarts itself. Every later update is silent.
+  async function doAuthorize() {
+    authorizing = true
+    authorizeMsg = 'opening a terminal window…'
+    try {
+      const res = await authorizeUpdate()
+      if (!res.spawned) {
+        authorizeMsg = `could not open a terminal: ${res.error}. Manual way: ${res.manual_command}`
+        return
+      }
+      authorizeMsg = res.message
+      // Poll while the terminal setup runs; the daemon restarts itself when
+      // the swap lands — reload shortly after.
+      authorizePoll = setInterval(async () => {
+        try {
+          const st = await authorizeStatus()
+          if (st.done) {
+            clearInterval(authorizePoll)
+            authorizePoll = null
+            needsPassword = false
+            oneClickReady = true
+            authorizeMsg = 'one-click updates enabled ✔'
+            msg = 'update installed — reloading…'
+            setTimeout(() => location.reload(), 4000)
+          } else if (st.error) {
+            clearInterval(authorizePoll)
+            authorizePoll = null
+            authorizing = false
+            authorizeMsg = st.error
+          }
+        } catch (_) {
+          /* daemon restarting — keep polling */
+        }
+      }, 2000)
+    } catch (e) {
+      authorizeMsg = `setup failed: ${e.message}`
+    } finally {
+      authorizing = false
     }
   }
 
@@ -110,6 +175,9 @@
       <h2 class="card-title text-base">Check for updates</h2>
       <div class="flex flex-wrap items-center gap-3">
         <span class="badge badge-lg badge-outline">installed: {versionBadge($serverInfo.version)}</span>
+        {#if oneClickReady}
+          <span class="badge badge-lg badge-success" title="in-app updates run without any password prompt">one-click updates ✓</span>
+        {/if}
         {#if updateInfo}
           <span class="badge badge-lg {updateInfo.available ? 'badge-success' : 'badge-ghost'}">
             latest: {versionBadge(updateInfo.latest)}
@@ -136,6 +204,30 @@
       </div>
       {#if msg}<p class="text-xs opacity-70">{msg}</p>{/if}
 
+      {#if needsPassword}
+        <div class="alert alert-info py-2 px-3 text-xs" role="alert">
+          <div class="min-w-0">
+            <div class="font-semibold">
+              🔐 One password, then updates are automatic forever
+            </div>
+            <p class="opacity-80 mt-1">
+              HyprFetch lives in a system location, so installing the update
+              needs root ONCE. Other apps do this through a system rule —
+              click below and a terminal window opens: type your password
+              there one time. Every future in-app update then installs
+              silently (this is exactly how GUI package managers work).
+            </p>
+            <div class="mt-1 flex flex-wrap items-center gap-2">
+              <button class="btn btn-xs btn-primary" disabled={authorizing} on:click={doAuthorize}>
+                {authorizing ? 'waiting for the terminal…' : 'Enable one-click updates (password once)'}
+              </button>
+              <span class="opacity-60 font-mono">or run: sudo hyprfetch update</span>
+            </div>
+            {#if authorizeMsg}<p class="mt-1 opacity-80">{authorizeMsg}</p>{/if}
+          </div>
+        </div>
+      {/if}
+
       {#if staleCopies.length}
         <div class="alert alert-warning py-2 px-3 text-xs" role="alert">
           <div class="min-w-0">
@@ -161,9 +253,11 @@
       <p class="text-xs opacity-60">
         Updates are served by the project's own server (istias.tech) as
         sha256-verified archives — no GitHub account or token needed, ever.
-        System installs update through passwordless sudo or the desktop
-        pkexec prompt; the banner above appears when an old copy would
-        otherwise keep launching the previous version.
+        Slow or flaky networks are fine: downloads stream with no time limit
+        and resume automatically. System installs are handled by the
+        one-click update rule (enable it above once) or the desktop pkexec
+        prompt; the banner above appears when an old copy would otherwise
+        keep launching the previous version.
       </p>
     </div>
   </section>

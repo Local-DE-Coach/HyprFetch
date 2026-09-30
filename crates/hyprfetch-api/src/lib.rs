@@ -30,6 +30,39 @@ use tokio::sync::Notify;
 /// Used by `POST /api/update/restart` to re-exec a replacement server.
 pub static SERVE_ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
+/// A downloaded-but-not-yet-swapped update binary kept for the WebUI's
+/// one-click update setup (`POST /api/update/authorize`). Filled when
+/// `POST /api/update/apply` answers `needs_password`.
+#[derive(Debug, Clone)]
+pub struct StagedUpdate {
+    /// Staged new binary (temp file, removed by the helper on success).
+    pub staged: String,
+    /// System path to replace (e.g. /usr/bin/hyprfetch).
+    pub target: String,
+    /// Version being installed.
+    pub latest: String,
+    /// Epoch seconds when this staging entry was created (expiry guard).
+    pub created_at: u64,
+}
+
+/// Live status of the one-click update setup (terminal window running the
+/// privileged one-time setup script).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AuthorizeState {
+    /// A setup run is/was active.
+    pub running: bool,
+    /// Terminal emulator the setup window was opened in, if spawned.
+    pub terminal: Option<String>,
+    /// Epoch seconds when the terminal was spawned.
+    pub started_at: Option<u64>,
+    /// The staged binary was consumed — swap finished.
+    pub done: bool,
+    /// The daemon restart was triggered after the swap.
+    pub restarted: bool,
+    /// Human-readable failure (timeout, spawn failure, …).
+    pub error: Option<String>,
+}
+
 /// Shared application state passed to every handler.
 #[derive(Clone)]
 pub struct AppState {
@@ -43,6 +76,10 @@ pub struct AppState {
     pub update_cfg: Arc<UpdateConfig>,
     /// Cached result of the last `GET /api/update/check`.
     pub update_cache: Arc<tokio::sync::Mutex<Option<UpdateCheck>>>,
+    /// Pending staged update for the one-click setup (needs_password flow).
+    pub staged_update: Arc<tokio::sync::Mutex<Option<StagedUpdate>>>,
+    /// Status of the one-click update setup run.
+    pub authorize_state: Arc<tokio::sync::Mutex<AuthorizeState>>,
     /// Notified once when the process should exit gracefully (restart / idle).
     pub shutdown: Arc<Notify>,
     /// When this server process came up (for `/api/server` uptime).
@@ -64,6 +101,8 @@ impl AppState {
             ws_clients: Arc::new(AtomicUsize::new(0)),
             update_cfg: Arc::new(UpdateConfig::default()),
             update_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            staged_update: Arc::new(tokio::sync::Mutex::new(None)),
+            authorize_state: Arc::new(tokio::sync::Mutex::new(AuthorizeState::default())),
             shutdown: Arc::new(Notify::new()),
             started_at: Instant::now(),
             usage: Arc::new(UsageTracker::default()),
@@ -183,6 +222,14 @@ pub fn router_with_token(state: AppState, token: impl Into<Option<String>>) -> R
         .route(
             "/api/update/apply",
             axum::routing::post(routes::update_apply),
+        )
+        .route(
+            "/api/update/authorize",
+            axum::routing::post(routes::update_authorize),
+        )
+        .route(
+            "/api/update/authorize/status",
+            axum::routing::get(routes::update_authorize_status),
         )
         .route(
             "/api/update/restart",

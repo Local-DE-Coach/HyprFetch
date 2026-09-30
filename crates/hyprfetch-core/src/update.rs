@@ -27,8 +27,27 @@ use sha2::{Digest, Sha256};
 pub const DEFAULT_CHANNEL_URL: &str = "https://istias.tech/hyprfetch/updates/";
 /// Human-facing page that documents the channel, install and update steps.
 pub const UPDATES_PAGE_URL: &str = "https://istias.tech/hyprfetch/updates";
-/// Per-request timeout for update HTTP calls.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Timeout for the one small `latest.json` GET (fail fast, retry once).
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// TCP connect timeout for every update HTTP call.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// NO-BYTES ceiling for the archive download: if the server sends nothing
+/// for this long the attempt is treated as stalled and RETRIED (with
+/// resume). There is deliberately NO total download deadline — v0.4.6
+/// wrapped the whole asset in a 60s timeout, so any download slower than
+/// ~65 KB/s (or one stalled moment) died with the cryptic reqwest
+/// "error decoding response body" the owner hit after 1m04s.
+const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Download attempts (the last two resume from where the bytes stopped).
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+/// Root-owned privileged-update helper + its sudoers drop-in. Installed
+/// ONCE with the user's password (the v0.4.7 one-click update setup);
+/// afterwards in-app updates swap a system binary WITHOUT ever asking for
+/// a password again — the same trick GUI package managers use (polkit
+/// rules), just implemented with a narrow sudoers allowlist so it also
+/// works on window managers with no polkit agent running.
+pub const PRIV_HELPER_PATH: &str = "/usr/lib/hyprfetch/privileged-update";
+pub const SUDOERS_PATH: &str = "/etc/sudoers.d/hyprfetch-update";
 
 /// Errors returned by the updater.
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +68,22 @@ pub enum UpdateError {
     Channel(String),
     #[error("cannot replace {path} — it lives in a system location (permission denied). {hint}")]
     RootNeeded { path: String, hint: String },
+    /// The download is done and staged, but the system-owned install needs
+    /// the user's password — every passwordless route (one-click helper,
+    /// `sudo -n`, `pkexec`) was declined or unavailable. The staged binary
+    /// is KEPT at `staged` so the WebUI's one-click setup (terminal window
+    /// + one password entry) can finish the swap without re-downloading.
+    #[error(
+        "password required: {target} lives in a system location and no passwordless route answered"
+    )]
+    PasswordRequired {
+        /// Staged new binary (kept until the swap completes).
+        staged: String,
+        /// System path to replace.
+        target: String,
+        /// Human hint shown by the CLI/UI.
+        hint: String,
+    },
     #[error("{0}")]
     Other(String),
 }
@@ -180,9 +215,23 @@ impl Default for UpdateConfig {
 }
 
 impl UpdateConfig {
+    /// Client for the small manifest GET (bounded by a total timeout).
     fn client(&self) -> reqwest::Client {
         reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(MANIFEST_TIMEOUT)
+            .user_agent(concat!("hyprfetch/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("reqwest client")
+    }
+
+    /// Client for the ARCHIVE download: bounded connect, but NO total
+    /// timeout — per-chunk stall detection is applied by [`download_asset`]
+    /// so a slow connection takes as long as it takes while a stalled one
+    /// is retried with resume.
+    fn download_client(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
             .user_agent(concat!("hyprfetch/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client")
@@ -221,14 +270,22 @@ pub struct UpdateCheck {
     pub channel: Option<String>,
 }
 
-/// Compare dotted numeric versions (`0.3.1` > `0.3.0`); non-numeric chunks
-/// compare lexicographically as fallback.
+/// Compare dotted numeric versions (`0.3.1` > `0.3.0`); each chunk uses its
+/// LEADING DIGITS as the numeric value (`7-test` → 7) and falls back to a
+/// lexicographic tie-break — `0.4.7-beta` must compare as 7, not as 0.
 pub fn version_newer(candidate: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<(u64, String)> {
         v.trim()
             .trim_start_matches('v')
             .split('.')
-            .map(|c| (c.parse::<u64>().unwrap_or(0), c.to_string()))
+            .map(|c| {
+                let digits: String =
+                    c.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+                (
+                    digits.parse::<u64>().unwrap_or(0),
+                    c.to_string(),
+                )
+            })
             .collect()
     };
     let (a, b) = (parse(candidate), parse(current));
@@ -364,74 +421,339 @@ pub async fn check(cfg: &UpdateConfig) -> Result<UpdateCheck, UpdateError> {
     })
 }
 
+/// Retry/idle limits for [`download_asset_limits`] (tests use short values).
+#[derive(Debug, Clone, Copy)]
+pub struct DownloadLimits {
+    /// No-bytes ceiling per attempt.
+    pub idle_timeout: Duration,
+    /// Total attempts (the retries resume from the partial file).
+    pub attempts: u32,
+}
+
+impl Default for DownloadLimits {
+    fn default() -> Self {
+        Self {
+            idle_timeout: IDLE_READ_TIMEOUT,
+            attempts: DOWNLOAD_ATTEMPTS,
+        }
+    }
+}
+
+/// Blocking-ish (async): STREAM the archive at `url` to `dest` with no
+/// total deadline, resuming through stalls, and verify its sha256.
+///
+/// Why this exists: v0.4.6 buffered the whole asset behind one 60-second
+/// total timeout, so any download slower than ~65 KB/s — or a single
+/// stalled moment on the network — failed with the cryptic reqwest
+/// "error decoding response body" (the owner's exact 1m04s failure).
+/// This version:
+///   • has NO total timeout — a slow download takes as long as it takes;
+///   • aborts an attempt only when NO bytes arrive for 30s;
+///   • retries up to [`DOWNLOAD_ATTEMPTS`] times, each attempt RESUMING
+///     from where the previous one stopped (`Range: bytes=N-`);
+///   • verifies sha256 at the end; a mismatch wipes the partial file and
+///     retries fresh before surfacing [`UpdateError::ChecksumMismatch`].
+///
+/// Returns the sha256 (lowercase hex) of the verified file.
+pub async fn download_asset(
+    cfg: &UpdateConfig,
+    url: &str,
+    dest: &Path,
+    expected_sha: String,
+    expected_size: u64,
+    progress: &mut (dyn FnMut(u64, u64) + Send),
+) -> Result<String, UpdateError> {
+    download_asset_limits(
+        cfg,
+        url,
+        dest,
+        expected_sha,
+        expected_size,
+        progress,
+        DownloadLimits::default(),
+    )
+    .await
+}
+
+/// [`download_asset`] with explicit limits (tests use a short idle timeout
+/// and fewer attempts so stall/retry paths run in milliseconds).
+pub async fn download_asset_limits(
+    cfg: &UpdateConfig,
+    url: &str,
+    dest: &Path,
+    expected_sha: String,
+    expected_size: u64,
+    progress: &mut (dyn FnMut(u64, u64) + Send),
+    limits: DownloadLimits,
+) -> Result<String, UpdateError> {
+    let DownloadLimits {
+        idle_timeout,
+        attempts,
+    } = limits;
+    let client = cfg.download_client();
+    let mut last_network_err: Option<String> = None;
+
+    for attempt in 1..=attempts {
+        if attempt > 1 {
+            tokio::time::sleep(Duration::from_secs(2 * attempt as u64 - 2)).await;
+        }
+        let partial = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+
+        let mut req = client.get(url);
+        if partial > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={partial}-"));
+        }
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(attempt, error = %e, "asset download attempt failed");
+                last_network_err = Some(format!("asset get: {e}"));
+                continue; // retry (resumes from the partial file)
+            }
+        };
+        let status = resp.status();
+
+        // Range Not Satisfiable → the partial file already covers the whole
+        // asset (server confirms the range is past the end).
+        if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            if expected_size > 0 && partial >= expected_size {
+                return verify_sha(dest, &expected_sha);
+            }
+            let _ = std::fs::remove_file(dest); // hopeless partial — restart
+            last_network_err = Some("asset get: http 416 with an incomplete partial".into());
+            continue;
+        }
+        if !status.is_success() {
+            // 5xx may heal; 4xx will not (except the 416 handled above).
+            if status.is_server_error() && attempt < attempts {
+                last_network_err = Some(format!("asset get: http {status}"));
+                continue;
+            }
+            return Err(UpdateError::Channel(format!("asset get: http {status}")));
+        }
+
+        // 206 = resuming from `partial`; 200 = server ignored Range → restart.
+        let resume_from = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            partial
+        } else {
+            0
+        };
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dest)
+        {
+            Ok(f) => f,
+            Err(e) => return Err(e.into()),
+        };
+        if let Err(e) = file.set_len(resume_from) {
+            return Err(e.into());
+        }
+        use std::io::{Seek, Write as _};
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(resume_from)) {
+            return Err(e.into());
+        }
+
+        let total_hint = if expected_size > 0 {
+            expected_size.max(resume_from)
+        } else {
+            0
+        };
+        let mut received = resume_from;
+        let mut stream = resp;
+        let mut failure: Option<String> = None;
+        loop {
+            // Per-chunk stall detection: no bytes for the idle timeout
+            // means the attempt died — the next one resumes.
+            let chunk = match tokio::time::timeout(idle_timeout, stream.chunk()).await {
+                Ok(Ok(Some(bytes))) => bytes,
+                Ok(Ok(None)) => break, // clean EOF
+                Ok(Err(e)) => {
+                    failure = Some(format!("asset read: {e}"));
+                    break;
+                }
+                Err(_) => {
+                    failure = Some(format!(
+                        "asset read: stalled (no bytes for {}s)",
+                        idle_timeout.as_secs()
+                    ));
+                    break;
+                }
+            };
+            if let Err(e) = file.write_all(&chunk) {
+                return Err(UpdateError::Io(e));
+            }
+            received += chunk.len() as u64;
+            progress(received, total_hint);
+        }
+        let _ = file.sync_all();
+
+        if let Some(err) = failure {
+            tracing::debug!(attempt, error = %err, "asset stream interrupted — will resume");
+            last_network_err = Some(err);
+            continue; // retry + resume
+        }
+
+        // Stream finished — the hash is the authority.
+        match verify_sha(dest, &expected_sha) {
+            Ok(sha) => return Ok(sha),
+            Err(UpdateError::ChecksumMismatch { expected, got }) => {
+                // A corrupt body must NEVER reach the swap: wipe the partial
+                // and try again fresh; surface the mismatch only after the
+                // final attempt.
+                let _ = std::fs::remove_file(dest);
+                if attempt < attempts {
+                    tracing::debug!(attempt, "asset checksum mismatch — fresh retry");
+                    last_network_err = Some(format!(
+                        "asset checksum mismatch (expected {expected}, got {got})"
+                    ));
+                    continue;
+                }
+                return Err(UpdateError::ChecksumMismatch { expected, got });
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(UpdateError::Channel(last_network_err.unwrap_or_else(
+        || format!("asset download failed after {attempts} attempts"),
+    )))
+}
+
+/// sha256 of `dest` compared against `expected`; returns the hash on match.
+fn verify_sha(dest: &Path, expected: &str) -> Result<String, UpdateError> {
+    let got = file_sha256(dest)?;
+    if got == expected {
+        Ok(got)
+    } else {
+        Err(UpdateError::ChecksumMismatch {
+            expected: expected.to_string(),
+            got,
+        })
+    }
+}
+
+/// Streaming sha256 of a file (constant memory, whatever the size).
+fn file_sha256(path: &Path) -> Result<String, UpdateError> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex(&h.finalize()))
+}
+
 /// Install: fetch the manifest, download the archive for this target,
 /// sha256-verify against the manifest, extract + atomic swap.
 ///
 /// `escalation` decides how a system-owned install location is handled (see
-/// [`Escalation`]). The writability probe runs BEFORE the download, so a
-/// system install without escalation rights fails fast with a clear hint
-/// instead of after pulling the whole archive.
+/// [`Escalation`]). The download always succeeds for ANY user (it stages in
+/// a temp dir); only the final swap can need privileges. For
+/// [`Escalation::NonInteractive`] the swap walks a ladder — one-click
+/// helper (silent) → `sudo -n` (silent) → `pkexec` (GUI prompt when a
+/// polkit agent runs) → [`UpdateError::PasswordRequired`] with the staged
+/// binary KEPT so the one-time setup can finish without re-downloading.
 pub async fn apply(
     cfg: &UpdateConfig,
     chk: &UpdateCheck,
     escalation: Escalation,
 ) -> Result<ApplyResult, UpdateError> {
-    // Resolve the running binary + pick the swap strategy up front (fail
-    // fast before spending time on the download).
+    apply_with_progress(cfg, chk, escalation, |_, _| {}).await
+}
+
+/// [`apply`] with a download-progress callback (`bytes_done`, `bytes_total`
+/// — total is 0 when the server sends no length).
+pub async fn apply_with_progress(
+    cfg: &UpdateConfig,
+    chk: &UpdateCheck,
+    escalation: Escalation,
+    mut progress: impl FnMut(u64, u64) + Send,
+) -> Result<ApplyResult, UpdateError> {
+    // Resolve the running binary up front (fail fast before the download).
     let exe = std::env::current_exe().map_err(|_| UpdateError::ExePath)?;
-    let escalate_with: Option<Option<PrivCmd>> = if can_swap_in_place(&exe) {
-        Some(None) // direct swap, no privileges needed
-    } else {
-        match escalation {
-            Escalation::Auto => Some(Some(
-                find_priv_tool()
-                    .map(|program| PrivCmd {
-                        program: program.to_string(),
-                        pre_args: Vec::new(),
-                    })
-                    .ok_or_else(|| root_needed(&exe, true))?,
-            )),
-            Escalation::NonInteractive => Some(Some(
-                find_priv_tool_noninteractive().ok_or_else(|| root_needed(&exe, true))?,
-            )),
-            Escalation::Refuse => return Err(root_needed(&exe, false)),
-        }
-    };
+    if escalation == Escalation::Refuse && !can_swap_in_place(&exe) {
+        return Err(root_needed(&exe, false));
+    }
 
     let m = fetch_manifest(cfg).await?;
     let (_, asset) = pick_channel_asset(&m.assets)
         .ok_or_else(|| UpdateError::AssetMissing("target tarball (update channel)".into()))?;
 
-    let tarball = cfg
-        .client()
-        .get(&asset.url)
-        .send()
-        .await
-        .map_err(|e| UpdateError::Channel(format!("asset get: {e}")))?
-        .error_for_status()
-        .map_err(|e| UpdateError::Channel(format!("asset get: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| UpdateError::Channel(format!("asset read: {e}")))?
-        .to_vec();
+    // Download → stage (works for ANY user; no privileges needed here).
+    // `verified_sha` is the hash the downloader MEASURED (not just the
+    // manifest's claim) — it goes into the result verbatim.
+    let stage_dir = staging_dir();
+    std::fs::create_dir_all(&stage_dir)?;
+    let tarball = stage_dir.join("asset.tar.gz");
+    let verified_sha = download_asset(
+        cfg,
+        &asset.url,
+        &tarball,
+        asset.sha256.trim().to_ascii_lowercase(),
+        asset.size,
+        &mut progress,
+    )
+    .await
+    .inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+    })?;
 
-    let expected = asset.sha256.trim().to_ascii_lowercase();
-    let got = sha256_hex(&tarball);
-    if got != expected {
-        return Err(UpdateError::ChecksumMismatch { expected, got });
-    }
-
-    let new_bytes = extract_binary(&tarball)?;
-    let escalated = match escalate_with {
-        Some(None) | None => {
-            swap_binary(&exe, &new_bytes)?;
-            false
+    let new_bytes = extract_binary_file(&tarball)?;
+    let staged = stage_dir.join("hyprfetch");
+    let staged_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&staged)?;
+        f.write_all(&new_bytes)?;
+        f.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
         }
-        // can_swap_in_place() is only ever false on unix; on other targets
-        // the arm is unreachable, but keep the code honest anyway.
-        Some(Some(tool)) => {
-            swap_binary_escalated(&exe, &new_bytes, &tool)?;
-            true
+        Ok(())
+    })();
+    if let Err(e) = staged_result {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(e.into());
+    }
+    let _ = std::fs::remove_file(&tarball);
+
+    // Swap — direct when the location is writable, otherwise walk the
+    // privilege ladder. Every rung below is self-recovering: a failed rung
+    // leaves the installed binary untouched.
+    let escalated = if can_swap_in_place(&exe) {
+        swap_binary_from_staged(&exe, &staged)?;
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        false
+    } else {
+        match escalate_and_swap(&exe, &staged, escalation) {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&stage_dir);
+                true
+            }
+            Err(UpdateError::PasswordRequired { .. }) => {
+                // KEEP the staging dir: the one-time setup (or a manual
+                // `sudo hyprfetch update`) can finish the swap from it.
+                return Err(UpdateError::PasswordRequired {
+                    staged: staged.to_string_lossy().into_owned(),
+                    target: exe.to_string_lossy().into_owned(),
+                    hint: format!(
+                        "open the WebUI → Updates → “Enable one-click updates” (one password \
+                         entry, updates stay silent forever), or run `sudo hyprfetch update` \
+                         in a terminal, or reinstall: curl -fsSL {UPDATES_PAGE_URL}/install.sh | sh"
+                    ),
+                });
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&stage_dir);
+                return Err(e);
+            }
         }
     };
 
@@ -439,9 +761,301 @@ pub async fn apply(
         current: chk.current.clone(),
         installed: chk.latest.clone(),
         backup_path: Some(exe.with_extension("old").to_string_lossy().into_owned()),
-        sha256: got,
+        sha256: verified_sha,
         escalated,
     })
+}
+
+/// A unique user-writable staging directory for one update attempt.
+fn staging_dir() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "hyprfetch-update-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    ))
+}
+
+/// Privilege ladder for a system-owned binary. Each rung is tried in order;
+/// the first success wins. Returns [`UpdateError::PasswordRequired`] only
+/// after every passwordless rung was declined/unavailable (NonInteractive),
+/// or a plain failure for other errors.
+fn escalate_and_swap(exe: &Path, staged: &Path, escalation: Escalation) -> Result<(), UpdateError> {
+    let mut last_err: Option<UpdateError> = None;
+    let rungs: Vec<(&'static str, PrivCmd)> = match escalation {
+        // CLI with a TTY: interactive sudo prompts for the password — the
+        // historic behaviour (and still the best terminal experience).
+        Escalation::Auto => {
+            return match find_priv_tool() {
+                Some(program) => {
+                    swap_binary_escalated(
+                        exe,
+                        &std::fs::read(staged).map_err(UpdateError::Io)?,
+                        &PrivCmd {
+                            program: program.to_string(),
+                            pre_args: Vec::new(),
+                        },
+                    )
+                }
+                None => Err(root_needed(exe, true)),
+            };
+        }
+        // Daemon / WebUI: silent rungs first, GUI prompt second.
+        Escalation::NonInteractive => {
+            let mut v = Vec::new();
+            if priv_helper_ready() {
+                v.push(("helper", PrivCmd {
+                    program: "sudo".to_string(),
+                    pre_args: vec!["-n", PRIV_HELPER_PATH],
+                }));
+            }
+            if which_on_path("sudo") && sudo_n_ok() {
+                v.push(("sudo -n", PrivCmd {
+                    program: "sudo".to_string(),
+                    pre_args: vec!["-n"],
+                }));
+            }
+            if which_on_path("pkexec") {
+                v.push(("pkexec", PrivCmd {
+                    program: "pkexec".to_string(),
+                    pre_args: Vec::new(),
+                }));
+            }
+            v
+        }
+        Escalation::Refuse => return Err(root_needed(exe, false)),
+    };
+
+    for (name, tool) in &rungs {
+        let res = match *name {
+            // The helper takes the staged path DIRECTLY (no `sh -c`): its
+            // whitelist only ever touches a `hyprfetch` binary.
+            "helper" => swap_via_helper(staged, exe, tool),
+            _ => swap_binary_escalated(
+                exe,
+                &std::fs::read(staged).map_err(UpdateError::Io)?,
+                tool,
+            ),
+        };
+        match res {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::debug!(rung = %name, error = %e, "privileged swap rung failed");
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| UpdateError::PasswordRequired {
+        staged: staged.to_string_lossy().into_owned(),
+        target: exe.to_string_lossy().into_owned(),
+        hint: "no privilege route available".into(),
+    }))
+}
+
+/// Swap through the one-click helper (`sudo -n /usr/lib/hyprfetch/
+/// privileged-update install <staged> <target>`) — no `sh -c`, no prompts.
+fn swap_via_helper(staged: &Path, exe: &Path, tool: &PrivCmd) -> Result<(), UpdateError> {
+    let out = std::process::Command::new(&tool.program)
+        .args(&tool.pre_args)
+        .arg("install")
+        .arg(staged)
+        .arg(exe)
+        .output()
+        .map_err(|e| UpdateError::Other(format!("cannot run helper: {e}")))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Err(UpdateError::Other(format!(
+        "privileged helper failed (exit {}): {}",
+        out.status.code().unwrap_or(-1),
+        stderr.trim()
+    )))
+}
+
+/// Is the one-click privileged helper installed AND authorized (the
+/// sudoers drop-in lets this user run it without a password)?
+pub fn priv_helper_ready() -> bool {
+    #[cfg(unix)]
+    {
+        if !Path::new(PRIV_HELPER_PATH).exists() {
+            return false;
+        }
+        std::process::Command::new("sudo")
+            .args(["-n", PRIV_HELPER_PATH, "check"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// The root-owned privileged-update helper installed by the one-time
+/// setup. Deliberately NARROW: it can only install/remove a file named
+/// `hyprfetch` inside `/usr/bin` or `/usr/local/bin` — nothing else.
+pub const HELPER_SH: &str = r##"#!/bin/sh
+# HyprFetch privileged update helper (installed once by the one-click
+# update setup; after that in-app updates never ask for a password).
+set -eu
+[ "$#" -ge 1 ] || { echo "usage: privileged-update check|install|remove" >&2; exit 64; }
+allowed() { case "$1" in /usr/bin/hyprfetch|/usr/local/bin/hyprfetch) return 0 ;; *) return 1 ;; esac; }
+case "$1" in
+  check)
+    exit 0
+    ;;
+  install)
+    [ "$#" -eq 3 ] || { echo "usage: privileged-update install <staged> <target>" >&2; exit 64; }
+    allowed "$3" || { echo "refusing target: $3" >&2; exit 65; }
+    [ -f "$2" ] || { echo "no staged binary at $2" >&2; exit 66; }
+    if [ -f "$3" ]; then mv -f "$3" "$3.old"; fi
+    if install -m 0755 "$2" "$3"; then
+      rm -f "$2"
+    else
+      if [ -f "$3.old" ]; then mv -f "$3.old" "$3"; fi
+      exit 1
+    fi
+    ;;
+  remove)
+    [ "$#" -eq 2 ] || { echo "usage: privileged-update remove <target>" >&2; exit 64; }
+    allowed "$2" || { echo "refusing target: $2" >&2; exit 65; }
+    rm -f "$2" "$2.old" "$2.new"
+    ;;
+  *)
+    echo "unknown command: $1" >&2
+    exit 64
+    ;;
+esac
+"##;
+
+/// The invoking username for the sudoers drop-in (`SUDO_USER`/`USER` env,
+/// else `id -un`). Used by the API's one-click-update authorize flow.
+#[allow(dead_code)] // wired into /api/update/authorize (hyprfetch-api)
+pub fn invoking_user() -> Option<String> {
+    if let Ok(u) = std::env::var("SUDO_USER") {
+        if !u.is_empty() {
+            return Some(u);
+        }
+    }
+    if let Ok(u) = std::env::var("USER") {
+        if !u.is_empty() {
+            return Some(u);
+        }
+    }
+    std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Build the ONE-TIME setup script that the terminal window runs under
+/// `sudo`: install the helper + the sudoers drop-in (validated with
+/// visudo), then finish the PENDING swap with the staged binary. After
+/// this runs once, every future in-app update is silent.
+pub fn setup_script(user: &str, staged: &Path, target: &Path) -> String {
+    let sudoers_line = format!("{user} ALL=(root) NOPASSWD: {PRIV_HELPER_PATH} *");
+    format!(
+        r##"set -eu
+# --- 1. the narrow privileged helper -------------------------------------
+mkdir -p /usr/lib/hyprfetch
+cat > '{helper}' <<'HYPRFETCH_HELPER_EOF'
+{helper_sh}HYPRFETCH_HELPER_EOF
+chmod 755 '{helper}'
+# --- 2. the sudoers drop-in (validated before it lands) ------------------
+LINE='{sudoers_line}'
+TMP=$(mktemp)
+printf '%s\n' "$LINE" > "$TMP"
+if command -v visudo >/dev/null 2>&1; then
+  if ! visudo -cf "$TMP" >/dev/null; then
+    rm -f "$TMP"
+    echo 'sudoers validation failed — aborting (nothing was changed)' >&2
+    exit 1
+  fi
+fi
+install -m 0440 -o root -g root "$TMP" '{sudoers}'
+rm -f "$TMP"
+# --- 3. finish the pending update right now ------------------------------
+'{helper}' install '{staged}' '{target}'
+echo 'HyprFetch one-click updates enabled — this was the last password.'
+"##,
+        helper = PRIV_HELPER_PATH,
+        helper_sh = HELPER_SH,
+        sudoers = SUDOERS_PATH,
+        sudoers_line = sudoers_line,
+        staged = staged.display(),
+        target = target.display(),
+    )
+}
+
+/// Terminal emulators we can pop the one-time password prompt in, with
+/// each terminal's "run command" argument convention. Ordered by how
+/// common they are on Hyprland/Wayland desktops first.
+const TERMINALS: &[(&str, &[&str])] = &[
+    ("kitty", &["-e"]),
+    ("alacritty", &["-e"]),
+    ("ghostty", &["-e"]),
+    ("foot", &[]),
+    ("wezterm", &["start", "--always-new-process", "--"]),
+    ("konsole", &["-e"]),
+    ("gnome-terminal", &["--"]),
+    ("xfce4-terminal", &["-x"]),
+    ("tilix", &["-e"]),
+    ("qterminal", &["-e"]),
+    ("lxterminal", &["-e"]),
+    ("xterm", &["-e"]),
+    ("uxterm", &["-e"]),
+    ("st", &["-e"]),
+];
+
+/// Pick the first installed terminal and build its command line for
+/// running `sh -c <script>`.
+#[cfg(unix)]
+pub fn terminal_candidate(script: &str) -> Option<(String, Vec<String>)> {
+    for (program, pre) in TERMINALS {
+        if !which_on_path(program) {
+            continue;
+        }
+        let mut args: Vec<String> = pre.iter().map(|s| s.to_string()).collect();
+        args.push("sh".to_string());
+        args.push("-c".to_string());
+        args.push(script.to_string());
+        return Some((program.to_string(), args));
+    }
+    None
+}
+
+/// Spawn a terminal window running `sh -c <script>` (the one-time setup).
+/// Fire-and-forget: the daemon polls for the swap completing. Returns the
+/// terminal program that was launched.
+pub fn spawn_terminal_script(script: &str) -> Result<String, UpdateError> {
+    #[cfg(unix)]
+    {
+        let (program, args) = terminal_candidate(script).ok_or_else(|| {
+            UpdateError::Other(
+                "no terminal emulator found (kitty/alacritty/foot/ghostty/… not installed) \
+                 — run the manual command instead"
+                    .into(),
+            )
+        })?;
+        std::process::Command::new(&program)
+            .args(&args)
+            .spawn()
+            .map_err(|e| UpdateError::Other(format!("cannot launch {program}: {e}")))?;
+        Ok(program)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = script;
+        Err(UpdateError::Other("unsupported platform".into()))
+    }
 }
 
 /// Build the [`UpdateError::RootNeeded`] error with an actionable hint.
@@ -721,14 +1335,37 @@ fn target_candidates() -> Vec<String> {
     ]
 }
 
-fn sha256_hex(data: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(data);
-    hex(&h.finalize())
-}
-
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Extract only the top-level `hyprfetch` executable from a tarball FILE
+/// (streamed — the archive never sits fully in RAM). Same rules as
+/// [`extract_binary`]: plain regular file, basename exactly `hyprfetch`,
+/// traversal/symlinks refused.
+pub fn extract_binary_file(tarball: &Path) -> Result<Vec<u8>, UpdateError> {
+    let f = std::fs::File::open(tarball)?;
+    let gz = flate2::read::GzDecoder::new(f);
+    let mut archive = tar::Archive::new(gz);
+    archive.set_preserve_permissions(false);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_path_buf();
+        if path.file_name().and_then(|f| f.to_str()) != Some("hyprfetch") {
+            continue;
+        }
+        if entry.header().entry_type() != tar::EntryType::Regular {
+            continue;
+        }
+        let mut out = Vec::new();
+        std::io::copy(&mut entry, &mut out)?;
+        if out.is_empty() {
+            continue;
+        }
+        return Ok(out);
+    }
+    Err(UpdateError::BinaryMissing)
 }
 
 /// Extract only the top-level `hyprfetch` executable from the tarball bytes.
@@ -852,6 +1489,31 @@ fn escalated_swap_script(exe: &Path, old: &Path, staged: &Path) -> String {
         old = sh_quote(old),
         new = sh_quote(staged),
     )
+}
+
+/// Replace the binary at `exe` with the STAGED file (same atomic
+/// convention as [`swap_binary`]): copy staged → `<exe>.new` (same
+/// filesystem as `exe`, so the final rename is atomic), keep the old
+/// binary as `<exe>.old` rollback, rename `.new` over `<exe>`.
+pub fn swap_binary_from_staged(exe: &Path, staged: &Path) -> Result<(), UpdateError> {
+    let new_path = exe.with_extension("new");
+    std::fs::copy(staged, &new_path)?;
+    {
+        let f = std::fs::File::open(&new_path)?;
+        f.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    // Keep the old binary as rollback.
+    let _ = std::fs::remove_file(exe.with_extension("old"));
+    if exe.exists() {
+        std::fs::rename(exe, exe.with_extension("old"))?;
+    }
+    std::fs::rename(&new_path, exe)?;
+    Ok(())
 }
 
 /// Download → verify → swap the running binary atomically.
@@ -1448,5 +2110,350 @@ mod tests {
         let tool = find_priv_tool_noninteractive();
         std::env::set_var("PATH", old_path);
         assert_eq!(tool, None, "empty PATH must yield no tool");
+    }
+
+    // -- robust download engine (v0.4.7) -----------------------------------
+
+    use std::sync::Arc;
+
+    /// Minimal raw-socket HTTP server for download tests. Supports Range
+    /// requests and three failure modes, all selected per-connection:
+    ///   • drop_after: send only N body bytes then hang up (dropped stream)
+    ///   • stall: headers only, body never arrives (tests the idle timeout)
+    ///   • corrupt: flip body bytes so the sha256 will mismatch
+    /// Every request's Range header is recorded for resume assertions.
+    #[cfg(unix)]
+    struct MockAsset {
+        addr: String,
+        requests: Arc<std::sync::Mutex<Vec<String>>>,
+        stall: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl MockAsset {
+        fn spawn(body: Vec<u8>) -> Self {
+            Self::spawn_with(body, usize::MAX, false, false)
+        }
+
+        fn spawn_with(body: Vec<u8>, drop_after: usize, stall: bool, corrupt: bool) -> Self {
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stall_flag = Arc::new(AtomicBool::new(stall));
+            let corrupt_flag = Arc::new(AtomicBool::new(corrupt));
+            let drop_after = Arc::new(AtomicUsize::new(drop_after));
+            let drops_left = Arc::new(AtomicUsize::new(1)); // only the FIRST conn drops
+            let req2 = Arc::clone(&requests);
+            let req_thread = Arc::clone(&req2);
+            let stall_thread = Arc::clone(&stall_flag);
+            let corrupt_thread = Arc::clone(&corrupt_flag);
+            let drop_thread = Arc::clone(&drop_after);
+            let drops_thread = Arc::clone(&drops_left);
+            std::thread::spawn(move || {
+                let req2 = req_thread;
+                let stall_flag = stall_thread;
+                let corrupt_flag = corrupt_thread;
+                let drop_after = drop_thread;
+                let drops_left = drops_thread;
+                for conn in listener.incoming() {
+                    let mut conn = match conn {
+                        Ok(c) => c,
+                        Err(_) => break,
+                    };
+                    let reqs = Arc::clone(&req2);
+                    let drop_after = Arc::clone(&drop_after);
+                    let stall = Arc::clone(&stall_flag);
+                    let corrupt = Arc::clone(&corrupt_flag);
+                    let drops_left = Arc::clone(&drops_left);
+                    let body = body.clone();
+                    std::thread::spawn(move || {
+                        let mut buf = Vec::new();
+                        let mut byte = [0u8; 1];
+                        loop {
+                            use std::io::Read;
+                            if conn.read(&mut byte).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            buf.push(byte[0]);
+                            if buf.ends_with(b"\r\n\r\n") {
+                                break;
+                            }
+                            if buf.len() > 64 * 1024 {
+                                return;
+                            }
+                        }
+                        let head = String::from_utf8_lossy(&buf);
+                        let range = head
+                            .lines()
+                            .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                            .map(|l| l.trim().to_string());
+                        let start = range
+                            .as_deref()
+                            .and_then(|r| r.strip_prefix("Range: bytes="))
+                            .and_then(|r| r.split('-').next())
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        reqs.lock().unwrap().push(range.unwrap_or_default());
+
+                        let slice = &body[start.min(body.len())..];
+                        let mut out: Vec<u8> = Vec::new();
+                        if start > 0 {
+                            out.extend_from_slice(
+                                format!(
+                                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\n\r\n",
+                                    start,
+                                    body.len() - 1,
+                                    body.len(),
+                                    slice.len()
+                                )
+                                .as_bytes(),
+                            );
+                        } else {
+                            out.extend_from_slice(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            );
+                        }
+                        if stall.load(Ordering::SeqCst) {
+                            let _ = conn.write_all(&out);
+                            std::thread::sleep(std::time::Duration::from_secs(30));
+                            return;
+                        }
+                        let mut payload: Vec<u8> = slice.to_vec();
+                        if corrupt.load(Ordering::SeqCst) && !payload.is_empty() {
+                            payload[0] ^= 0xff; // sha must mismatch
+                        }
+                        // Honour the drop limit only while a drop is still
+                        // pending — later connections serve the full body.
+                        let limit = if drops_left.load(Ordering::SeqCst) > 0 {
+                            drops_left.fetch_sub(1, Ordering::SeqCst);
+                            drop_after.load(Ordering::SeqCst)
+                        } else {
+                            usize::MAX
+                        };
+                        let take = payload.len().min(limit);
+                        out.extend_from_slice(&payload[..take]);
+                        let _ = conn.write_all(&out);
+                        // dropping `conn` mid-message simulates a dropped stream
+                    });
+                }
+            });
+            Self {
+                addr,
+                requests,
+                stall: stall_flag,
+            }
+        }
+
+        fn seen_ranges(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_completes_and_verifies_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = UpdateConfig::default();
+        let body: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let sha = {
+            let mut h = Sha256::new();
+            h.update(&body);
+            hex(&h.finalize())
+        };
+        let srv = MockAsset::spawn(body);
+        let dest = tmp.path().join("asset.bin");
+        let got = download_asset_limits(
+            &cfg,
+            &format!("http://{}/asset", srv.addr),
+            &dest,
+            sha,
+            300_000,
+            &mut |_, _| {},
+            DownloadLimits {
+                idle_timeout: Duration::from_secs(2),
+                attempts: 2,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.len(), 64, "returns the sha256");
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 300_000);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_resumes_after_dropped_connection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = UpdateConfig::default();
+        let body: Vec<u8> = (0..400_000u32).map(|i| (i % 253) as u8).collect();
+        let sha = {
+            let mut h = Sha256::new();
+            h.update(&body);
+            hex(&h.finalize())
+        };
+        // Attempt 1 dies after 50k bytes; the next attempt must send Range.
+        let srv = MockAsset::spawn_with(body, 50_000, false, false);
+        let dest = tmp.path().join("asset.bin");
+        let mut progress_calls = 0usize;
+        let got = download_asset_limits(
+            &cfg,
+            &format!("http://{}/asset", srv.addr),
+            &dest,
+            sha,
+            400_000,
+            &mut |_, _| progress_calls += 1,
+            DownloadLimits {
+                idle_timeout: Duration::from_secs(2),
+                attempts: 3,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.len(), 64);
+        let ranges = srv.seen_ranges();
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.to_ascii_lowercase().starts_with("range: bytes=")),
+            "a retry must RESUME via Range, saw: {ranges:?}"
+        );
+        assert!(progress_calls > 0, "progress callback must fire");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_survives_a_stalled_server_via_idle_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = UpdateConfig::default();
+        let body = vec![7u8; 10_000];
+        let sha = {
+            let mut h = Sha256::new();
+            h.update(&body);
+            hex(&h.finalize())
+        };
+        let srv = MockAsset::spawn(body);
+        srv.stall
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let dest = tmp.path().join("asset.bin");
+        let err = download_asset_limits(
+            &cfg,
+            &format!("http://{}/asset", srv.addr),
+            &dest,
+            sha,
+            10_000,
+            &mut |_, _| {},
+            DownloadLimits {
+                idle_timeout: Duration::from_millis(300),
+                attempts: 2,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("stalled"),
+            "expected stall error, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_retries_fresh_on_checksum_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = UpdateConfig::default();
+        let body = vec![9u8; 20_000];
+        let sha = {
+            let mut h = Sha256::new();
+            h.update(&body);
+            hex(&h.finalize())
+        };
+        let srv = MockAsset::spawn_with(body, usize::MAX, false, true); // corrupt
+        let dest = tmp.path().join("asset.bin");
+        let err = download_asset_limits(
+            &cfg,
+            &format!("http://{}/asset", srv.addr),
+            &dest,
+            sha,
+            20_000,
+            &mut |_, _| {},
+            DownloadLimits {
+                idle_timeout: Duration::from_secs(2),
+                attempts: 2,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, UpdateError::ChecksumMismatch { .. }),
+            "corrupt body must surface as ChecksumMismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn version_newer_handles_prerelease_chunks() {
+        // The v0.4.6 parser read "7-test" as 0 — a prerelease of the NEXT
+        // version looked "not newer". Leading digits fix that.
+        assert!(version_newer("0.4.7-beta", "0.4.6"));
+        assert!(version_newer("0.5.0-test", "0.4.6"));
+        assert!(!version_newer("0.4.6", "0.4.6"));
+        assert!(!version_newer("0.4.5-rc1", "0.4.6"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_and_setup_scripts_have_the_right_shape() {
+        // The privileged helper only ever touches whitelisted hyprfetch paths.
+        assert!(HELPER_SH.contains("case \"$1\" in"));
+        assert!(HELPER_SH.contains("check)"));
+        assert!(HELPER_SH.contains("install)"));
+        assert!(HELPER_SH.contains("remove)"));
+        assert!(HELPER_SH.contains("/usr/bin/hyprfetch|/usr/local/bin/hyprfetch"));
+        assert!(!HELPER_SH.contains("eval"));
+
+        let script = setup_script(
+            "alice",
+            Path::new("/tmp/hyprfetch-update-x/hyprfetch"),
+            Path::new("/usr/bin/hyprfetch"),
+        );
+        assert!(
+            script.contains("alice ALL=(root) NOPASSWD: /usr/lib/hyprfetch/privileged-update *")
+        );
+        assert!(script.contains("visudo -cf"), "sudoers must be validated");
+        assert!(script.contains("install -m 0440"));
+        // finishes the pending swap with the staged binary
+        assert!(
+            script.contains("install '/tmp/hyprfetch-update-x/hyprfetch' '/usr/bin/hyprfetch'")
+        );
+        // the helper heredoc is quoted so nothing expands inside it
+        assert!(script.contains("<<'HYPRFETCH_HELPER_EOF'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_candidate_builds_valid_command_lines() {
+        let _guard = PATH_LOCK.blocking_lock();
+        let old_path = std::env::var_os("PATH").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let kitty = tmp.path().join("kitty");
+        std::fs::write(&kitty, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&kitty, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("PATH", tmp.path().display().to_string());
+        let (program, args) = terminal_candidate("echo hi").unwrap();
+        std::env::set_var("PATH", old_path.clone());
+        assert_eq!(program, "kitty");
+        assert_eq!(&args[..2], &["-e".to_string(), "sh".to_string()]);
+        assert_eq!(args[2], "-c");
+        assert_eq!(args[3], "echo hi");
+
+        // no terminal on PATH → None (the caller shows the manual command)
+        let empty = tempfile::tempdir().unwrap();
+        std::env::set_var("PATH", empty.path().display().to_string());
+        assert!(terminal_candidate("echo hi").is_none());
+        std::env::set_var("PATH", old_path);
     }
 }

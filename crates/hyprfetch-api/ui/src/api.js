@@ -165,6 +165,19 @@ export async function applyUpdate(restart = true) {
   )
 }
 
+// One-time one-click update setup: opens a terminal window where the user
+// enters their password ONCE; afterwards in-app updates run silently
+// (narrow sudoers rule + root-owned helper). Requires a pending staged
+// update (applyUpdate answered needs_password first).
+export async function authorizeUpdate() {
+  return handle(await fetch('/api/update/authorize', { method: 'POST' }))
+}
+
+// Poll the one-time setup status: { running, terminal, done, restarted, error }.
+export async function authorizeStatus() {
+  return handle(await fetch('/api/update/authorize/status'))
+}
+
 export async function restartServer() {
   return handle(await fetch('/api/update/restart', { method: 'POST' }))
 }
