@@ -28,6 +28,9 @@ pub struct ProbeResult {
     pub etag: Option<String>,
     /// `Last-Modified` header value, if present.
     pub last_modified: Option<String>,
+    /// `Content-Type` header value (media type + parameters), if present.
+    /// Used to sniff the real file extension when the URL carries none.
+    pub content_type: Option<String>,
 }
 
 /// Errors returned by the HTTP client.
@@ -128,6 +131,7 @@ impl HttpClient {
             .unwrap_or(false);
         let etag = header_string(&resp, header::ETAG);
         let last_modified = header_string(&resp, header::LAST_MODIFIED);
+        let content_type = header_string(&resp, header::CONTENT_TYPE);
 
         Ok(ProbeResult {
             final_url,
@@ -135,6 +139,7 @@ impl HttpClient {
             accept_ranges,
             etag,
             last_modified,
+            content_type,
         })
     }
 

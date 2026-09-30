@@ -84,6 +84,148 @@ pub fn is_valid_category(name: &str) -> bool {
     CATEGORIES.contains(&name)
 }
 
+// ---------------------------------------------------------------------------
+// Content-Type sniffing — filename/extension auto-detection
+// ---------------------------------------------------------------------------
+
+/// Common `Content-Type` → extension mappings for types whose extension
+/// cannot be reliably guessed from a URL (or where the URL carries none at
+/// all — think `https://images.example/tbn?id=ANd9Gc…`). Deliberately small:
+/// `mime_guess` already covers the long tail from extensions; this table is
+/// the reverse direction, which needs hand-picked canonical extensions.
+pub fn ext_for_content_type(ct: &str) -> Option<&'static str> {
+    // Strip parameters: `image/jpeg; charset=binary` → `image/jpeg`.
+    let mime = ct.split(';').next()?.trim().to_ascii_lowercase();
+    Some(match mime.as_str() {
+        // images
+        "image/jpeg" | "image/jpg" | "image/pjpeg" => "jpg",
+        "image/png" | "image/apng" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/avif" => "avif",
+        "image/svg+xml" => "svg",
+        "image/bmp" | "image/x-ms-bmp" => "bmp",
+        "image/tiff" => "tif",
+        "image/heic" | "image/heif" => "heic",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        // video
+        "video/mp4" | "video/x-m4v" => "mp4",
+        "video/webm" => "webm",
+        "video/x-matroska" => "mkv",
+        "video/quicktime" => "mov",
+        "video/mpeg" => "mpeg",
+        "video/x-msvideo" => "avi",
+        // audio
+        "audio/mpeg" => "mp3",
+        "audio/ogg" | "application/ogg" => "ogg",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
+        "audio/aac" => "aac",
+        "audio/opus" => "opus",
+        // archives
+        "application/zip" => "zip",
+        "application/gzip" | "application/x-gzip" => "gz",
+        "application/x-7z-compressed" => "7z",
+        "application/x-rar-compressed" | "application/vnd.rar" => "rar",
+        "application/x-tar" => "tar",
+        "application/x-xz" => "xz",
+        "application/zstd" => "zst",
+        "application/x-bzip2" => "bz2",
+        // documents
+        "application/pdf" => "pdf",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.ms-powerpoint" => "ppt",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/epub+zip" => "epub",
+        "text/plain" => "txt",
+        "text/csv" => "csv",
+        "text/markdown" => "md",
+        "text/html" => "html",
+        "application/json" => "json",
+        "application/xml" | "text/xml" => "xml",
+        // apps / disk images
+        "application/x-iso9660-image" => "iso",
+        "application/vnd.android.package-archive" => "apk",
+        "application/x-deb" | "application/vnd.debian.binary-package" => "deb",
+        "application/x-rpm" => "rpm",
+        "application/x-apple-diskimage" => "dmg",
+        "application/x-msdownload" | "application/x-msi" => "exe",
+        // `application/octet-stream` and everything unknown → None: the
+        // server is not telling us anything we can act on.
+        _ => return None,
+    })
+}
+
+/// Sanitize a URL-derived filename: keep the last path segment only, drop
+/// any query/fragment leftovers, strip control characters, and never return
+/// an empty string.
+pub fn sanitize_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match ch {
+            // A separator starts a NEW segment — last one wins (mirrors how
+            // the caller picks the tail of a URL path).
+            '/' | '\\' => out.clear(),
+            '\0' => {}                // never allow NUL
+            '?' | '#' | '&' => break, // query/fragment junk pasted into the name
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    let trimmed = out.trim().trim_matches('.').trim();
+    if trimmed.is_empty() {
+        "download.bin".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Does this filename carry an extension the category table knows?
+fn has_known_ext(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| category_for_ext(&e.to_ascii_lowercase()) != "other")
+        .unwrap_or(false)
+}
+
+/// Filename with the extension corrected from the server's `Content-Type`.
+///
+/// Rules (IDM-style):
+/// - name already has a KNOWN extension (`.jpg`, `.pdf`, …) → keep as-is;
+/// - name has no extension, or an unknown one (`.php`, `.aspx`, query junk)
+///   and the server sent a usable Content-Type → use/replace with the
+///   sniffed extension (`images` + `image/jpeg` → `images.jpg`);
+/// - nothing usable → return the sanitized name unchanged.
+///
+/// The stem is always sanitized first, so `images?q=tbn:ANd9…` becomes
+/// `images.jpg` rather than a 200-character query string.
+pub fn sniff_filename(raw_name: &str, content_type: Option<&str>) -> String {
+    let name = sanitize_filename(raw_name);
+    if has_known_ext(&name) {
+        return name;
+    }
+    let Some(ext) = content_type.and_then(ext_for_content_type) else {
+        return name;
+    };
+    let stem = match name.rsplit_once('.') {
+        // Only trim the extension part off when there IS one; a plain
+        // `images` (no dot) must not lose characters.
+        Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+        _ => name.clone(),
+    };
+    let stem = if stem.is_empty() {
+        "download".into()
+    } else {
+        stem
+    };
+    format!("{stem}.{ext}")
+}
+
 /// Expand a leading `~` or `~user`-less tilde to `$HOME` (`$HOME` defaults
 /// to `/tmp` when unset, matching the rest of the codebase).
 pub fn expand_tilde(path: &str) -> PathBuf {
@@ -154,6 +296,67 @@ mod tests {
         assert_eq!(category_for_filename("ubuntu.iso"), "apps");
         assert_eq!(category_for_filename("unknown.xyz"), "other");
         assert_eq!(category_for_filename("noext"), "other");
+    }
+
+    #[test]
+    fn content_type_to_extension() {
+        assert_eq!(ext_for_content_type("image/jpeg"), Some("jpg"));
+        assert_eq!(
+            ext_for_content_type("image/jpeg; charset=binary"),
+            Some("jpg")
+        );
+        assert_eq!(ext_for_content_type("IMAGE/PNG"), Some("png"));
+        assert_eq!(ext_for_content_type("video/mp4"), Some("mp4"));
+        assert_eq!(ext_for_content_type("application/pdf"), Some("pdf"));
+        assert_eq!(ext_for_content_type("application/octet-stream"), None);
+        assert_eq!(ext_for_content_type("text/x-made-up"), None);
+        assert_eq!(ext_for_content_type(""), None);
+    }
+
+    #[test]
+    fn sanitize_strips_query_junk() {
+        assert_eq!(sanitize_filename("images?q=tbn:ANd9GcQ"), "images");
+        assert_eq!(sanitize_filename("photo.png#anchor"), "photo.png");
+        assert_eq!(sanitize_filename("a/b/c?x=1"), "c");
+        assert_eq!(sanitize_filename("file\\name?.mp4"), "name");
+        assert_eq!(sanitize_filename("?q=only-query"), "download.bin");
+        assert_eq!(sanitize_filename(""), "download.bin");
+        assert_eq!(sanitize_filename("..."), "download.bin");
+        assert_eq!(sanitize_filename("résumé.pdf"), "résumé.pdf");
+    }
+
+    #[test]
+    fn sniff_filename_from_content_type() {
+        // The exact report that motivated v0.4.6: Google image-thumbnail
+        // URLs carry the query in the last path segment and no extension.
+        assert_eq!(
+            sniff_filename("images?q=tbn:ANd9GcQ", Some("image/jpeg")),
+            "images.jpg"
+        );
+        assert_eq!(
+            sniff_filename("images?q=tbn:ANd9GcQ", Some("image/png")),
+            "images.png"
+        );
+        // No extension at all, server tells the type.
+        assert_eq!(
+            sniff_filename("download", Some("application/pdf")),
+            "download.pdf"
+        );
+        // Unknown extension is REPLACED by the sniffed one.
+        assert_eq!(sniff_filename("file.php", Some("image/jpeg")), "file.jpg");
+        // Known extension is kept even when the type disagrees.
+        assert_eq!(sniff_filename("photo.png", Some("image/jpeg")), "photo.png");
+        // No usable type → sanitized name unchanged.
+        assert_eq!(
+            sniff_filename("images?q=tbn:x", Some("application/octet-stream")),
+            "images"
+        );
+        assert_eq!(sniff_filename("images?q=tbn:x", None), "images");
+        // Parameters in the content type are ignored.
+        assert_eq!(
+            sniff_filename("song", Some("audio/mpeg; bitrate=320")),
+            "song.mp3"
+        );
     }
 
     #[test]

@@ -595,3 +595,26 @@ still reported v0.4.3.
 | 27.8 | install.sh: post-install shadow check ("`hyprfetch` resolves to X, not this install") + fix instructions; uninstall sweep unchanged/verified | ✅ | Docs repo hyprfetch/install.sh; `sh -n` |
 | 27.9 | e2e extended to 13 scenarios / 43 PASS (escalate-or-hint WebUI apply, shim `sudo -n` attempt + rollback, real shadow detection → fix → clean); cargo test 157 green; clippy clean; batteries 25+13 (38 pre-release channel check pending new release) | ✅ | scripts/e2e_update_channel.sh |
 | 27.10 | Bump 0.4.5 + CHANGELOG [0.4.5] + release via tag-per-release; channel + Docs mirror verified | ✅ | session log |
+
+## 28 · Session 13 — v0.4.6: auto-save extensions, theme sync, real file managers, usage + background mode (owner report, APPLIED 2026-09-30)
+
+**Owner report:** (1) downloaded images saved as `images?q=tbn:ANd9Gc…`
+inside `other/` instead of Pictures with `.jpg`/`.png`; (2) theme set in
+one browser shows the old theme in a NEW browser; (3) dashboard Save-folder
+paths should be clickable + the GO button opened the terminal instead of
+the file manager; (4) wants RAM/CPU usage "show only what this app uses"
+and an option to keep the app alive in mini-usage when not used, easy to
+reopen.
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 28.1 | Content-Type → extension table (~70 types) + filename sanitizer + sniff rules (known ext kept / unknown-or-none replaced; octet-stream ignored) | ✅ | core/categories.rs; 3 unit tests |
+| 28.2 | create_task derives filename from URL path (query stripped, percent-decoded); engine coordinator applies the sniff rename + re-sort BEFORE file open (fresh tasks only) | ✅ | routes.rs, engine.rs; 2 e2e tests (auto re-sort other→pictures; explicit dir kept) |
+| 28.3 | inspect returns sniffed filename + content_type; confirm dialog shows "extension detected ✓" | ✅ | routes.rs + API test + App.svelte |
+| 28.4 | Theme sync: `ui_theme_style`/`ui_theme_mode` settings (server is source of truth), UI loads server theme, changes PATCH back; settings PATCH validation | ✅ | theme.js, store.js, routes.rs + test |
+| 28.5 | Folder opening: xdg-mime inode/directory probe → terminal default/missing ⇒ first installed GUI FM (10 candidates); reveal uses it; new POST /api/open-folder restricted to save folders | ✅ | routes.rs + allow/deny tests |
+| 28.6 | Dashboard folder cards + base-folder button open the file manager | ✅ | Dashboard.svelte |
+| 28.7 | /api/system/usage (VmRSS/VmHWM/Threads/utime+stime, USER_HZ, all-core-normalized CPU% delta-sampled) + footer widget (3 s poll, toggleable) | ✅ | api/usage.rs + tests + App.svelte |
+| 28.8 | Quiet/background mode: engine.set_quiet (aggregator 1s→10s, fixed schedule), /api/power/quiet|wake, server_info.quiet, UI ⏾ button + Settings card; CLI `hyprfetch close` / `hyprfetch open` (start-if-needed + browser) | ✅ | events.rs, engine.rs, routes.rs, background.rs + tests |
+| 28.9 | cargo test 175 green, clippy zero warnings, UI eslint clean, bundle rebuilt (index-DmW6oC3w.js) | ✅ | session log |
+| 28.10 | Bump 0.4.6 + CHANGELOG [0.4.6] + docs/api.md (sniffing, open-folder, usage, power, settings keys) + release via tag-per-release | ✅ | session log |

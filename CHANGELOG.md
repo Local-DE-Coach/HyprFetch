@@ -8,6 +8,62 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-09-30 (Auto-save extensions from Content-Type, cross-browser theme sync, real file managers, resource usage + background mode)
+
+### Fixed — images saved as `images?q=tbn:ANd9Gc…` in `other/` instead of Pictures
+- Download names are now derived properly: the filename comes from the last
+  URL path segment with query/fragment junk stripped and percent-decoding
+  applied, then the server's `Content-Type` decides the real extension.
+  An image without any extension in the URL (`image/jpeg` → `.jpg`,
+  `image/png` → `.png`, …) is corrected **before any byte is written** and
+  an auto-categorized task is re-sorted into the matching folder — exactly
+  what the owner reported: Google-thumbnail URLs landing as
+  `images?q=tbn:…` inside `other/`. Files that already have a known
+  extension are never touched; explicit save dirs and forced categories
+  keep their folder (extension-only fix). ~70 media types mapped.
+- `POST /api/inspect` returns the sniffed name + `content_type`, so the
+  IDM-style confirm dialog shows `images.jpg → ~/Downloads/pictures/`
+  before the download starts.
+
+### Fixed — "GO" opened a terminal instead of the file manager
+- Root cause: on minimal window-manager setups (Hyprland + foot/kitty/…)
+  the desktop's default `inode/directory` handler is missing or IS the
+  terminal, so `xdg-open <folder>` spawned a terminal. Folder opening now
+  detects that case and launches the first installed GUI file manager
+  (nautilus, dolphin, nemo, thunar, caja, pcmanfm-qt, pcmanfm, krusader,
+  spacefm, doublecmd) instead — never a terminal. `HYPRFETCH_FILE_OPENER`
+  override unchanged.
+
+### Added — cross-browser theme sync
+- The selected theme (5 styles × dark/light) is stored on the SERVER
+  (`ui_theme_style` / `ui_theme_mode` settings) and re-applied on every UI
+  load — a NEW browser or device now opens with the same look the owner
+  picked instead of falling back to per-browser localStorage. Settings
+  validation keeps the values sane (`400` on garbage).
+
+### Added — Dashboard "Save folders" cards are buttons
+- Every folder card (and the base folder) now opens that exact location in
+  the file manager via the new `POST /api/open-folder` endpoint, which
+  only permits HyprFetch's own save folders (400 for anything else).
+
+### Added — resource usage (this app only) + close-to-background mode
+- `GET /api/system/usage` reports the RAM (current + peak), CPU % and
+  thread count of the HyprFetch process itself, read from the kernel's own
+  accounting. The footer widget (Settings → **App & background** → show
+  resource usage) samples it every 3 s — no system-wide metrics.
+- Background (quiet) mode: the app looks closed but stays alive. The
+  header ⏾ button (or Settings) puts the daemon into low-usage mode —
+  downloads keep running, the engine's own wakeups drop 10× — and
+  `hyprfetch open` starts it if needed and opens the browser instantly.
+  `hyprfetch close` is the CLI twin of the ⏾ button.
+
+### Tests
+- 10 new tests: Content-Type → extension table + filename sniffing/sanitizer
+  units, engine-level rename + re-sort e2e (auto-sorted and explicit-dir
+  variants), create/inspect filename behavior, settings validation,
+  open-folder allow/deny, usage + power endpoints. `cargo test --workspace`
+  175 green, clippy clean, UI eslint clean.
+
 ## [0.4.5] — 2026-09-30 (Updater: in-app update that actually works + stale-copy cleanup)
 
 ### Fixed — update inside the WebUI failed on system installs

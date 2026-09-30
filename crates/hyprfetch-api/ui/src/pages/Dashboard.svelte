@@ -4,7 +4,7 @@
   import { page, nav } from '../lib/router.js'
   import { fmtBytes, fmtSpeed, fmtPct, stateLabel, badgeClass, categoryIcon, fmtDate } from '../lib/format.js'
   import {
-    active, finished, globalSpeed, activeCount, categories, showAdd,
+    active, finished, globalSpeed, activeCount, categories, showAdd, openSaveFolder,
   } from '../lib/store.js'
   import TaskCard from '../lib/TaskCard.svelte'
   import FileActions from '../lib/FileActions.svelte'
@@ -85,20 +85,28 @@
   <h2 class="mb-2 text-xs font-semibold uppercase tracking-widest opacity-50">Save folders</h2>
   <p class="mb-2 text-xs opacity-50">
     Files are sorted automatically by type. Base folder: <code class="font-mono">{$categories.base}</code>
+    — click any folder to open it in your file manager.
     {#if !$categories.categorize}<span class="text-warning"> (auto-sort is OFF)</span>{/if}
   </p>
   <div class="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
     {#each $categories.categories as c (c.name)}
-      <div class="card border border-base-300 bg-base-200/60 shadow-sm" title={c.dir}>
+      <button
+        class="card border border-base-300 bg-base-200/60 text-left shadow-sm transition-all hover:border-primary hover:bg-base-200 hover:shadow"
+        title="Open {c.dir} in the file manager"
+        on:click={() => openSaveFolder(c.dir)}
+      >
         <div class="card-body p-3">
           <div class="text-lg">{categoryIcon(c.name)}</div>
           <div class="text-sm font-medium capitalize">{c.name}</div>
           <div class="truncate font-mono text-[10px] opacity-50" title={c.dir}>{c.dir}</div>
         </div>
-      </div>
+      </button>
     {/each}
   </div>
-  <button class="btn btn-ghost btn-xs mt-1" on:click={() => nav('settings')}>Edit folders →</button>
+  <div class="mt-1 flex items-center gap-1">
+    <button class="btn btn-ghost btn-xs" on:click={() => openSaveFolder($categories.base)} title="Open {$categories.base} in the file manager">Open base folder →</button>
+    <button class="btn btn-ghost btn-xs" on:click={() => nav('settings')}>Edit folders →</button>
+  </div>
 </section>
 
 <!-- recent finished -->

@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hyprfetch_core::categories::{
     category_for_filename, dir_for_category, ensure_all_dirs, expand_tilde, is_valid_category,
-    override_key, CATEGORIES, SET_CATEGORIZE, SET_DOWNLOAD_DIR,
+    override_key, sanitize_filename, sniff_filename, CATEGORIES, SET_CATEGORIZE, SET_DOWNLOAD_DIR,
 };
 use hyprfetch_db::schema::{QosOverride, TaskState};
 use hyprfetch_db::{EventsRepo, SegmentRow, SegmentState, SettingsRepo, TaskRow, TasksRepo};
@@ -27,6 +27,27 @@ fn now_ms() -> i64 {
 
 fn new_task_id() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+/// Percent-decode a raw URL path segment (`my%20file.zip` → `my file.zip`).
+fn decode_segment(seg: &str) -> String {
+    percent_encoding::percent_decode_str(seg)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// Derive a download filename from a URL: the last path segment,
+/// percent-decoded and sanitized (`…/images?q=tbn:ANd9…` → `images`).
+/// Query strings and fragments never leak into the name. Never empty.
+fn url_filename(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => parsed
+            .path_segments()
+            .and_then(|mut segs| segs.next_back())
+            .map(|s| sanitize_filename(&decode_segment(s)))
+            .unwrap_or_else(|| "download.bin".into()),
+        Err(_) => sanitize_filename(url.rsplit('/').next().unwrap_or("")),
+    }
 }
 
 fn db<'a>(state: &'a AppState) -> TasksRepo<'a> {
@@ -263,13 +284,16 @@ pub async fn create_task(
     for url in req.urls.iter() {
         validate_url(url)?;
 
-        let filename = req.filename.clone().unwrap_or_else(|| {
-            url.rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "download.bin".into())
-        });
+        // Filename: explicit request value > last URL path segment (query
+        // string stripped, percent-decoded). The engine re-sniffs the
+        // extension from the server's Content-Type once the download starts
+        // (v0.4.6), so extension-less URLs still land correctly.
+        let filename = req
+            .filename
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| sanitize_filename(&s))
+            .unwrap_or_else(|| url_filename(url));
 
         // Directory resolution: direct save > explicit category >
         // auto-detect by extension > base dir. Missing dirs are created so
@@ -366,6 +390,9 @@ pub struct InspectResponse {
     pub category: String,
     pub save_dir: String,
     pub save_path: String,
+    /// Server-reported media type — what the filename extension was
+    /// sniffed from when the URL carried none.
+    pub content_type: Option<String>,
 }
 
 /// `POST /api/inspect` — probe a URL (HEAD with SSRF + redirect checks) and
@@ -388,19 +415,21 @@ pub async fn inspect_url(
         })?;
 
     // File name: explicit request value > last segment of the FINAL url
-    // (redirects resolved) > generic fallback — mirrors create_task.
+    // (redirects resolved) > generic fallback — mirrors create_task. The
+    // extension is corrected from the probe's Content-Type (v0.4.6), so the
+    // confirm dialog shows `images.jpg`, not `images?q=tbn:ANd9…`.
     let filename = req
         .filename
         .clone()
         .filter(|s| !s.trim().is_empty())
+        .map(|s| sniff_filename(&s, probe.content_type.as_deref()))
         .unwrap_or_else(|| {
-            probe
+            let raw = probe
                 .final_url
                 .path_segments()
                 .and_then(|mut segs| segs.next_back())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "download.bin".into())
+                .unwrap_or("");
+            sniff_filename(&decode_segment(raw), probe.content_type.as_deref())
         });
 
     let settings_map: std::collections::BTreeMap<String, String> =
@@ -423,6 +452,7 @@ pub async fn inspect_url(
         category,
         save_dir,
         save_path,
+        content_type: probe.content_type,
     }))
 }
 
@@ -668,7 +698,7 @@ pub async fn reveal_task(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| path.clone());
-    spawn_opener(&dir, "folder")
+    spawn_folder_opener(&dir, "folder").await
 }
 
 /// `POST /api/tasks/:id/open` — open the downloaded file with the system's
@@ -731,6 +761,213 @@ fn spawn_opener(path: &std::path::Path, what: &str) -> Result<Json<serde_json::V
         "path": path.display().to_string(),
         "opener": program,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// Folder opening (v0.4.6): real file managers, never a terminal
+// ---------------------------------------------------------------------------
+
+/// GUI file managers tried in order when the desktop default for folders is
+/// missing or points at a terminal. Ordered by Linux-desktop prevalence.
+const FILE_MANAGERS: &[&str] = &[
+    "nautilus",   // GNOME
+    "dolphin",    // KDE
+    "nemo",       // Cinnamon
+    "thunar",     // Xfce (common on lightweight Hyprland setups too)
+    "caja",       // MATE
+    "pcmanfm-qt", // LXQt
+    "pcmanfm",    // LXDE
+    "krusader",   // KDE power users
+    "spacefm",    // lightweight
+    "doublecmd",  // dual-pane
+];
+
+/// Terminal emulators whose `.desktop` sometimes ends up as the
+/// `inode/directory` handler (especially on minimal window-manager setups
+/// like Hyprland + foot/kitty). `xdg-open <dir>` on such systems opens a
+/// TERMINAL instead of a file manager — the exact v0.4.6 "GO sends me to
+/// the terminal" bug report.
+const TERMINAL_HINTS: &[&str] = &[
+    "foot",
+    "kitty",
+    "alacritty",
+    "wezterm",
+    "ghostty",
+    "st",
+    "stterm",
+    "urxvt",
+    "rxvt",
+    "xterm",
+    "konsole",
+    "gnome-terminal",
+    "xfce4-terminal",
+    "terminator",
+    "tilix",
+    "kittyterm",
+    "qterminal",
+    "lxterminal",
+    "sakura",
+    "termite",
+    "contour",
+    "wterm",
+];
+
+/// Look a program name up on PATH (like `command -v`).
+fn find_on_path(program: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            use std::os::unix::fs::PermissionsExt;
+            // Only usable when executable.
+            if candidate
+                .metadata()
+                .ok()
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+            {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Does the resolved `inode/directory` handler look like a terminal
+/// emulator? `<name>.desktop` file names are checked against known
+/// terminal binaries (org.gnome.Terminal.desktop → "gnome-terminal" hits).
+async fn default_dir_handler_is_terminal() -> bool {
+    let probe = tokio::process::Command::new("xdg-mime")
+        .args(["query", "default", "inode/directory"])
+        .output();
+    let output = match tokio::time::timeout(std::time::Duration::from_millis(1500), probe).await {
+        Ok(Ok(o)) => o,
+        // xdg-mime unavailable/broken/slow → don't trust xdg-open.
+        _ => return true,
+    };
+    let desktop = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_lowercase();
+    if desktop.is_empty() {
+        return true; // no default at all → xdg-open would fall through to terminals
+    }
+    TERMINAL_HINTS
+        .iter()
+        .any(|h| desktop.contains(h) || desktop == format!("{h}.desktop"))
+}
+
+/// Pick the program that should open a FOLDER.
+///
+/// Order: `HYPRFETCH_FILE_OPENER` (tests / explicit override) → the desktop
+/// default via `xdg-open`, UNLESS that default is missing or a terminal →
+/// the first installed GUI file manager → `xdg-open` as the last resort.
+async fn resolve_folder_opener(dir: &std::path::Path) -> String {
+    if let Ok(p) = std::env::var("HYPRFETCH_FILE_OPENER") {
+        if !p.trim().is_empty() {
+            return p;
+        }
+    }
+
+    if !default_dir_handler_is_terminal().await {
+        return "xdg-open".to_string();
+    }
+
+    for fm in FILE_MANAGERS {
+        if let Some(path) = find_on_path(fm) {
+            tracing::debug!(
+                dir = %dir.display(),
+                fm = %fm,
+                "desktop default for folders is missing/terminal — using file manager"
+            );
+            return path.display().to_string();
+        }
+    }
+    // Nothing else to try — best effort.
+    "xdg-open".to_string()
+}
+
+/// Open a directory with a REAL file manager (never a terminal).
+/// See [`resolve_folder_opener`] for the selection order.
+async fn spawn_folder_opener(
+    dir: &std::path::Path,
+    what: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !dir.is_dir() {
+        return Err(ApiError::InvalidRequest(format!(
+            "{what} not found on disk: {}",
+            dir.display()
+        )));
+    }
+
+    let program = resolve_folder_opener(dir).await;
+
+    let mut cmd = tokio::process::Command::new(&program);
+    cmd.arg(dir);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = cmd.spawn().map_err(|e| {
+        ApiError::InternalError(format!(
+            "could not launch `{program}` ({e}) — is a desktop environment running?"
+        ))
+    })?;
+    tokio::spawn(async move {
+        let mut child = child;
+        let _ = child.wait().await;
+    });
+
+    tracing::info!(what, path = %dir.display(), %program, "opened folder");
+    Ok(Json(serde_json::json!({
+        "opened": true,
+        "what": what,
+        "path": dir.display().to_string(),
+        "opener": program,
+    })))
+}
+
+/// `POST /api/open-folder` — open one of HyprFetch's save folders in the
+/// system file manager. Powers the clickable folder cards on the Dashboard.
+/// Only paths at or under the configured save folders are allowed — a
+/// compromised UI can never launch an arbitrary directory.
+#[derive(Debug, Deserialize)]
+pub struct OpenFolderRequest {
+    pub path: String,
+}
+
+pub async fn open_folder(
+    State(state): State<AppState>,
+    Json(req): Json<OpenFolderRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let requested = expand_tilde(req.path.trim());
+    let requested = requested
+        .canonicalize()
+        .map_err(|e| ApiError::InvalidRequest(format!("folder not found: {e}")))?;
+    if !requested.is_dir() {
+        return Err(ApiError::InvalidRequest(format!(
+            "not a folder: {}",
+            requested.display()
+        )));
+    }
+
+    // Allowlist: base download dir + every category dir (+ their children).
+    let settings: std::collections::BTreeMap<String, String> =
+        SettingsRepo::new(&state.db).all()?.into_iter().collect();
+    let base = base_download_dir(&settings);
+    let mut allowed: Vec<std::path::PathBuf> =
+        vec![expand_tilde(&base).to_string_lossy().into_owned().into()];
+    for c in CATEGORIES {
+        allowed.push(dir_for_category(c, &base, &settings));
+    }
+    let ok = allowed.iter().any(|root| {
+        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        requested.starts_with(&root)
+    });
+    if !ok {
+        return Err(ApiError::InvalidRequest(
+            "folder is not a HyprFetch save folder".into(),
+        ));
+    }
+
+    spawn_folder_opener(&requested, "folder").await
 }
 
 // ---------------------------------------------------------------------------
@@ -877,6 +1114,30 @@ pub struct PatchSettings {
     pub changes: HashMap<String, String>,
 }
 
+/// Settings keys with a fixed value domain. Validated on PATCH so a typo or
+/// a hostile client can't store garbage that the UI then chokes on.
+/// Empty string clears the key (the UI falls back to its local default).
+fn validate_setting(k: &str, v: &str) -> Result<(), ApiError> {
+    let ok = match k {
+        // Must mirror THEME_STYLES in the WebUI (ui/src/lib/theme.js).
+        "ui_theme_style" => {
+            v.is_empty() || matches!(v, "slate" | "ocean" | "forest" | "coffee" | "cyber")
+        }
+        "ui_theme_mode" => v.is_empty() || matches!(v, "dark" | "light"),
+        "show_resource_usage" | "keep_alive_in_background" => {
+            matches!(v, "true" | "false")
+        }
+        _ => true,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(ApiError::InvalidRequest(format!(
+            "invalid value `{v}` for setting `{k}`"
+        )))
+    }
+}
+
 pub async fn patch_settings(
     State(state): State<AppState>,
     Json(req): Json<PatchSettings>,
@@ -888,6 +1149,9 @@ pub async fn patch_settings(
         return Err(ApiError::InvalidRequest(
             "too many settings (max 50)".into(),
         ));
+    }
+    for (k, v) in &req.changes {
+        validate_setting(k, v)?;
     }
     let s = SettingsRepo::new(&state.db);
     for (k, v) in &req.changes {
@@ -926,7 +1190,59 @@ pub async fn server_info(State(state): State<AppState>) -> Json<serde_json::Valu
         "ws_clients": state.ws_clients.load(std::sync::atomic::Ordering::Relaxed),
         "update_available": cached.as_ref().map(|c| c.available),
         "latest_version": cached.as_ref().map(|c| c.latest.clone()),
+        "quiet": state.engine.is_quiet(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/system/usage + POST /api/power/quiet|wake  (v0.4.6)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/system/usage` — RAM + CPU + threads used by THIS app only.
+/// Read from the kernel's own accounting for the current PID; no
+/// system-wide metrics are touched. Powers the footer widget and the
+/// Settings → App card.
+pub async fn system_usage(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let usage = state.usage.sample(state.started_at.elapsed().as_secs());
+    Json(serde_json::json!({
+        "rss_bytes": usage.rss_bytes,
+        "peak_rss_bytes": usage.peak_rss_bytes,
+        "cpu_percent": (usage.cpu_percent * 100.0).round() / 100.0,
+        "threads": usage.threads,
+        "uptime_secs": usage.uptime_secs,
+        "quiet": state.engine.is_quiet(),
+    }))
+}
+
+/// `POST /api/power/quiet` — enter background (low-usage) mode: the server
+/// keeps running (downloads continue) but its own periodic work wakes 10×
+/// less often. The desktop-friendly way to "close" HyprFetch without
+/// killing active downloads; reopen with `hyprfetch open` or the browser.
+pub async fn power_quiet(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.engine.set_quiet(true);
+    let usage = state.usage.sample(state.started_at.elapsed().as_secs());
+    EventsRepo::new(&state.db)
+        .append(None, "power.quiet", "{}")
+        .ok();
+    Ok(Json(serde_json::json!({
+        "quiet": true,
+        "pid": std::process::id(),
+        "rss_bytes": usage.rss_bytes,
+        "reopen": "hyprfetch open",
+    })))
+}
+
+/// `POST /api/power/wake` — leave background mode (normal 1s ticks).
+pub async fn power_wake(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.engine.set_quiet(false);
+    EventsRepo::new(&state.db)
+        .append(None, "power.wake", "{}")
+        .ok();
+    Ok(Json(serde_json::json!({ "quiet": false })))
 }
 
 // ---------------------------------------------------------------------------
@@ -2515,5 +2831,280 @@ mod tests {
             v.get("stale_copies").and_then(|s| s.as_array()).is_some(),
             "stale_copies key missing: {body}"
         );
+    }
+    // -- v0.4.6: filename sniffing / theme settings / open-folder / usage /
+    //    power --------------------------------------------------------------
+
+    fn json_request(method: Method, uri: &str, payload: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_task_strips_query_from_filename() {
+        // `…/images?q=tbn:ANd9Gc…` used to store the whole query tail as the
+        // filename (and land in `other/`). It must now store just `images`.
+        let app = router(test_state());
+        let res = app
+            .oneshot(json_request(
+                Method::POST,
+                "/api/tasks",
+                serde_json::json!({"urls": ["https://example.com/images?q=tbn:ANd9GcQ"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let filename = v["tasks"][0]["filename"].as_str().unwrap();
+        assert_eq!(
+            filename, "images",
+            "query string must not leak into the name"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_task_percent_decodes_filename() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(json_request(
+                Method::POST,
+                "/api/tasks",
+                serde_json::json!({"urls": ["https://example.com/my%20photo.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["tasks"][0]["filename"], "my photo.png");
+    }
+
+    #[tokio::test]
+    async fn inspect_sniffs_extension_from_content_type() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", "123")
+                    .insert_header("accept-ranges", "bytes")
+                    .insert_header("content-type", "image/jpeg"),
+            )
+            .mount(&server)
+            .await;
+
+        // Pin the base dir so the pictures path is deterministic. SSRF is
+        // disabled so the engine can probe the loopback mock server.
+        let base = tempfile::tempdir().unwrap();
+        let base_dir = base.path().join("dl").to_string_lossy().into_owned();
+        let db = hyprfetch_db::open_in_memory().unwrap();
+        let engine = std::sync::Arc::new(hyprfetch_core::Engine::with_ssrf_policy(
+            db.clone(),
+            hyprfetch_core::SsrfPolicy {
+                block_private: false,
+            },
+        ));
+        let state = crate::AppState::with_defaults(db, engine);
+        {
+            let s = SettingsRepo::new(&state.db);
+            s.set(SET_DOWNLOAD_DIR, &base_dir).unwrap();
+        }
+        let app = router(state);
+
+        let res = app
+            .oneshot(json_request(
+                Method::POST,
+                "/api/inspect",
+                serde_json::json!({"url": format!("{}/images?q=tbn:ANd9GcQ", server.uri())}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["filename"], "images.jpg", "sniffed from Content-Type");
+        assert_eq!(v["category"], "pictures");
+        assert_eq!(v["content_type"], "image/jpeg");
+        assert_eq!(v["save_path"], format!("{base_dir}/pictures/images.jpg"));
+    }
+
+    #[tokio::test]
+    async fn patch_settings_validates_new_ui_keys() {
+        let app = router(test_state());
+        let app1 = app.clone();
+        let app2 = app;
+
+        // Invalid theme style → 400.
+        let res = app1
+            .oneshot(json_request(
+                Method::PATCH,
+                "/api/settings",
+                serde_json::json!({"ui_theme_style": "neon-rainbow"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // Valid values round-trip.
+        let res = app2
+            .oneshot(json_request(
+                Method::PATCH,
+                "/api/settings",
+                serde_json::json!({
+                    "ui_theme_style": "ocean",
+                    "ui_theme_mode": "light",
+                    "show_resource_usage": "false",
+                    "keep_alive_in_background": "false"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ui_theme_style"], "ocean");
+        assert_eq!(v["ui_theme_mode"], "light");
+        assert_eq!(v["show_resource_usage"], "false");
+        assert_eq!(v["keep_alive_in_background"], "false");
+    }
+
+    #[tokio::test]
+    async fn open_folder_launches_file_manager_for_save_dirs() {
+        // The env var is process-global; the existing GO/Open test uses the
+        // same value, so setting it here is race-free.
+        std::env::set_var("HYPRFETCH_FILE_OPENER", "/bin/true");
+
+        let base = tempfile::tempdir().unwrap();
+        let base_dir = base.path().join("dl").to_string_lossy().into_owned();
+        std::fs::create_dir_all(base.path().join("dl/pictures")).unwrap();
+
+        let state = test_state();
+        {
+            let s = SettingsRepo::new(&state.db);
+            s.set(SET_DOWNLOAD_DIR, &base_dir).unwrap();
+        }
+        let app = router(state);
+
+        // A save folder is allowed.
+        let res = app
+            .oneshot(json_request(
+                Method::POST,
+                "/api/open-folder",
+                serde_json::json!({"path": base.path().join("dl/pictures")}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["opened"], true);
+        assert_eq!(v["opener"], "/bin/true");
+
+        // Outside the save folders → refused.
+        let app2 = router(test_state());
+        let res = app2
+            .oneshot(json_request(
+                Method::POST,
+                "/api/open-folder",
+                serde_json::json!({"path": "/etc"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // Missing folder → 400, not a crash.
+        let app3 = router(test_state());
+        let res = app3
+            .oneshot(json_request(
+                Method::POST,
+                "/api/open-folder",
+                serde_json::json!({"path": "/no/such/dir/hyprfetch"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn system_usage_reports_process_stats() {
+        let app = router(test_state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/system/usage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            v["rss_bytes"].as_u64().unwrap() > 0,
+            "rss must be positive: {body}"
+        );
+        assert!(v["threads"].as_u64().unwrap() > 0);
+        assert!(v["cpu_percent"].as_f64().unwrap() >= 0.0);
+        assert!(v["quiet"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn power_quiet_then_wake_round_trip() {
+        let app = router(test_state());
+
+        // quiet on
+        let res = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/api/power/quiet",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["quiet"], true);
+        assert!(v["rss_bytes"].as_u64().unwrap() > 0);
+
+        // server_info reports it
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/server")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["quiet"], true);
+
+        // wake up
+        let res = app
+            .oneshot(json_request(
+                Method::POST,
+                "/api/power/wake",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_str(res.into_body()).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["quiet"], false);
     }
 }

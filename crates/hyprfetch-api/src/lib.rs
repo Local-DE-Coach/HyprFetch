@@ -8,11 +8,13 @@ mod auth;
 mod error;
 mod routes;
 mod ui;
+mod usage;
 mod ws;
 
 pub use auth::require_bearer;
 
 pub use error::{ApiError, ApiErrorCode};
+pub use usage::{Usage, UsageTracker};
 
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
@@ -45,6 +47,8 @@ pub struct AppState {
     pub shutdown: Arc<Notify>,
     /// When this server process came up (for `/api/server` uptime).
     pub started_at: Instant,
+    /// Resource-usage sampler for `/api/system/usage` (this app only).
+    pub usage: Arc<UsageTracker>,
 }
 
 impl AppState {
@@ -62,6 +66,7 @@ impl AppState {
             update_cache: Arc::new(tokio::sync::Mutex::new(None)),
             shutdown: Arc::new(Notify::new()),
             started_at: Instant::now(),
+            usage: Arc::new(UsageTracker::default()),
         }
     }
 }
@@ -187,6 +192,13 @@ pub fn router_with_token(state: AppState, token: impl Into<Option<String>>) -> R
             "/api/update/stale-copies/fix",
             axum::routing::post(routes::update_fix_stale_copies),
         )
+        .route("/api/open-folder", axum::routing::post(routes::open_folder))
+        .route(
+            "/api/system/usage",
+            axum::routing::get(routes::system_usage),
+        )
+        .route("/api/power/quiet", axum::routing::post(routes::power_quiet))
+        .route("/api/power/wake", axum::routing::post(routes::power_wake))
         .with_state(state.clone());
 
     if let Some(token) = token {

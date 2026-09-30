@@ -194,6 +194,20 @@ impl<'a> TasksRepo<'a> {
         Ok(())
     }
 
+    /// Rename a task and move its save path (Content-Type sniffing fix-up
+    /// introduced in v0.4.6). The engine only calls this for tasks with zero
+    /// bytes on disk, so no file under the old name has to be moved.
+    pub fn rename(&self, id: &str, filename: &str, save_path: &str) -> rusqlite::Result<()> {
+        let now = now_ms();
+        with_conn(self.db, |c| {
+            c.execute(
+                "UPDATE tasks SET filename = ?1, save_path = ?2, updated_at = ?3 WHERE id = ?4",
+                params![filename, save_path, now, id],
+            )
+        })?;
+        Ok(())
+    }
+
     /// Remove a task row (cascades to segments via FK).
     pub fn delete(&self, id: &str) -> rusqlite::Result<()> {
         with_conn(self.db, |c| {

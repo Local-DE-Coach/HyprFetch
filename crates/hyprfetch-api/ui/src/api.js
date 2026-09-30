@@ -74,6 +74,33 @@ export async function revealTaskFolder(id) {
   return handle(await fetch(`/api/tasks/${id}/reveal`, { method: 'POST' }))
 }
 
+/// Open one of HyprFetch's save folders in the file manager (clickable
+/// folder cards on the Dashboard). Only save-folder paths are allowed.
+export async function openFolder(path) {
+  const res = await fetch('/api/open-folder', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ path }),
+  })
+  return handle(res)
+}
+
+/// RAM + CPU used by THIS app only (footer widget / Settings card).
+export async function getUsage() {
+  return handle(await fetch('/api/system/usage'))
+}
+
+/// Enter background (low-usage) mode — the app keeps running (downloads
+/// continue) but wakes up far less. Reopen with `hyprfetch open`.
+export async function powerQuiet() {
+  return handle(await fetch('/api/power/quiet', { method: 'POST' }))
+}
+
+/// Leave background mode (back to normal 1s activity ticks).
+export async function powerWake() {
+  return handle(await fetch('/api/power/wake', { method: 'POST' }))
+}
+
 // ---- download info probe (confirm dialog) --------------------------------
 
 /// Probe a URL before creating a task: final URL, size, accept-ranges and

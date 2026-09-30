@@ -1441,7 +1441,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn noninteractive_discovery_none_without_tools() {
-        use std::os::unix::fs::PermissionsExt;
         let _guard = PATH_LOCK.lock().await;
         let old_path = std::env::var_os("PATH").unwrap();
         let tmp = tempfile::tempdir().unwrap(); // empty PATH dir: no sudo/pkexec

@@ -5,12 +5,15 @@
 //! - `hyprfetch serve` — foreground prod server (compact logs).
 //! - `hyprfetch daemon start|stop|restart|status` — detached prod server
 //!   with a PID file + rotating log files, pm2-style lifecycle.
+//! - `hyprfetch open` — start the daemon if needed + open the web UI.
+//! - `hyprfetch close` — keep the daemon alive in low-usage background mode.
 //! - `hyprfetch logs [-f]` — tail the daemon log.
 //! - `hyprfetch update` — in-app self-update from GitHub releases.
 //!
 //! Configuration precedence (highest wins):
 //! CLI flag > `HYPRFETCH_*` env var > config file > built-in default.
 
+mod background;
 mod daemon;
 mod helpers;
 mod logger;
@@ -30,7 +33,7 @@ use logger::LogMode;
     name = "hyprfetch",
     version,
     about = "Minimal-RAM download manager with a browser UI",
-    after_help = "Run modes:\n  hyprfetch dev                 verbose dev console + auto-open UI\n  hyprfetch serve               prod server in the foreground\n  hyprfetch daemon start [--…]  run detached (logs via `hyprfetch logs -f`)\n  hyprfetch daemon stop|restart|status\n  hyprfetch logs [-f] [-n 100]  tail daemon logs\n  hyprfetch update [--check]    in-app self-update"
+    after_help = "Run modes:\n  hyprfetch dev                 verbose dev console + auto-open UI\n  hyprfetch serve               prod server in the foreground\n  hyprfetch daemon start [--…]  run detached (logs via `hyprfetch logs -f`)\n  hyprfetch daemon stop|restart|status\n  hyprfetch open                start if needed + open the web UI\n  hyprfetch close               keep running in the background (low usage)\n  hyprfetch logs [-f] [-n 100]  tail daemon logs\n  hyprfetch update [--check]    in-app self-update"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -71,6 +74,13 @@ enum Command {
         #[arg(short = 'n', long, default_value_t = 50)]
         lines: usize,
     },
+    /// Start the daemon if it isn't running, then open the web UI in the
+    /// default browser. The app-like way to come back after `close`.
+    Open,
+    /// Put the running daemon into low-usage background mode — it looks
+    /// closed but stays alive (downloads keep running) at its usual few
+    /// MiB of RAM. Reopen with `hyprfetch open`.
+    Close,
     /// Check for / install new releases from the self-hosted update channel
     /// (istias.tech). GitHub is never contacted.
     Update {
@@ -174,6 +184,8 @@ fn main() -> Result<()> {
             cmd: DaemonCommand::Status,
         } => return daemon::status(),
         Command::Logs { follow, lines } => return daemon::logs(*follow, *lines),
+        Command::Open => return background::open(),
+        Command::Close => return background::close(),
         _ => {}
     }
 
@@ -213,7 +225,9 @@ async fn run_async(cli: Cli, orig_args: Vec<String>) -> Result<()> {
             })
             .await
         }
-        Command::Daemon { .. } | Command::Logs { .. } => unreachable!("handled in main()"),
+        Command::Daemon { .. } | Command::Logs { .. } | Command::Open | Command::Close => {
+            unreachable!("handled in main()")
+        }
     }
 }
 

@@ -4,8 +4,14 @@
   // dark/light) and the update channel that powers the in-app updater.
   import { onMount } from 'svelte'
   import { fmtBytes } from '../lib/format.js'
-  import { settings, categories, saveSettings, getQos, setQos, notify } from '../lib/store.js'
-  import { THEME_STYLES, themeStyle, themeMode, setThemeStyle, setThemeMode } from '../lib/theme.js'
+  import {
+    settings, categories, saveSettings, getQos, setQos, notify,
+    resourceUsage, wakeUp, enterBackgroundMode,
+  } from '../lib/store.js'
+  import {
+    THEME_STYLES, themeStyle, themeMode, setThemeStyle, setThemeMode,
+  } from '../lib/theme.js'
+  import { getServerInfo } from '../api.js'
 
   // ---- save folders ----
   let baseDir = ''
@@ -120,6 +126,40 @@
       savingSec = false
     }
   }
+
+  // ---- app & background (v0.4.6) ----
+  // show_resource_usage — footer RAM/CPU widget (this app only)
+  // keep_alive_in_background — show the ⏾ close-to-background controls
+  let showUsage = true
+  let keepAlive = true
+  let savingApp = false
+  let quietState = false
+
+  $: if ($settings?.show_resource_usage !== undefined && showUsage) {
+    showUsage = $settings.show_resource_usage !== 'false'
+  }
+  $: if ($settings?.keep_alive_in_background !== undefined && keepAlive) {
+    keepAlive = $settings.keep_alive_in_background !== 'false'
+  }
+
+  onMount(async () => {
+    try { quietState = (await getServerInfo()).quiet ?? false } catch (_) { /* ignore */ }
+  })
+
+  async function saveApp() {
+    savingApp = true
+    try {
+      await saveSettings({
+        show_resource_usage: showUsage ? 'true' : 'false',
+        keep_alive_in_background: keepAlive ? 'true' : 'false',
+      })
+      notify('app settings saved ✓')
+    } catch (e) {
+      notify(`save failed: ${e.message}`)
+    } finally {
+      savingApp = false
+    }
+  }
   // ---- appearance (themes) ----
   // 5 styles × dark/light, all static CSS — switching costs nothing.
 
@@ -221,14 +261,68 @@
     </div>
   </section>
 
-  <!-- Appearance: 5 theme styles × dark/light -->
+  <!-- App & background (v0.4.6) -->
+  <section class="card border border-base-300 bg-base-200 shadow-sm">
+    <div class="card-body gap-3 p-5">
+      <h2 class="card-title text-base">App &amp; background</h2>
+
+      <label class="flex w-fit cursor-pointer items-center gap-2 text-sm">
+        <input type="checkbox" class="toggle toggle-primary" bind:checked={showUsage} />
+        Show resource usage <span class="opacity-50">(RAM &amp; CPU of this app only, in the footer)</span>
+      </label>
+      {#if showUsage && $resourceUsage}
+        <div class="flex flex-wrap gap-2 font-mono text-xs opacity-80">
+          <span class="rounded-box border border-base-300 px-2 py-1">RAM {fmtBytes($resourceUsage.rss_bytes)}</span>
+          <span class="rounded-box border border-base-300 px-2 py-1" title="Peak resident memory">peak {fmtBytes($resourceUsage.peak_rss_bytes)}</span>
+          <span class="rounded-box border border-base-300 px-2 py-1" title="Across all cores (100% = every core busy)">CPU {$resourceUsage.cpu_percent.toFixed(1)}%</span>
+          <span class="rounded-box border border-base-300 px-2 py-1">{$resourceUsage.threads} threads</span>
+        </div>
+      {/if}
+
+      <label class="flex w-fit cursor-pointer items-center gap-2 text-sm">
+        <input type="checkbox" class="toggle toggle-primary" bind:checked={keepAlive} />
+        Keep the app alive in the background <span class="opacity-50">(⏾ close button stays available)</span>
+      </label>
+      <p class="text-xs opacity-60">
+        Closing the UI does not stop HyprFetch: it stays resident at a few MiB,
+        downloads keep running, and it wakes back up instantly — run
+        <code class="font-mono">hyprfetch open</code> (starts it if needed and
+        opens your browser) or just visit <code class="font-mono">http://127.0.0.1:7780</code>.
+      </p>
+
+      {#if quietState}
+        <div class="alert alert-success flex items-center gap-2 py-2 text-sm">
+          <span class="grow">⏾ Background mode is on — the app minimizes its own activity (downloads keep running).</span>
+          <button class="btn btn-outline btn-xs" on:click={async () => { await wakeUp(); quietState = false }}>Wake up</button>
+        </div>
+      {:else}
+        <div class="card-actions justify-end">
+          <button
+            class="btn btn-outline btn-sm"
+            title="Minimize the app's own activity now — downloads continue, reopen with: hyprfetch open"
+            on:click={async () => { await enterBackgroundMode(); quietState = true }}
+          >⏾ Enter background mode now</button>
+        </div>
+      {/if}
+
+      <div class="card-actions justify-end">
+        <button class="btn btn-primary btn-sm" disabled={savingApp} on:click={saveApp}>
+          {savingApp ? 'Saving…' : 'Save app settings'}
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Appearance: 5 theme styles × dark/light, synced on the server -->
   <section class="card border border-base-300 bg-base-200 shadow-sm lg:col-span-2">
     <div class="card-body gap-3 p-5">
-      <h2 class="card-title text-base">Appearance <span class="badge badge-sm badge-ghost">5 styles · dark &amp; light</span></h2>
+      <h2 class="card-title text-base">Appearance <span class="badge badge-sm badge-ghost">5 styles · dark &amp; light · synced</span></h2>
       <p class="text-xs opacity-60">
         Pick a color style, then switch between dark and light mode (the ☀️/🌙
-        button in the header does the same). Themes are plain CSS variables —
-        switching costs zero extra RAM and your choice is remembered in this browser.
+        button in the header does the same). Your choice is stored on the
+        SERVER — every browser and device that opens this UI gets the same
+        theme automatically (v0.4.6). Themes are plain CSS variables, so
+        switching costs zero extra RAM.
       </p>
 
       <div class="flex flex-wrap items-center gap-2">

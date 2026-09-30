@@ -10,6 +10,7 @@
     active, finished, globalSpeed, activeCount, serverInfo, wsConnected,
     toast, showAdd, initApp, addDownload, refreshServer, categories,
     floatPanel, setFloatPanel, notify,
+    settings, resourceUsage, refreshUsage, enterBackgroundMode,
   } from './lib/store.js'
   import { inspectUrl } from './api.js'
   import Dashboard from './pages/Dashboard.svelte'
@@ -25,6 +26,20 @@
     return () => clearInterval(t)
   })
   onDestroy(() => { try { ws?.close() } catch (_) {} })
+
+  // Resource-usage widget: poll only while it's switched on (Settings → App).
+  let usageTimer
+  $: showUsage = $settings.show_resource_usage !== 'false'
+  $: {
+    clearInterval(usageTimer)
+    if (showUsage) {
+      refreshUsage()
+      usageTimer = setInterval(refreshUsage, 3000)
+    } else {
+      resourceUsage.set(null)
+    }
+  }
+  onDestroy(() => clearInterval(usageTimer))
 
   // ---- Add modal state (two steps, IDM-style) ----
   // step 1: source (urls + destination + options)
@@ -151,6 +166,15 @@
       on:click={() => setThemeMode($themeMode === 'dark' ? 'light' : 'dark')}
     >{$themeMode === 'dark' ? '☀️' : '🌙'}</button>
 
+    <!-- close-to-background: app stays alive at minimal usage -->
+    {#if $settings.keep_alive_in_background !== 'false'}
+      <button
+        class="btn btn-ghost btn-sm px-2"
+        title="Close to background — HyprFetch keeps running (downloads continue), reopen with: hyprfetch open"
+        on:click={enterBackgroundMode}
+      >⏾</button>
+    {/if}
+
     <button class="btn btn-primary btn-sm" on:click={() => { resetAdd(); showAdd.set(true) }}>+ Add</button>
   </div>
 </header>
@@ -174,8 +198,19 @@
 </main>
 
 <footer class="border-t border-base-300 py-4 text-center text-xs opacity-50">
-  HyprFetch v{$serverInfo.version || '…'} — minimal-RAM download manager ·
-  uptime {fmtUptime($serverInfo.uptime_secs)}
+  <span>HyprFetch v{$serverInfo.version || '…'} — minimal-RAM download manager ·
+  uptime {fmtUptime($serverInfo.uptime_secs)}</span>
+  {#if showUsage && $resourceUsage}
+    <span class="mx-1">·</span>
+    <span
+      class="font-mono"
+      title="What this app uses right now — RAM resident set and CPU across all cores"
+    >RAM {fmtBytes($resourceUsage.rss_bytes)} · CPU {$resourceUsage.cpu_percent.toFixed(1)}%</span>
+  {/if}
+  {#if $serverInfo.quiet}
+    <span class="mx-1">·</span>
+    <span class="text-success" title="Background mode: the app minimizes its own activity. Downloads keep running. Wake from Settings → App.">⏾ background</span>
+  {/if}
 </footer>
 
 <!-- floating per-download progress (IDM-style transfer monitor) -->
@@ -249,6 +284,11 @@
                       size {c.total_bytes != null ? fmtBytes(c.total_bytes) : 'unknown'}
                       · {c.accept_ranges ? 'multi-segment ✓' : 'single stream'}
                     </div>
+                    {#if c.content_type}
+                      <div class="text-success" title="The extension is taken from the server's Content-Type when the URL has none">
+                        type {c.content_type} · extension detected ✓
+                      </div>
+                    {/if}
                   </div>
                 {/if}
               </div>

@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use url::Url;
 
+use crate::categories::sniff_filename;
 use crate::events::{run_speed_aggregator, EngineEvent, EventBus};
 use crate::http_client::{ExtraHeaders, HttpClient};
 use crate::planner;
@@ -75,6 +76,10 @@ pub struct Engine {
     queue_notify: Arc<Notify>,
     /// Guards the one-time spawn of the queue-pump loop.
     pump_started: AtomicBool,
+    /// Background (quiet) mode: when set, the daemon minimizes its own
+    /// wakeup work (aggregator ticks 10× slower). Toggled via the power API
+    /// — see `set_quiet`.
+    quiet: Arc<AtomicBool>,
 }
 
 /// A running task: channel to send commands to its coordinator.
@@ -134,7 +139,21 @@ impl Engine {
             aggregator_started: AtomicBool::new(false),
             queue_notify: Arc::new(Notify::new()),
             pump_started: AtomicBool::new(false),
+            quiet: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Background (quiet) mode toggle. While on, the engine's own periodic
+    /// work (the speed aggregator) wakes 10× less often; downloads keep
+    /// running. Used by `POST /api/power/quiet` and `hyprfetch close`.
+    pub fn set_quiet(&self, on: bool) {
+        self.quiet.store(on, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(quiet = on, "engine quiet mode toggled");
+    }
+
+    /// Whether background (quiet) mode is currently on.
+    pub fn is_quiet(&self) -> bool {
+        self.quiet.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The engine-wide QoS limiter. Clone it into workers; every clone
@@ -176,8 +195,9 @@ impl Engine {
         if !self.aggregator_started.swap(true, Ordering::SeqCst) {
             let bus = self.events.clone();
             let rx = self.events.subscribe();
+            let quiet = Arc::clone(&self.quiet);
             tokio::spawn(async move {
-                run_speed_aggregator(bus, rx, crate::events::SPEED_TICK).await;
+                run_speed_aggregator(bus, rx, crate::events::SPEED_TICK, quiet).await;
             });
         }
     }
@@ -617,6 +637,59 @@ fn local_file_fits(path: &str, total_bytes: Option<i64>) -> bool {
     }
 }
 
+/// Compute the save path for a Content-Type sniffed rename.
+///
+/// Only re-sorts when the task was AUTO-categorized: when the current parent
+/// directory is exactly the folder the OLD filename would have been sorted
+/// into, the NEW filename gets the same treatment (`other/images` →
+/// `pictures/images.jpg`). Explicit save dirs and forced categories are
+/// respected — the file stays where the user pointed it.
+fn retarget_task_dir(
+    db: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+    row: &TaskRow,
+    new_filename: &str,
+) -> Result<String, EngineError> {
+    use crate::categories::{
+        category_for_filename, dir_for_category, expand_tilde, SET_CATEGORIZE, SET_DOWNLOAD_DIR,
+    };
+
+    let settings: std::collections::BTreeMap<String, String> =
+        SettingsRepo::new(db).all()?.into_iter().collect();
+    let base = settings
+        .get(SET_DOWNLOAD_DIR)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()) + "/Downloads");
+    let categorize = settings
+        .get(SET_CATEGORIZE)
+        .map(|s| s.trim() != "false")
+        .unwrap_or(true);
+
+    let current_parent = std::path::Path::new(&row.save_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let old_auto_dir = if categorize {
+        dir_for_category(category_for_filename(&row.filename), &base, &settings)
+    } else {
+        expand_tilde(&base)
+    };
+
+    let parent = if current_parent == old_auto_dir {
+        if categorize {
+            dir_for_category(category_for_filename(new_filename), &base, &settings)
+        } else {
+            expand_tilde(&base)
+        }
+    } else {
+        // Explicit save dir / forced category: keep it.
+        current_parent
+    };
+    std::fs::create_dir_all(&parent)?;
+    Ok(format!("{}/{}", parent.display(), new_filename))
+}
+
 /// Per-task coordinator: owns the segment workers, the progress aggregator,
 /// the persistence debouncer, and the command channel.
 async fn run_task_coordinator(
@@ -695,6 +768,36 @@ async fn run_task_coordinator(
         let _ = SegmentsRepo::new(&db).delete_for_task(&task_id);
         row.downloaded_bytes = 0;
         TasksRepo::new(&db).touch(&task_id, TaskState::Downloading, 0, None)?;
+    }
+
+    // Content-Type extension sniffing (v0.4.6). A URL like
+    // `…/images?q=tbn:ANd9Gc…` carries no usable extension, so the task was
+    // created with a bare or query-junk name and — with auto-sort on —
+    // landed in `other/`. The probe just told us the real Content-Type, so
+    // fix the filename and re-sort the destination folder BEFORE any byte
+    // is written. Fresh tasks only: a resumed task may already have partial
+    // data under the original name.
+    if row.downloaded_bytes == 0 {
+        let sniffed = sniff_filename(&row.filename, probe.content_type.as_deref());
+        if sniffed != row.filename {
+            match retarget_task_dir(&db, &row, &sniffed) {
+                Ok(new_path) => {
+                    info!(
+                        task = %task_id,
+                        from = %row.filename,
+                        to = %sniffed,
+                        dir = %new_path,
+                        "filename corrected from Content-Type"
+                    );
+                    TasksRepo::new(&db).rename(&task_id, &sniffed, &new_path)?;
+                    row.filename = sniffed;
+                    row.save_path = new_path;
+                }
+                Err(e) => {
+                    warn!(task = %task_id, error = %e, "could not apply sniffed filename");
+                }
+            }
+        }
     }
 
     let total_bytes = match probe.content_length {
@@ -1822,5 +1925,184 @@ mod tests {
         let contents = std::fs::read(&path).unwrap();
         assert_eq!(contents, body, "stale offsets must be discarded in-session");
         let _ = std::fs::remove_file(path);
+    }
+    #[tokio::test]
+    async fn download_renames_no_ext_file_from_content_type() {
+        // v0.4.6: a URL whose last segment has no usable extension
+        // (`…/images?q=tbn:ANd9Gc…`) gets the extension from the server's
+        // Content-Type, and an auto-categorized task is re-sorted from
+        // `other/` into the matching folder (`pictures/`) before any byte
+        // is written.
+        let server = MockServer::start().await;
+        let body: Vec<u8> = (0..40).map(|i| (i * 7) as u8).collect();
+        let total = body.len() as i64;
+
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", total.to_string())
+                    .insert_header("accept-ranges", "bytes")
+                    .insert_header("content-type", "image/jpeg"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", format!("bytes=0-{}", total - 1)))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", format!("bytes 0-{}/{total}", total - 1))
+                    .insert_header("content-length", total.to_string())
+                    .set_body_bytes(body.clone()),
+            )
+            .mount(&server)
+            .await;
+
+        let engine = fresh_engine();
+        let base = tempfile::tempdir().unwrap();
+        let base_dir = base.path().join("dl").to_string_lossy().into_owned();
+        SettingsRepo::new(&engine.db)
+            .set(crate::categories::SET_DOWNLOAD_DIR, &base_dir)
+            .unwrap();
+
+        let id = uuid::Uuid::now_v7().to_string();
+        let row = TaskRow {
+            id: id.clone(),
+            url: format!("{}/images?q=tbn:ANd9GcQ", server.uri()),
+            // Pre-0.4.6 create_task stored the raw tail INCLUDING the query.
+            filename: "images?q=tbn:ANd9GcQ".into(),
+            save_path: format!("{base_dir}/other/images?q=tbn:ANd9GcQ"),
+            total_bytes: Some(total),
+            downloaded_bytes: 0,
+            state: TaskState::Queued,
+            etag: None,
+            last_modified: None,
+            accept_ranges: false,
+            segments_requested: 1,
+            qos_override: None,
+            extra_headers: None,
+            error_message: None,
+            created_at: 0,
+            updated_at: 0,
+            completed_at: None,
+        };
+        TasksRepo::new(&engine.db).insert(&row).unwrap();
+
+        engine.start(&id).await.unwrap();
+        let mut attempts = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            attempts += 1;
+            if attempts > 100 {
+                panic!("task did not complete in time");
+            }
+            let r = TasksRepo::new(&engine.db).get(&id).unwrap().unwrap();
+            if r.state == TaskState::Complete || r.state == TaskState::Error {
+                break;
+            }
+        }
+
+        let row = TasksRepo::new(&engine.db).get(&id).unwrap().unwrap();
+        assert_eq!(
+            row.state,
+            TaskState::Complete,
+            "task should complete; got error: {:?}",
+            row.error_message
+        );
+        assert_eq!(
+            row.filename, "images.jpg",
+            "extension sniffed from Content-Type"
+        );
+        assert_eq!(
+            row.save_path,
+            format!("{base_dir}/pictures/images.jpg"),
+            "auto-categorized task re-sorted into pictures/"
+        );
+        let contents = std::fs::read(&row.save_path).unwrap();
+        assert_eq!(contents, body);
+    }
+
+    #[tokio::test]
+    async fn sniff_rename_respects_explicit_save_dir() {
+        // An explicit save dir is never overridden by the sniffed category —
+        // only the filename gains the extension.
+        let server = MockServer::start().await;
+        let body: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let total = body.len() as i64;
+
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-length", total.to_string())
+                    .insert_header("accept-ranges", "bytes")
+                    .insert_header("content-type", "image/png"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("range", format!("bytes=0-{}", total - 1)))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", format!("bytes 0-{}/{total}", total - 1))
+                    .insert_header("content-length", total.to_string())
+                    .set_body_bytes(body.clone()),
+            )
+            .mount(&server)
+            .await;
+
+        let engine = fresh_engine();
+        let base = tempfile::tempdir().unwrap();
+        let custom = base.path().join("my-stuff").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&custom).unwrap();
+
+        let id = uuid::Uuid::now_v7().to_string();
+        let row = TaskRow {
+            id: id.clone(),
+            url: format!("{}/blob", server.uri()),
+            filename: "blob".into(),
+            save_path: format!("{custom}/blob"),
+            total_bytes: Some(total),
+            downloaded_bytes: 0,
+            state: TaskState::Queued,
+            etag: None,
+            last_modified: None,
+            accept_ranges: false,
+            segments_requested: 1,
+            qos_override: None,
+            extra_headers: None,
+            error_message: None,
+            created_at: 0,
+            updated_at: 0,
+            completed_at: None,
+        };
+        TasksRepo::new(&engine.db).insert(&row).unwrap();
+
+        engine.start(&id).await.unwrap();
+        let mut attempts = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            attempts += 1;
+            if attempts > 100 {
+                panic!("task did not complete in time");
+            }
+            let r = TasksRepo::new(&engine.db).get(&id).unwrap().unwrap();
+            if r.state == TaskState::Complete || r.state == TaskState::Error {
+                break;
+            }
+        }
+
+        let row = TasksRepo::new(&engine.db).get(&id).unwrap().unwrap();
+        assert_eq!(
+            row.state,
+            TaskState::Complete,
+            "error: {:?}",
+            row.error_message
+        );
+        assert_eq!(row.filename, "blob.png");
+        assert_eq!(
+            row.save_path,
+            format!("{custom}/blob.png"),
+            "explicit save dir is kept"
+        );
+        assert!(std::fs::read(&row.save_path).is_ok());
     }
 }

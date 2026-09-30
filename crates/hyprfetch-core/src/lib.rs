@@ -17,8 +17,8 @@ pub mod task;
 pub mod update;
 
 pub use categories::{
-    category_for_filename, ensure_all_dirs, override_key, CATEGORIES, SET_CATEGORIZE,
-    SET_DOWNLOAD_DIR,
+    category_for_filename, ensure_all_dirs, ext_for_content_type, override_key, sanitize_filename,
+    sniff_filename, CATEGORIES, SET_CATEGORIZE, SET_DOWNLOAD_DIR,
 };
 pub use engine::{Engine, EngineError};
 pub use events::{EngineEvent, EventBus};

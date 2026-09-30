@@ -83,6 +83,16 @@ Save-location resolution (in precedence order):
 
 The resolved directory is created if missing.
 
+**Filename & extension auto-detection (v0.4.6).** When `filename` is not
+provided, it is taken from the last URL path segment (query string and
+fragments stripped, percent-decoded, sanitized — `…/images?q=tbn:ANd9…`
+yields `images`). When the server's `Content-Type` maps to a known media
+type and the name carries no known extension, the engine corrects the
+filename and re-sorts the destination folder BEFORE any byte is written
+(`images` + `image/jpeg` → `pictures/images.jpg`). Explicit `save_dir` or
+forced categories are always respected — only the extension changes.
+Names with a known extension (`.jpg`, `.pdf`, …) are never touched.
+
 Response: `201 Created` with the newly created task objects (one per URL).
 Each task object carries a read-only `category` field derived from the
 filename extension.
@@ -133,6 +143,55 @@ path no longer exists on disk. The opener program is `xdg-open`, override
 with the `HYPRFETCH_FILE_OPENER` environment variable (used by tests); the
 process is spawned detached, so the HTTP call never blocks on a GUI app.
 
+**Folder opening never opens a terminal (v0.4.6).** For folders (`reveal`,
+and `open-folder` below) the server checks the desktop's default
+`inode/directory` handler; when it is missing or resolves to a terminal
+emulator (a common trap on minimal window-manager setups like Hyprland),
+the first installed GUI file manager wins instead (nautilus, dolphin,
+nemo, thunar, caja, pcmanfm-qt, pcmanfm, krusader, spacefm, doublecmd).
+
+### Open a save folder
+
+`POST /api/open-folder`:
+```json
+{ "path": "/home/user/Downloads/pictures" }
+```
+→ `200 OK` with the same shape as the desktop file actions.
+
+Opens one of HyprFetch's save folders in the system file manager (the
+clickable folder cards on the Dashboard). Only the base download dir and
+the configured category folders (plus their children) are allowed — any
+other path returns `400`, so the UI can never launch an arbitrary
+directory.
+
+### Resource usage (this app only)
+
+`GET /api/system/usage` — RAM + CPU of the HyprFetch process itself, read
+from the kernel's own accounting (`/proc/self/status`, `/proc/self/stat`):
+```json
+{
+  "rss_bytes": 12582912,
+  "peak_rss_bytes": 14680064,
+  "cpu_percent": 0.42,
+  "threads": 7,
+  "uptime_secs": 3600,
+  "quiet": false
+}
+```
+`cpu_percent` is normalized to all cores (100 = every core fully busy) and
+measured between successive calls.
+
+### Background (quiet) mode
+
+- `POST /api/power/quiet` — enter background mode: the server keeps
+  running (downloads continue) while its own periodic work wakes 10× less
+  often. Returns `{"quiet": true, "pid": …, "rss_bytes": …, "reopen":
+  "hyprfetch open"}`.
+- `POST /api/power/wake` — leave background mode.
+
+The CLI equivalents are `hyprfetch close` (quiet mode for the running
+daemon) and `hyprfetch open` (start if needed + open the web UI).
+
 ### Inspect a URL (confirm dialog)
 
 `POST /api/inspect`:
@@ -149,7 +208,8 @@ process is spawned detached, so the HTTP call never blocks on a GUI app.
   "accept_ranges": true,
   "category": "video",
   "save_dir": "/home/user/Downloads/video",
-  "save_path": "/home/user/Downloads/video/movie.mkv"
+  "save_path": "/home/user/Downloads/video/movie.mkv",
+  "content_type": "video/mp4"
 }
 ```
 
@@ -202,6 +262,10 @@ Enforcement status of the seeded keys (be honest in the UI):
 | `max_concurrent_tasks` | yes — queue pump caps concurrently running tasks (0 = unlimited) |
 | `user_agent` | yes — applied to outgoing requests at startup |
 | `ssrf_block_private` | yes — combined with `--allow-private` at startup |
+| `ui_theme_style` | yes — WebUI color style, synced to every browser (validated: `slate`/`ocean`/`forest`/`coffee`/`cyber`, empty = clear) |
+| `ui_theme_mode` | yes — WebUI dark/light, synced to every browser (validated: `dark`/`light`) |
+| `show_resource_usage` | yes — footer RAM/CPU widget (v0.4.6) |
+| `keep_alive_in_background` | yes — controls the ⏾ close-to-background UI (v0.4.6) |
 | `bind` | informational — the actual bind comes from `--bind` / config / default |
 | `max_connections` | **not enforced yet** (planned global connection cap) |
 | `protocol_pref` | **not enforced yet** (planned HTTP/2/3 selection) |
@@ -241,7 +305,8 @@ footer:
   "active_tasks": 1,
   "ws_clients": 2,
   "update_available": true,
-  "latest_version": "0.3.2"
+  "latest_version": "0.3.2",
+  "quiet": false
 }
 ```
 

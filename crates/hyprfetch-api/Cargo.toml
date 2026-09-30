@@ -20,6 +20,7 @@ tracing.workspace = true
 thiserror.workspace = true
 rust-embed.workspace = true
 mime_guess.workspace = true
+percent-encoding.workspace = true
 bytes.workspace = true
 url.workspace = true
 uuid.workspace = true

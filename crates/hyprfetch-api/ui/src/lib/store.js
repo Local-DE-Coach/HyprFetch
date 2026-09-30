@@ -20,7 +20,13 @@ import {
   connectEvents,
   openTaskFile,
   revealTaskFolder,
+  openFolder,
+  getUsage,
+  powerQuiet,
+  powerWake,
 } from '../api.js'
+import { syncThemeFromServer } from './theme.js'
+import { fmtBytes } from './format.js'
 
 // ---- live state ----------------------------------------------------------
 export const active = writable([])       // queued / downloading / paused
@@ -33,6 +39,10 @@ export const settings = writable({})
 export const categories = writable({ base: '', categorize: true, categories: [] })
 export const toast = writable('')
 export const showAdd = writable(false)
+
+// Resource usage of THIS app (RAM/CPU), sampled only while the footer
+// widget is enabled (Settings → App → show resource usage).
+export const resourceUsage = writable(null)
 
 // Floating download progress panel (IDM-style transfer monitor).
 // 'show' | 'min' (bubble) | 'hide' — persisted so the choice survives reloads.
@@ -72,7 +82,13 @@ export async function refreshServer() {
 }
 
 export async function refreshSettings() {
-  try { settings.set(await getSettings()) } catch (_) { /* defaults */ }
+  try {
+    const s = await getSettings()
+    settings.set(s)
+    // The server is the source of truth for the theme (v0.4.6) — every
+    // browser that opens the UI lands on the same look.
+    syncThemeFromServer(s)
+  } catch (_) { /* defaults */ }
 }
 
 export async function refreshCategories() {
@@ -125,6 +141,40 @@ export async function revealFile(task) {
   } catch (e) {
     notify(`go failed: ${e.message}`)
   }
+}
+
+// ---- desktop integration (folders + power) -------------------------------
+export async function openSaveFolder(path) {
+  try {
+    await openFolder(path)
+    notify('opening folder…')
+  } catch (e) {
+    notify(`open folder failed: ${e.message}`)
+  }
+}
+
+export async function enterBackgroundMode() {
+  try {
+    const r = await powerQuiet()
+    await refreshServer()
+    notify(`background mode on — still running (${fmtBytes(r.rss_bytes)} RAM). Reopen: hyprfetch open`)
+  } catch (e) {
+    notify(`background mode failed: ${e.message}`)
+  }
+}
+
+export async function wakeUp() {
+  try {
+    await powerWake()
+    await refreshServer()
+    notify('back to normal mode ✓')
+  } catch (e) {
+    notify(`wake failed: ${e.message}`)
+  }
+}
+
+export async function refreshUsage() {
+  try { resourceUsage.set(await getUsage()) } catch (_) { /* optional */ }
 }
 
 export { getQos, setQos }

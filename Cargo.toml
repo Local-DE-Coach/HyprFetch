@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.5"
+version = "0.4.6"
 edition = "2021"
 rust-version = "1.85"
 description = "Minimal-RAM, fast, resumable internet download manager with a browser-based control panel"
@@ -58,6 +58,7 @@ futures = "0.3"
 rust-embed = "8"
 governor = "0.10"
 mime_guess = "2"
+percent-encoding = "2"
 
 [profile.release]
 opt-level = 3

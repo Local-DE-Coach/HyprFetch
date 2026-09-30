@@ -16,6 +16,8 @@
 //! is idle, so subscribers aren't spammed while nothing is downloading.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -23,6 +25,10 @@ use tokio::sync::broadcast;
 
 /// How often the aggregator samples progress deltas and emits `global:speed`.
 pub const SPEED_TICK: Duration = Duration::from_secs(1);
+
+/// Aggregator tick while the server is in background (quiet) mode — 10×
+/// fewer wakeups for a daemon nobody is looking at (v0.4.6).
+pub const QUIET_TICK: Duration = Duration::from_secs(10);
 
 /// One engine event, serialized as JSON for WebSocket clients.
 #[derive(Debug, Clone, Serialize)]
@@ -123,15 +129,17 @@ impl EventBus {
 
 /// Background task: watch `task:progress` events, and once per tick emit
 /// `global:speed` with the aggregate bytes/sec across all active tasks.
+/// While `quiet` is set the tick stretches to [`QUIET_TICK`] — background
+/// mode trades live speed updates for minimal wakeups.
 ///
 /// Exits when the bus is dropped (all senders gone).
 pub async fn run_speed_aggregator(
     bus: EventBus,
     mut rx: broadcast::Receiver<EngineEvent>,
     tick: Duration,
+    quiet: Arc<AtomicBool>,
 ) {
     use broadcast::error::RecvError;
-    use tokio::time::MissedTickBehavior;
 
     // task_id → most recent downloaded_bytes reported by its coordinator.
     let mut totals: HashMap<String, i64> = HashMap::new();
@@ -139,12 +147,14 @@ pub async fn run_speed_aggregator(
     let mut prev: HashMap<String, i64> = HashMap::new();
     let mut last_emitted_speed: u64 = 0;
 
-    let mut interval = tokio::time::interval(tick);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Fixed tick schedule (a plain sleep-per-loop would let a steady stream
+    // of recv events postpone ticks indefinitely). The quiet stretch only
+    // applies from the NEXT boundary, so flipping it mid-loop is still honored.
+    let mut next_tick = tokio::time::Instant::now() + tick;
 
     loop {
         tokio::select! {
-            _ = interval.tick() => {
+            _ = tokio::time::sleep_until(next_tick) => {
                 let speed: i64 = totals
                     .iter()
                     .map(|(id, &now)| (now - prev.get(id).copied().unwrap_or(0)).max(0))
@@ -158,6 +168,8 @@ pub async fn run_speed_aggregator(
                 }
                 last_emitted_speed = speed;
                 prev = totals.clone();
+                next_tick = tokio::time::Instant::now()
+                    + if quiet.load(Ordering::Relaxed) { QUIET_TICK } else { tick };
             }
             ev = rx.recv() => match ev {
                 Ok(ev) => match ev.event {
@@ -251,7 +263,13 @@ mod tests {
         let agg_bus = bus.clone();
         let rx = bus.subscribe();
         tokio::spawn(async move {
-            run_speed_aggregator(agg_bus, rx, Duration::from_millis(50)).await;
+            run_speed_aggregator(
+                agg_bus,
+                rx,
+                Duration::from_millis(50),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await;
         });
 
         bus.emit(EngineEvent::task_progress("t1", 100, Some(1000), 0));
