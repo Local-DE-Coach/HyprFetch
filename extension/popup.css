@@ -58,6 +58,97 @@ body {
   text-overflow: ellipsis;
 }
 
+/* ---- video formats section ---- */
+.vsec {
+  margin: 8px 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 8px 10px;
+}
+.vsec.hidden { display: none; }
+.vsec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.vsec-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+.linkbtn {
+  border: 0;
+  background: none;
+  color: var(--sub);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+}
+.linkbtn:hover { color: #fff; }
+.vbody { margin-top: 6px; }
+.vmsg { color: var(--sub); font-size: 11.5px; padding: 4px 2px; }
+.spin {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  vertical-align: -2px;
+  border: 2px solid var(--accent);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: hfspin 0.8s linear infinite;
+  margin-right: 6px;
+}
+@keyframes hfspin { to { transform: rotate(360deg); } }
+.vhead {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 11.5px;
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qgrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+}
+.qchip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #232030;
+  color: var(--text);
+  padding: 5px 7px;
+  cursor: pointer;
+}
+.qchip:hover { border-color: var(--accent); }
+.qchip.busy { opacity: 0.55; cursor: default; }
+.qchip.audio { border-color: rgba(56, 224, 176, 0.45); }
+.qchip .ql { font-weight: 700; font-size: 11.5px; }
+.qchip.audio .ql { color: var(--accent-2); }
+.qchip .qm { color: var(--sub); font-size: 9.5px; }
+.qfile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.qfile-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--sub);
+}
+
 .list {
   flex: 1;
   overflow-y: auto;

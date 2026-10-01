@@ -1,7 +1,7 @@
 {
   "name": "hyprfetch-ui",
   "private": true,
-  "version": "0.6.2",
+  "version": "0.6.3",
   "type": "module",
   "description": "HyprFetch web UI \u2014 Svelte + Tailwind + DaisyUI SPA embedded into the hyprfetch binary",
   "scripts": {

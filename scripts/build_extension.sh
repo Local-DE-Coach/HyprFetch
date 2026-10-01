@@ -26,7 +26,7 @@ mkdir -p "$BUILD"
 copy_files() {
     local manifest="$1"
     cp "$SRC/$manifest" "$STAGE/manifest.json"
-    cp "$SRC/background.js" "$SRC/popup.html" "$SRC/popup.js" "$SRC/popup.css" "$STAGE/"
+    cp "$SRC/background.js" "$SRC/content.js" "$SRC/popup.html" "$SRC/popup.js" "$SRC/popup.css" "$STAGE/"
     cp -r "$SRC/icons" "$STAGE/icons"
 }
 
@@ -45,7 +45,7 @@ copy_files manifest-firefox.json
 echo "==> done:"
 ls -l "$CHROME_OUT" "$FIREFOX_OUT"
 
-# Sanity: both packages must contain a valid manifest.json.
+# Sanity: both packages must contain a valid manifest.json + the content script.
 for f in "$CHROME_OUT" "$FIREFOX_OUT"; do
     python3 - "$f" << 'PY'
 import json, sys, zipfile
@@ -55,6 +55,10 @@ with zipfile.ZipFile(path) as z:
     assert m["manifest_version"] == 3, path
     assert "background.js" in z.namelist(), path
     assert "popup.html" in z.namelist(), path
-print(f"OK  {path}  (v{m['version']}, {m['background']})")
+    assert "content.js" in z.namelist(), path
+    cs = m.get("content_scripts", [])
+    assert cs and "content.js" in cs[0]["js"], path
+    assert "contextMenus" in m["permissions"], path
+print(f"OK  {path}  (v{m['version']}, {m['background']}, content-script+menus)")
 PY
 done

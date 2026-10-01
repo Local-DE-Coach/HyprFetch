@@ -665,3 +665,23 @@ to the manager automatically instead of the browser downloading.
 | 32.6 | e2e_update_channel.sh de-staled: 3 assertions updated to the v0.4.9+ migration contract (system location → ~/.local/bin, no escalation) | ✅ | 45/45 PASS |
 | 32.7 | Gates: cargo fmt/clippy/test 217 green, UI lint+build green, docs build+eslint green, real `update --check` vs istias.tech green | ✅ | session log |
 | 32.8 | Release v0.6.2: tag, CI build, channel deploy, server verify (manifest, extension packages 0.6.2, page shows 0.6.2) | ✅ | close-out of this session |
+
+## 33 · v0.6.3 — the extension goes full IDM (owner brief, 2026-10-01)
+
+**Owner brief:** the extension fails to get YouTube videos and shows no multi
+format — it must connect to the app backend and list every quality (8K/4K/2K/
+1080/720/480…); inject a download button on each media in the tab like the IDM
+extension; have a button/menu on media (image, audio, pdf, video) on click;
+and the in-app extension install must be confirmed working.
+
+| # | Task | Status | Evidence / notes |
+|---|---|---|---|
+| 33.1 | `extension/content.js` (new): IDM-style ⬇ pill on every `<video>`/`<audio>` (large images on hover), shadow-DOM isolated, fixed-position tracking on scroll/resize, SPA navigation aware (1.5s tick + MutationObserver), blob:/srcObject players open the quality panel | ✅ | node --check; packages build + validate |
+| 33.2 | Quality panel in the page: daemon `/api/media/probe` → title + duration + chip grid (label, container, size, note) + MP3 chip; live-stream + no-formats + daemon-offline states; corner toast on queue | ✅ | E2E step 6: quality-picked task → 6.7 MB file on disk |
+| 33.3 | background.js: `probeMedia` + `mediaDownload` message handlers (all daemon traffic via the worker — page CSP/CORS never touched); context menus "Download with HyprFetch" (image/video/audio/link) + "Video qualities on this page…" → tabs.sendMessage → panel | ✅ | E2E steps 4–7 against a real daemon |
+| 33.4 | Alt+click capture on img/video/audio/a (media/PDF links only for anchors) → straight to daemon; blob/video fallback opens panel | ✅ | content.js capture-phase listener |
+| 33.5 | Popup: "Video formats" section auto-probes video pages (YouTube/Vimeo/Dailymotion/SoundCloud/TikTok/… regex), quality chips + ↻ re-check; "⬇ buttons on videos" toggle (storage `mediaButtons`, default ON, live in content script) | ✅ | popup builds; lint clean |
+| 33.6 | Manifests: `content_scripts` (<all_urls>, all_frames) + `contextMenus` permission + version 0.6.3 both browsers; build_extension.sh packages + validates content.js | ✅ | zip 23.2 KB / xpi 23.2 KB, structural assertions green |
+| 33.7 | WebUI Extension page: IDM feature copy + post-queue install hint ("task → download folder → manual load steps"); Docs extension page: "Four ways to grab media" section (buttons / right-click / alt+click / popup+auto-capture) | ✅ | UI build + docs build green |
+| 33.8 | `scripts/e2e_v063.sh` (new, 20 checks): JS gates, package structure, real daemon on scratch HOME, heartbeat/status/media bridge, real SoundCloud probe → ladder with audio-only, quality-picked download → file on disk, channel xpi in-app install → sha256 identical to server asset | ✅ | 20/20 PASS |
+| 33.9 | Release v0.6.3: tag, CI, channel deploy verify (manifest 0.6.3, versioned + versionless packages), in-app `update --check` | ✅ | session close-out |

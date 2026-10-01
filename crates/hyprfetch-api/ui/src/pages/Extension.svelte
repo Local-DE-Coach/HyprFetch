@@ -1,5 +1,5 @@
 <script>
-  // Extension — the browser-extension control page (v0.6.2).
+  // Extension — the browser-extension control page (v0.6.3).
   //
   // 1. Connection card: is the extension heartbeating the daemon right now?
   // 2. Install cards: Firefox (.xpi) + Chromium (.zip) packages, downloaded
@@ -8,7 +8,10 @@
   //    a plain browser-download link kept as fallback. Never from GitHub.
   // 3. Captured media: everything the extension spotted while you browsed,
   //    one click to push into the download queue. Since 0.6.2 the extension
-  //    ALSO auto-captures every browser download (toggle in its popup).
+  //    ALSO auto-captures every browser download (toggle in its popup), and
+  //    since 0.6.3 it puts ⬇ buttons on videos in the page, adds a
+  //    right-click menu, and opens the real quality list (8K→480p) probed
+  //    by the daemon's media engine.
   import { onMount, onDestroy } from 'svelte'
   import { extensionStatus, extensionMedia, extensionClearMedia, extensionDownload } from '../api.js'
   import { fmtBytes } from '../lib/format.js'
@@ -23,7 +26,7 @@
   let busyPkg = ''
   let timer
 
-  const extVersion = $serverInfo.version || '0.6.2'
+  const extVersion = $serverInfo.version || '0.6.3'
 
   async function refresh() {
     try {
@@ -127,8 +130,10 @@
         {/if}
       </div>
       <p class="text-xs opacity-60">
-        Like IDM on Windows: a badge on the toolbar icon counts the media found on the current tab, and every download the
-        browser starts is handed to HyprFetch automatically (toggle it off in the extension popup). Everything stays on your
+        Like IDM on Windows: a ⬇ button sits on every video player in the page (YouTube opens the full quality list —
+        8K to 480p plus MP3), right-click any media for “Download with HyprFetch”, <b>alt+click</b> sends images and
+        file links, a badge on the toolbar icon counts the media found on the tab, and every download the browser
+        starts is handed to HyprFetch automatically (toggles live in the extension popup). Everything stays on your
         machine — the extension talks only to <code class="font-mono">127.0.0.1</code>.
       </p>
     </div>
@@ -142,6 +147,10 @@
         <p class="text-xs opacity-60">
           After the download: <span class="font-mono">about:addons</span> → gear icon → <em>Install Add-on From File…</em> →
           pick the <code class="font-mono">.xpi</code> from your download folder.
+        </p>
+        <p class="text-[11px] opacity-50">
+          The button queues the package as a normal task (see Tasks) — when it finishes, the file is in your download
+          folder and ready for the steps above.
         </p>
         <div class="flex flex-wrap items-center gap-2">
           <button class="btn btn-primary btn-sm" disabled={busyPkg === 'firefox'} on:click={() => installPkg('firefox')}>
@@ -159,6 +168,10 @@
         <p class="text-xs opacity-60">
           {chromeBrowsers}. After the download: unzip, then <span class="font-mono">chrome://extensions</span> →
           enable <em>Developer mode</em> → <em>Load unpacked</em> → pick the folder.
+        </p>
+        <p class="text-[11px] opacity-50">
+          The button queues the package as a normal task (see Tasks) — when it finishes, unzip the file from your
+          download folder and follow the steps above.
         </p>
         <div class="flex flex-wrap items-center gap-2">
           <button class="btn btn-primary btn-sm" disabled={busyPkg === 'chrome'} on:click={() => installPkg('chrome')}>

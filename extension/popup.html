@@ -16,14 +16,30 @@
 
     <div id="page" class="page-title"></div>
 
+    <!-- video quality panel: what the daemon's engine (yt-dlp) really has -->
+    <section id="videoSec" class="vsec hidden">
+      <div class="vsec-head">
+        <span class="vsec-title">Video formats</span>
+        <button id="videoRescan" class="linkbtn" title="re-check formats">↻</button>
+      </div>
+      <div id="videoBody" class="vbody"></div>
+    </section>
+
     <main id="list" class="list">
       <div class="empty" id="empty">
         No media spotted on this page yet.<br />
-        <small>Open a page with videos, audio or big files — caught media shows up here and on the toolbar badge.</small>
+        <small>Videos get a ⬇ button in the page, right-click any media for “Download with HyprFetch”, or <b>alt+click</b> an image / file link. Big videos also show a full format list here.</small>
       </div>
     </main>
 
     <footer class="foot">
+      <label class="auto-row" for="mediaButtons">
+        <span class="auto-text">
+          <span class="auto-title">⬇ buttons on videos</span>
+          <span class="auto-sub">in-page buttons + alt+click (like IDM)</span>
+        </span>
+        <input type="checkbox" id="mediaButtons" class="switch" />
+      </label>
       <label class="auto-row" for="autoCapture">
         <span class="auto-text">
           <span class="auto-title">Auto-capture downloads</span>

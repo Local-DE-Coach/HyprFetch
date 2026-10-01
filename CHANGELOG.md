@@ -8,6 +8,35 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-10-01 (the extension goes full IDM)
+
+### Added — extension: in-page media buttons + real quality lists
+- **⬇ buttons on media, IDM-style.** A new content script puts a floating
+  download pill on every `<video>`/`<audio>` player (large images get one on
+  hover). Clicking it sends that exact media to the daemon; the pill flashes
+  ✓ when the task is queued.
+- **YouTube (and friends) get the REAL format list.** Players without a
+  direct URL (YouTube's `blob:` player) open a quality panel instead: the
+  daemon probes the page with yt-dlp and the panel lists every available
+  format — 8K/4K/2K/1080p/720p/480p … plus MP3 — one click queues the pick.
+  The extension popup does the same automatically on video pages (YouTube,
+  Vimeo, Dailymotion, SoundCloud, TikTok, …) with a ↻ re-check button.
+- **Right-click menu.** "Download with HyprFetch" submenu for images, video,
+  audio and links, plus "Video qualities on this page…" which opens the
+  quality panel on any page.
+- **Alt+click.** Alt+left-click on an image, video/audio element or a
+  media/PDF link sends it straight to the daemon, no menus needed.
+- New "⬇ buttons on videos" toggle in the popup (default on).
+- Context-menu and in-page buttons reuse the daemon endpoints
+  (`/api/media/probe`, `/api/media/download`, `/api/extension/download`);
+  all daemon traffic goes through the background worker, so page CSP and
+  CORS never touch it.
+
+### Fixed
+- The WebUI Extension page now explains what happens after pressing
+  "Install": the package is queued as a normal task and lands in the
+  download folder, ready for the browser's manual load steps.
+
 ## [0.6.2] — 2026-10-01 (channel fixes + extension auto-capture)
 
 ### Fixed — update channel / WebUI

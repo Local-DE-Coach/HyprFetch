@@ -16,7 +16,7 @@
 const api = globalThis.chrome ?? globalThis.browser;
 
 const DAEMON = 'http://127.0.0.1:7780';
-const EXT_VERSION = '0.6.2';
+const EXT_VERSION = '0.6.3';
 
 // ---- classification --------------------------------------------------------
 
@@ -223,7 +223,7 @@ if (api.tabs.onActivated) {
   api.tabs.onActivated.addListener(({ tabId }) => updateBadge(tabId));
 }
 
-// ---- popup + icon ----------------------------------------------------------
+// ---- popup + content-script bridge -----------------------------------------
 
 api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
@@ -244,12 +244,81 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       };
       const res = await daemonFetch('/api/extension/download', body);
       sendResponse({ ok: !!res, task: res });
+    } else if (msg?.type === 'probeMedia') {
+      // Ask the daemon's media engine (yt-dlp) what formats this page really
+      // has — the 8K→480p ladder lives on the daemon, not in the extension.
+      const res = await daemonFetch('/api/media/probe', { url: msg.url });
+      sendResponse({ ok: !!res, data: res });
+    } else if (msg?.type === 'mediaDownload') {
+      // Quality-picked media task (POST /api/media/download).
+      const res = await daemonFetch('/api/media/download', {
+        url: msg.url,
+        quality: msg.quality ?? null,
+        audio_only: !!msg.audio_only,
+        filename: msg.filename ?? null,
+      });
+      sendResponse({ ok: !!res, task: res });
     } else {
       sendResponse({ ok: false });
     }
   })();
   return true; // async sendResponse
 });
+
+// ---- context menu (right-click → Download with HyprFetch) -------------------
+
+const MENU_PARENT = 'hf-root';
+
+function buildMenus() {
+  if (!api.contextMenus) return;
+  try {
+    api.contextMenus.removeAll(() => {
+      const add = (opts) => {
+        try {
+          api.contextMenus.create(opts);
+        } catch (_) { /* duplicate id on rapid restarts */ }
+      };
+      add({ id: MENU_PARENT, title: 'Download with HyprFetch', contexts: ['image', 'video', 'audio', 'link', 'page'] });
+      add({ id: 'hf-image', parentId: MENU_PARENT, title: 'Download image', contexts: ['image'] });
+      add({ id: 'hf-video', parentId: MENU_PARENT, title: 'Download video', contexts: ['video'] });
+      add({ id: 'hf-audio', parentId: MENU_PARENT, title: 'Download audio', contexts: ['audio'] });
+      add({ id: 'hf-link', parentId: MENU_PARENT, title: 'Download link', contexts: ['link'] });
+      add({ id: 'hf-page', parentId: MENU_PARENT, title: 'Video qualities on this page…', contexts: ['page'] });
+    });
+  } catch (_) { /* contextMenus unavailable */ }
+}
+
+buildMenus();
+
+if (api.contextMenus?.onClicked) {
+  api.contextMenus.onClicked.addListener((info, tab) => {
+    if (info.menuItemId === 'hf-page') {
+      // Ask the page's content script to open the quality panel (probe →
+      // yt-dlp format list → one click queues the pick).
+      const url = info.pageUrl || tab?.url || '';
+      if (/^https?:/i.test(url) && tab?.id != null && tab.id >= 0) {
+        void pcall(api.tabs.sendMessage.bind(api.tabs), tab.id, {
+          type: 'showQualityPanel', url,
+        });
+      }
+      return;
+    }
+    const urlByMenu = {
+      'hf-image': info.srcUrl,
+      'hf-video': info.srcUrl,
+      'hf-audio': info.srcUrl,
+      'hf-link': info.linkUrl,
+    };
+    const url = urlByMenu[info.menuItemId];
+    if (url && /^https?:/i.test(url)) {
+      void daemonFetch('/api/extension/download', {
+        url,
+        filename: filenameFrom(url),
+        page_url: info.pageUrl ?? null,
+      }).then((res) => flashBadge(res ? '↓' : '!'));
+    }
+  });
+}
 
 if (api.action?.setBadgeBackgroundColor) {
   api.action.setBadgeBackgroundColor({ color: '#7C5CFF' });
