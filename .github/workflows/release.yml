@@ -587,26 +587,28 @@ jobs:
                artifacts/hyprfetch-"$VERSION"-*.tar.gz.sha256 \
                "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/updates/$VERSION/"
           # 2b. Extension packages (WebUI Extension page links) — versioned
-          #     AND version-less copies so old UIs keep working.
-          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/extension'"
+          #     AND version-less copies, under the updates/ prefix (the only
+          #     path nginx aliases statically).
+          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/updates/extension'"
           if ls artifacts/hyprfetch-extension-*.zip >/dev/null 2>&1; then
             $SCP artifacts/hyprfetch-extension-*.zip \
                  artifacts/hyprfetch-extension-*.xpi \
-                 "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/extension/"
+                 "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/updates/extension/"
             for XPI in artifacts/hyprfetch-extension-*.xpi; do
               $SSH "$DEPLOY_USER@$DEPLOY_HOST" \
-                "cp '$DEPLOY_PATH/extension/$(basename "$XPI")' '$DEPLOY_PATH/extension/hyprfetch-extension-firefox.xpi'"
+                "cp '$DEPLOY_PATH/updates/extension/$(basename "$XPI")' '$DEPLOY_PATH/updates/extension/hyprfetch-extension-firefox.xpi'"
             done
             for ZP in artifacts/hyprfetch-extension-*.zip; do
               $SSH "$DEPLOY_USER@$DEPLOY_HOST" \
-                "cp '$DEPLOY_PATH/extension/$(basename "$ZP")' '$DEPLOY_PATH/extension/hyprfetch-extension-chrome.zip'"
+                "cp '$DEPLOY_PATH/updates/extension/$(basename "$ZP")' '$DEPLOY_PATH/updates/extension/hyprfetch-extension-chrome.zip'"
             done
           fi
-          # 2c. yt-dlp engine mirror (the daemon's auto-install source).
+          # 2c. yt-dlp engine mirror (the daemon's auto-install source) —
+          #     under updates/ like every other channel path.
           if [ -f artifacts/yt-dlp-linux ]; then
-            $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/bin/yt-dlp'"
+            $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/updates/bin/yt-dlp'"
             $SCP artifacts/yt-dlp-linux artifacts/yt-dlp-linux.sha256 \
-                 "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/bin/yt-dlp/"
+                 "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/updates/bin/yt-dlp/"
           fi
           # 3. Atomic manifest swap: upload to a temp name, then mv(2).
           $SCP latest.json \
@@ -614,7 +616,7 @@ jobs:
           $SSH "$DEPLOY_USER@$DEPLOY_HOST" \
                "mv '$DEPLOY_PATH/updates/.latest.json.tmp.$$' '$DEPLOY_PATH/updates/latest.json'"
           # 4. Show what the channel now serves.
-          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "ls -la '$DEPLOY_PATH/updates/' '$DEPLOY_PATH/updates/$VERSION/'"
+          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "ls -la '$DEPLOY_PATH/updates/' '$DEPLOY_PATH/updates/$VERSION/' '$DEPLOY_PATH/updates/extension/'"
 
       - name: Verify the channel serves the new version
         if: steps.secrets.outputs.configured == 'true'
