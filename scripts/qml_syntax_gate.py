@@ -6,21 +6,23 @@ Two layers:
 1. PARSE GATE — every widget file is compiled by a real QQmlEngine
    (PySide6, QCoreApplication — instantiation would need a real EGL, parsing
    does not). Stub modules provide the quickshell-only imports (Quickshell,
-   Quickshell.Io, qs.modules.common). Catches: syntax errors, unknown
-   types, bad imports, duplicate ids, malformed signal handlers, broken
-   grouped properties — everything up to binding evaluation.
+   Quickshell.Io) AND the ii-only imports (qs.modules.common → Appearance,
+   qs.modules.common.widgets → StyledText/RippleButton/MaterialSymbol).
+   Catches: syntax errors, unknown types, bad imports, duplicate ids,
+   malformed signal handlers, broken grouped properties — everything up to
+   binding evaluation (and binding evaluation itself when EGL exists).
 
 2. STATIC CROSS-REFERENCE CHECK — what parse-only cannot see:
-   * `MaterialTheme.<role>` references vs the MD3 role manifest
-   * `controller.<member>` references inside popups vs members declared on
-     DownloadWidget.qml (built-in Item members whitelisted)
+   * `Appearance.colors.<role>` references vs the real ii role manifest
+     (verified against end-4's Appearance.qml)
+   * `Appearance.rounding.<x>` / `Appearance.font.pixelSize.<x>` refs
+   * relative component references (DownloadManager ↔ components/)
 
 Exit 0 = pass. Run: python3 scripts/qml_syntax_gate.py
 """
 
 import os
 import re
-import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -29,46 +31,13 @@ STUBS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qml_stubs")
 
 STUB_FILES = {
     "Quickshell/qmldir": """module Quickshell
-PopupWindow 1.0 PopupWindow.qml
-PopupAnchor 1.0 PopupAnchor.qml
-PopupRect 1.0 PopupRect.qml
-LazyLoader 1.0 LazyLoader.qml
 singleton Quickshell 1.0 QuickshellSingleton.qml
 """,
     "Quickshell/QuickshellSingleton.qml": """pragma Singleton
 import QtQml
 QtObject {
     function env(name) { return ""; }
-}
-""",
-    "Quickshell/PopupWindow.qml": """import QtQuick
-Item {
-    default property alias contentData: holder.data
-    property PopupAnchor anchor: anchorObj
-    property color color: "transparent"
-    PopupAnchor { id: anchorObj }
-    Item { id: holder; visible: false }
-}
-""",
-    "Quickshell/PopupAnchor.qml": """import QtQuick
-Item {
-    property var window
-    property PopupRect rect: rectObj
-    PopupRect { id: rectObj }
-}
-""",
-    "Quickshell/PopupRect.qml": """import QtQml
-QtObject {
-    property real x
-    property real y
-}
-""",
-    "Quickshell/LazyLoader.qml": """import QtQuick
-Item {
-    default property alias contentData: holder.data
-    property bool active: false
-    property var item: null
-    Item { id: holder; visible: false }
+    function execDetached(cmd) { return true; }
 }
 """,
     "Quickshell/Io/qmldir": """module Quickshell.Io
@@ -94,6 +63,7 @@ QtObject {
     property var command: []
     property bool running: false
     property int exitCode: 0
+    property QtObject stdout
     property QtObject stderr
     signal exited()
 }
@@ -109,28 +79,111 @@ QtObject {
     signal streamFinished()
 }
 """,
+    # qs.modules.common — ii's core singletons as used by the widget
     "qs/modules/common/qmldir": """module qs.modules.common
-singleton MaterialTheme 1.0 MaterialTheme.qml
+singleton Appearance 1.0 Appearance.qml
+singleton Config 1.0 Config.qml
 """,
-    "qs/modules/common/MaterialTheme.qml": """pragma Singleton
+    "qs/modules/common/Appearance.qml": """pragma Singleton
+import QtQuick
 import QtQml
-QtObject { }
+QtObject {
+    property QtObject colors: QtObject {
+        property color colLayer0: "#ffffff"
+        property color colLayer0Hover: "#f5f5f5"
+        property color colLayer0Active: "#eeeeee"
+        property color colOnLayer0: "#1b1b1b"
+        property color colLayer1: "#f2f2f2"
+        property color colOnLayer1: "#333333"
+        property color colLayer2: "#e8e8e8"
+        property color colLayer2Hover: "#dddddd"
+        property color colOnLayer2: "#222222"
+        property color colLayer3: "#d8d8d8"
+        property color colSubtext: "#777777"
+        property color colPrimary: "#65558f"
+        property color colPrimaryHover: "#77699c"
+        property color colOnPrimary: "#ffffff"
+        property color colError: "#b3261e"
+        property color colOnError: "#ffffff"
+        property color colOutlineVariant: "#cccccc"
+    }
+    property QtObject rounding: QtObject {
+        property int small: 12
+        property int normal: 17
+        property int full: 9999
+    }
+    property QtObject font: QtObject {
+        property QtObject pixelSize: QtObject {
+            property int small: 15
+            property int normal: 16
+            property int large: 17
+        }
+    }
+}
+""",
+    "qs/modules/common/Config.qml": """pragma Singleton
+import QtQml
+QtObject {
+    property var options: ({})
+}
+""",
+    # qs.modules.common.widgets — ii's styled building blocks
+    "qs/modules/common/widgets/qmldir": """module qs.modules.common.widgets
+StyledText 1.0 StyledText.qml
+RippleButton 1.0 RippleButton.qml
+MaterialSymbol 1.0 MaterialSymbol.qml
+StyledToolTip 1.0 StyledToolTip.qml
+""",
+    "qs/modules/common/widgets/StyledText.qml": """import QtQuick
+Text {
+    color: "#1b1b1b"
+}
+""",
+    "qs/modules/common/widgets/MaterialSymbol.qml": """import QtQuick
+Text {
+    property real iconSize: 16
+    font.pixelSize: iconSize
+}
+""",
+    "qs/modules/common/widgets/RippleButton.qml": """import QtQuick
+import QtQuick.Controls
+Control {
+    property string buttonText: ""
+    property real buttonRadius: 4
+    property color colBackground: "transparent"
+    signal clicked()
+    background: Rectangle { color: colBackground; radius: buttonRadius }
+    contentItem: Text { text: buttonText }
+}
+""",
+    "qs/modules/common/widgets/StyledToolTip.qml": """import QtQuick
+import QtQuick.Controls
+ToolTip {
+    property bool extraVisibleCondition: true
+}
 """,
 }
 
-# MD3 color roles used by the widget — must all exist on end4's
-# illogical-impulse MaterialTheme singleton.
-MATERIAL_ROLES = {
-    "primary", "onPrimary", "onSurface", "onSurfaceVariant",
-    "surfaceContainer", "surfaceContainerHigh", "surfaceContainerHighest",
-    "surfaceVariant",
-    "secondaryContainer", "onSecondaryContainer",
-    "tertiary", "error", "outline",
+# Appearance roles used by the widget — must all exist on end-4's
+# illogical-impulse Appearance.colors (verified against upstream main).
+APPEARANCE_ROLES = {
+    "colLayer0", "colLayer0Hover", "colLayer0Active", "colOnLayer0",
+    "colLayer1", "colOnLayer1", "colLayer2", "colLayer2Hover", "colOnLayer2",
+    "colLayer3", "colSubtext",
+    "colPrimary", "colPrimaryHover", "colOnPrimary",
+    "colError", "colOnError", "colOutlineVariant",
 }
 
-# controller.<built-in> refs that are QML Item built-ins, not declared
-# properties of the widget root.
-BUILTIN_MEMBERS = {"QsWindow", "state", "states", "hoverCloseTimer"}
+ROUNDING = {"small", "normal", "full"}
+PIXEL_SIZES = {"small", "normal", "large"}
+
+WIDGET_FILES = [
+    ("DownloadManager.qml", False),
+    ("components/DownloadHeader.qml", False),
+    ("components/DownloadList.qml", False),
+    ("components/DownloadItem.qml", False),
+    ("components/DownloadInputBar.qml", False),
+]
 
 
 def write_stubs():
@@ -197,61 +250,51 @@ def balanced(clean: str) -> str:
     return ""
 
 
-def declared_members(qml: str) -> set:
-    """property/alias/function/signal/id declarations in one file."""
-    members = set()
-    for m in re.finditer(r"^\s*(?:readonly\s+)?property\s+(?:alias\s+)?([\w<>.,]+)\s+(\w+)\s*[:{]", qml, re.M):
-        members.add(m.group(2))
-    for m in re.finditer(r"^\s*(?:readonly\s+)?property\s+var\s+(\w+)\s*[:{]?", qml, re.M):
-        members.add(m.group(1))
-    for m in re.finditer(r"^\s*function\s+(\w+)\s*\(", qml, re.M):
-        members.add(m.group(1))
-    for m in re.finditer(r"^\s*signal\s+(\w+)\s*[\(:]", qml, re.M):
-        members.add(m.group(1))
-    for m in re.finditer(r"^\s*id\s*:\s*(\w+)", qml, re.M):
-        members.add(m.group(1))
-    return members
-
-
 def check_cross_refs() -> list:
     problems = []
-    paths = {
-        "DownloadWidget.qml": os.path.join(WIDGET, "DownloadWidget.qml"),
-        "components/RecentPopup.qml": os.path.join(WIDGET, "components", "RecentPopup.qml"),
-        "components/InputPopup.qml": os.path.join(WIDGET, "components", "InputPopup.qml"),
-        "components/ActivePopup.qml": os.path.join(WIDGET, "components", "ActivePopup.qml"),
-        "components/CompletionToast.qml": os.path.join(WIDGET, "components", "CompletionToast.qml"),
-        "utils/DownloadProcess.qml": os.path.join(WIDGET, "utils", "DownloadProcess.qml"),
-    }
-    sources = {k: strip_strings_and_comments(open(v, encoding="utf-8").read())
-               for k, v in paths.items()}
-
-    widget_members = declared_members(sources["DownloadWidget.qml"])
+    sources = {}
+    for rel, _ in WIDGET_FILES:
+        path = os.path.join(WIDGET, rel)
+        sources[rel] = strip_strings_and_comments(open(path, encoding="utf-8").read())
 
     used_roles = set()
+    used_rounding = set()
+    used_sizes = set()
     for src in sources.values():
-        used_roles |= set(re.findall(r"MaterialTheme\.(\w+)", src))
-    bad = used_roles - MATERIAL_ROLES
+        used_roles |= set(re.findall(r"Appearance\.colors\.(\w+)", src))
+        used_rounding |= set(re.findall(r"Appearance\.rounding\.(\w+)", src))
+        used_sizes |= set(re.findall(r"Appearance\.font\.pixelSize\.(\w+)", src))
+    bad = used_roles - APPEARANCE_ROLES
     if bad:
-        problems.append(f"MaterialTheme roles not in manifest: {sorted(bad)}")
+        problems.append(f"Appearance.colors roles not in ii manifest: {sorted(bad)}")
+    bad = used_rounding - ROUNDING
+    if bad:
+        problems.append(f"Appearance.rounding values not in ii manifest: {sorted(bad)}")
+    bad = used_sizes - PIXEL_SIZES
+    if bad:
+        problems.append(f"Appearance.font.pixelSize values not in ii manifest: {sorted(bad)}")
 
-    for name in ["components/RecentPopup.qml", "components/InputPopup.qml",
-                 "components/ActivePopup.qml", "components/CompletionToast.qml"]:
-        refs = set(re.findall(r"controller\.(\w+)", sources[name]))
-        missing = {r for r in refs if r not in widget_members and r not in BUILTIN_MEMBERS}
-        if missing:
-            problems.append(f"{name}: controller.{sorted(missing)} not declared on DownloadWidget")
+    # Cross-file component references: everything DownloadManager.qml
+    # instantiates must exist next to it (components/), and the delegate
+    # type used by DownloadList too.
+    refs = set(re.findall(r"\b(Download\w+)\s*[{]", sources["DownloadManager.qml"]))
+    for r in sorted(refs):
+        if not os.path.isfile(os.path.join(WIDGET, "components", f"{r}.qml")):
+            problems.append(f"DownloadManager.qml instantiates {r} — components/{r}.qml missing")
+    delegate = set(re.findall(r"delegate:\s*(\w+)", sources["components/DownloadList.qml"]))
+    for d in sorted(delegate):
+        if not os.path.isfile(os.path.join(WIDGET, "components", f"{d}.qml")):
+            problems.append(f"DownloadList delegate {d} — components/{d}.qml missing")
 
-    proc_members = declared_members(sources["utils/DownloadProcess.qml"])
-    widget_src = sources["DownloadWidget.qml"]
-    for fn in ["addToQueue", "runCommand"]:
-        if re.search(rf"addProcess\.{fn}\(|revealProcess\.{fn}\(", widget_src) and fn not in proc_members:
-            problems.append(f"DownloadWidget calls DownloadProcess.{fn}() which is missing")
+    # The legacy bar-widget API must be gone for good.
+    for name, src in sources.items():
+        if "MaterialTheme." in src:
+            problems.append(f"{name}: still references MaterialTheme (pre-v0.5.1 API)")
 
     return problems
 
 
-def parse_gate(engine_cls_path=None) -> bool:
+def parse_gate() -> bool:
     use_gui = False
     try:
         from PySide6.QtGui import QGuiApplication  # noqa: F401
@@ -282,25 +325,13 @@ def parse_gate(engine_cls_path=None) -> bool:
 
     engine.warnings.connect(collect)
 
-    files = [
-        ("DownloadWidget.qml", os.path.join(WIDGET, "DownloadWidget.qml"), False),
-        ("components/RecentPopup.qml", os.path.join(WIDGET, "components", "RecentPopup.qml"), True),
-        ("components/InputPopup.qml", os.path.join(WIDGET, "components", "InputPopup.qml"), True),
-        ("components/ActivePopup.qml", os.path.join(WIDGET, "components", "ActivePopup.qml"), True),
-        ("components/CompletionToast.qml", os.path.join(WIDGET, "components", "CompletionToast.qml"), True),
-        ("utils/DownloadProcess.qml", os.path.join(WIDGET, "utils", "DownloadProcess.qml"), False),
-    ]
-
     failed = False
-    widget_obj = None
 
     def report(rel, problems):
         nonlocal failed
         # Whitelist = stub-land artifacts that CANNOT exist against real
-        # quickshell (QsWindow attached property is C++-only; MaterialTheme
-        # colors are validated against the manifest by the xref layer).
-        patterns = ("QsWindow", "Cannot read property 'window' of undefined",
-                    "Unable to assign [undefined] to QColor")
+        # quickshell/ii (Overlay parent, singleton lookups without a shell).
+        patterns = ("Overlay", "QsWindow")
         real = [p for p in problems if not any(w in p for w in patterns)]
         if real:
             failed = True
@@ -308,11 +339,12 @@ def parse_gate(engine_cls_path=None) -> bool:
             for p in real:
                 print(f"   {p}")
         elif problems:
-            print(f"PASS {rel} (only whitelisted QsWindow attached-prop notices)")
+            print(f"PASS {rel} (only whitelisted stub-land notices)")
         else:
             print(f"PASS {rel}")
 
-    for rel, path, needs_controller in files:
+    for rel, _ in WIDGET_FILES:
+        path = os.path.join(WIDGET, rel)
         src = open(path, encoding="utf-8").read()
         bal = balanced(strip_strings_and_comments(src))
         if bal:
@@ -324,14 +356,12 @@ def parse_gate(engine_cls_path=None) -> bool:
         if not problems and use_gui:
             # Instantiate to surface binding/property errors for real.
             collected.clear()
-            props = {"controller": widget_obj} if needs_controller else {}
-            obj = comp.createWithInitialProperties(props) if needs_controller or not comp.errors() else None
+            obj = comp.create()
             if obj is None:
                 problems += [f"{e.description()} (line {e.line()})" for e in comp.errors()]
             else:
                 problems += list(collected)
-                if rel == "DownloadWidget.qml":
-                    widget_obj = obj
+                obj.deleteLater()
         report(rel, problems)
 
     if not use_gui:

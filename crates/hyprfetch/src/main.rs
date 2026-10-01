@@ -33,7 +33,7 @@ use logger::LogMode;
     name = "hyprfetch",
     version,
     about = "Minimal-RAM download manager with a browser UI",
-    after_help = "Run modes:\n  hyprfetch dev                 verbose dev console + auto-open UI\n  hyprfetch serve               prod server in the foreground\n  hyprfetch daemon start [--…]  run detached (logs via `hyprfetch logs -f`)\n  hyprfetch daemon stop|restart|status\n  hyprfetch open                start if needed + open the web UI\n  hyprfetch close               keep running in the background (low usage)\n  hyprfetch add <URL>…          add download(s) from the terminal / widgets\n  hyprfetch reveal <id>         open a download's folder in the file manager\n  hyprfetch logs [-f] [-n 100]  tail daemon logs\n  hyprfetch update [--check]    in-app self-update"
+    after_help = "Run modes:\n  hyprfetch dev                 verbose dev console + auto-open UI\n  hyprfetch serve               prod server in the foreground\n  hyprfetch daemon start [--…]  run detached (logs via `hyprfetch logs -f`)\n  hyprfetch daemon stop|restart|status\n  hyprfetch open                start if needed + open the web UI\n  hyprfetch close               keep running in the background (low usage)\n  hyprfetch add <URL>…          add download(s) from the terminal / widgets\n  hyprfetch reveal <id>         open a download's folder in the file manager\n  hyprfetch remove <id> [--file]  remove a download from the list (widget's delete)\n  hyprfetch logs [-f] [-n 100]  tail daemon logs\n  hyprfetch update [--check]    in-app self-update"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -85,11 +85,25 @@ enum Command {
         urls: Vec<String>,
         /// Optional save directory (direct save; auto-categorization is
         /// skipped for these tasks).
-        #[arg(long, short = 'd')]
+        #[arg(long, short = 'd', conflicts_with = "output")]
         dir: Option<PathBuf>,
+        /// Optional exact save path for a single-URL add — the file lands
+        /// at this exact path (the widget's confirm-path dialog uses it).
+        /// With multiple URLs the filename part is reused as a directory.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
     },
     /// Open a finished download's folder in the file manager.
     Reveal { task_id: String },
+    /// Remove a download from the list (the Quickshell widget's delete
+    /// button). The downloaded file is kept unless --file is given.
+    Remove {
+        /// The task id, e.g. t_ab12 (shown in the widget and the WebUI).
+        task_id: String,
+        /// Also delete the (partially) downloaded file from disk.
+        #[arg(long)]
+        file: bool,
+    },
     /// Put the running daemon into low-usage background mode — it looks
     /// closed but stays alive (downloads keep running) at its usual few
     /// MiB of RAM. Reopen with `hyprfetch open`.
@@ -199,11 +213,14 @@ fn main() -> Result<()> {
         Command::Logs { follow, lines } => return daemon::logs(*follow, *lines),
         Command::Open => return background::open(),
         Command::Close => return background::close(),
-        Command::Add { urls, dir } => {
-            return background::add(urls, dir.as_deref());
+        Command::Add { urls, dir, output } => {
+            return background::add(urls, dir.as_deref(), output.as_deref());
         }
         Command::Reveal { task_id } => {
             return background::reveal(task_id);
+        }
+        Command::Remove { task_id, file } => {
+            return background::remove(task_id, *file);
         }
         _ => {}
     }
@@ -249,7 +266,8 @@ async fn run_async(cli: Cli, orig_args: Vec<String>) -> Result<()> {
         | Command::Open
         | Command::Close
         | Command::Add { .. }
-        | Command::Reveal { .. } => {
+        | Command::Reveal { .. }
+        | Command::Remove { .. } => {
             unreachable!("handled in main()")
         }
     }

@@ -8,6 +8,53 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-01 (the widget you tested, now the "Downloads" sidebar tab)
+
+### Changed — the widget moved from the bar into the ii sidebar
+- **The sidebar tab widget is now the shipped widget** (replacing the
+  v0.5.0 bar icon): a full **"Downloads" tab in the illogical-impulse left
+  sidebar** with a URL input bar + confirm-path dialog, live progress with
+  speed and ETA, and Open File / Open Location / Remove actions on
+  finished rows. Files live in
+  `~/.config/quickshell/ii/modules/ii/sidebarLeft/downloadManager/`.
+- Both installers (POSIX `widget-install.sh` and the WebUI "set widget"
+  card) wire the tab into `SidebarLeftContent.qml` with five surgical,
+  idempotent, byte-exact-reversible edits (import, policy flag, tab entry,
+  page instance, component) — `.bak-hyprfetch` backup kept, unknown
+  layouts untouched with exact instructions.
+
+### Fixed — real bugs in the tested widget code, kept 1:1 otherwise
+- **`RippleButton` has no `text` property in ii** — the confirm dialogs
+  and buttons now use `buttonText` / proper `contentItem` styling (ii's
+  actual API), so the Remove and Confirm-path dialogs really load.
+- **Wrong relative import** — `DownloadManager.qml` now imports
+  `"components"` (it sits inside `downloadManager/`, not next to it), and
+  `SidebarLeftContent.qml` gains `import "./downloadManager"` so the
+  `DownloadManager` type resolves without a qmldir (ii ships none).
+- **The confirm-path popup** is a standard Qt Quick Controls `Popup`
+  parented to `Overlay.overlay` (covers the whole shell window), replacing
+  the window-reparent trick that QML rejects.
+- **Open actions work without hardcoded apps** — `xdg-open` for both the
+  file and its folder (no firefox/dolphin assumptions).
+- **`hyprfetch add URL -o <path>`** pins a download to an exact path
+  (the dialog's editable full path now really lands there); `-d` and
+  `-o` are mutually exclusive.
+
+### Added
+- **`hyprfetch remove <id> [--file]`** — the widget's delete button now has
+  a backend (drops the task from the list; `--file` also deletes the file
+  from disk).
+- **`path` in the widget status file** — active and recent entries now
+  carry the absolute save path, so the sidebar's Open / Open Location
+  buttons work for every entry, not just the fallback guess.
+
+### Fixed — installer upgrade path
+- Installing (terminal one-liner OR WebUI button) **removes the old
+  v0.5.0 bar widget** first: module dir deleted and the marked
+  `DownloadWidget` block removed from the bar file — no more duplicate
+  icons from the old integration. The Settings card shows a badge when an
+  old bar widget is still around.
+
 ## [0.5.0] — 2026-10-01 (widget installer fixed + in-app widget setup + colorful UI)
 
 ### Fixed — the widget installer (the `curl | sh` crash)

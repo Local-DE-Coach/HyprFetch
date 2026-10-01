@@ -1,6 +1,6 @@
-//! Desktop-widget status file (v0.4.8).
+//! Desktop-widget status file (v0.4.8; `path` added in v0.5.1).
 //!
-//! Quickshell bar widgets (illogical-impulse and friends) cannot poll the
+//! Quickshell widgets (illogical-impulse and friends) cannot poll the
 //! HTTP API without burning RAM, but they CAN watch a file. So the daemon
 //! mirrors a tiny snapshot of the download state into
 //!
@@ -15,11 +15,12 @@
 //! {
 //!   "active_downloads": [
 //!     { "id": "t_ab12", "filename": "arch.iso", "progress": 45.5,
-//!       "speed": "2.5 MB/s", "eta": "00:02:15", "state": "downloading" }
+//!       "speed": "2.5 MB/s", "eta": "00:02:15", "state": "downloading",
+//!       "path": "/home/u/Downloads/arch.iso" }
 //!   ],
 //!   "recent_downloads": [
 //!     { "id": "t_cd34", "filename": "video.mp4", "status": "completed",
-//!       "timestamp": 1696000000 }
+//!       "timestamp": 1696000000, "path": "/home/u/Downloads/video.mp4" }
 //!   ],
 //!   "last_completed": { "filename": "video.mp4", "timestamp": 1696000000 }
 //! }
@@ -80,6 +81,9 @@ pub struct ActiveEntry {
     pub eta: String,
     /// `downloading` | `queued` | `paused` (extra info for the widget).
     pub state: &'static str,
+    /// Absolute save path (v0.5.1) — the widget's Open / Open Location
+    /// buttons use it; empty means "let the widget guess".
+    pub path: String,
 }
 
 /// One row of `recent_downloads`.
@@ -91,6 +95,8 @@ pub struct RecentEntry {
     pub status: &'static str,
     /// Unix SECONDS (the widget schema uses seconds, not millis).
     pub timestamp: i64,
+    /// Absolute save path (v0.5.1) — see [`ActiveEntry::path`].
+    pub path: String,
 }
 
 /// The full in-memory snapshot mirrored to the status file.
@@ -162,6 +168,7 @@ impl WidgetStatus {
                     "speed": e.speed,
                     "eta": e.eta,
                     "state": e.state,
+                    "path": e.path,
                 })
             })
             .collect();
@@ -174,6 +181,7 @@ impl WidgetStatus {
                     "filename": r.filename,
                     "status": r.status,
                     "timestamp": r.timestamp,
+                    "path": r.path,
                 })
             })
             .collect();
@@ -223,6 +231,7 @@ pub fn resync_from_db(db: &Arc<std::sync::Mutex<rusqlite::Connection>>) -> Widge
                             TaskState::Paused => "paused",
                             _ => "downloading",
                         },
+                        path: row.save_path.clone(),
                     },
                 );
             }
@@ -237,6 +246,7 @@ pub fn resync_from_db(db: &Arc<std::sync::Mutex<rusqlite::Connection>>) -> Widge
                             "error"
                         },
                         timestamp: ts.div_euclid(1000),
+                        path: row.save_path.clone(),
                     });
                 }
             }
@@ -320,6 +330,10 @@ pub fn apply_event(
                         } else {
                             "downloading"
                         },
+                        path: row
+                            .as_ref()
+                            .map(|r| r.save_path.clone())
+                            .unwrap_or_default(),
                     };
                     if st.active.get(id) != Some(&entry) {
                         st.active.insert(id.to_string(), entry);
@@ -330,38 +344,42 @@ pub fn apply_event(
                 }
                 "complete" => {
                     st.remove_active(id);
-                    let (filename, ts) = row
+                    let (filename, ts, path) = row
                         .map(|r| {
                             (
                                 r.filename,
                                 r.completed_at.unwrap_or_else(|| now_secs() * 1000),
+                                r.save_path,
                             )
                         })
-                        .unwrap_or_else(|| (id.to_string(), now_secs() * 1000));
+                        .unwrap_or_else(|| (id.to_string(), now_secs() * 1000, String::new()));
                     st.push_recent(RecentEntry {
                         id: id.to_string(),
                         filename: filename.clone(),
                         status: "completed",
                         timestamp: ts.div_euclid(1000),
+                        path,
                     });
                     st.last_completed = Some((filename, ts.div_euclid(1000)));
                     true
                 }
                 "error" => {
                     st.remove_active(id);
-                    let (filename, ts) = row
+                    let (filename, ts, path) = row
                         .map(|r| {
                             (
                                 r.filename,
                                 r.completed_at.unwrap_or_else(|| now_secs() * 1000),
+                                r.save_path,
                             )
                         })
-                        .unwrap_or_else(|| (id.to_string(), now_secs() * 1000));
+                        .unwrap_or_else(|| (id.to_string(), now_secs() * 1000, String::new()));
                     st.push_recent(RecentEntry {
                         id: id.to_string(),
                         filename,
                         status: "error",
                         timestamp: ts.div_euclid(1000),
+                        path,
                     });
                     true
                 }
@@ -452,6 +470,7 @@ mod tests {
             speed: format_speed(bps),
             eta: format_eta(Some(1_000_000), 455_000, bps),
             state: "downloading",
+            path: "/home/u/Downloads/arch.iso".into(),
         }
     }
 
@@ -486,6 +505,7 @@ mod tests {
                 filename: "video.mp4".into(),
                 status: "completed",
                 timestamp: 1_696_000_000,
+                path: "/home/u/Downloads/video.mp4".into(),
             },
         );
         st.last_completed = Some(("video.mp4".into(), 1_696_000_000));
@@ -499,14 +519,17 @@ mod tests {
             vec!["active_downloads", "last_completed", "recent_downloads"]
         );
         let a = &obj["active_downloads"].as_array().unwrap()[0];
-        for k in ["id", "filename", "progress", "speed", "eta", "state"] {
+        for k in [
+            "id", "filename", "progress", "speed", "eta", "state", "path",
+        ] {
             assert!(a.get(k).is_some(), "active entry missing {k}");
         }
         assert_eq!(a["id"], "t1");
         assert_eq!(a["filename"], "arch.iso");
         assert_eq!(a["speed"], "2.5 MB/s");
+        assert_eq!(a["path"], "/home/u/Downloads/arch.iso");
         let r = &obj["recent_downloads"].as_array().unwrap()[0];
-        for k in ["id", "filename", "status", "timestamp"] {
+        for k in ["id", "filename", "status", "timestamp", "path"] {
             assert!(r.get(k).is_some(), "recent entry missing {k}");
         }
         assert_eq!(r["id"], "t2");
@@ -534,6 +557,7 @@ mod tests {
                 filename: format!("f{i}"),
                 status: "completed",
                 timestamp: i,
+                path: format!("/tmp/f{i}"),
             });
         }
         assert_eq!(st.recent.len(), RECENT_LIMIT);
@@ -544,6 +568,7 @@ mod tests {
             filename: "f3".into(),
             status: "completed",
             timestamp: 99,
+            path: "/tmp/f3".into(),
         });
         assert_eq!(st.recent.len(), RECENT_LIMIT);
         assert_eq!(st.recent[0].id, "t3");

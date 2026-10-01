@@ -48,13 +48,14 @@ fn running_base() -> Result<(String, Option<String>)> {
     Ok((base, token))
 }
 
-/// POST/GET helper that retries once with the stored API token on 401.
+/// POST/GET/DELETE helper that retries once with the stored API token on 401.
 fn http_call(base: &str, path: &str, method: &str, token: Option<&str>) -> Result<(u16, String)> {
     let client = client()?;
     let url = format!("{base}{path}");
     let send = |tok: Option<&str>| -> Result<(u16, String)> {
         let mut req = match method {
             "POST" => client.post(&url),
+            "DELETE" => client.delete(&url),
             _ => client.get(&url),
         };
         if let Some(t) = tok {
@@ -229,15 +230,57 @@ fn human_bytes(n: u64) -> String {
     let v = n as f64;
     if v >= 1024.0 * 1024.0 {
         format!("{:.1} MiB", v / (1024.0 * 1024.0))
+    } else if v >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} GiB", v / (1024.0 * 1024.0 * 1024.0))
     } else {
         format!("{:.0} KiB", v / 1024.0)
     }
 }
 
+/// `hyprfetch remove <task-id> [--file]` — drop a download from the list.
+/// The Quickshell widget's delete button runs this; `--file` also deletes
+/// the (partially) downloaded file from disk. The daemon removes the task
+/// and (when asked) the file; the widget's next status read reflects it.
+pub fn remove(task_id: &str, delete_file: bool) -> Result<()> {
+    if task_id.trim().is_empty() {
+        bail!("no task id — pass the download's id, e.g. t_ab12");
+    }
+    let (base, token) = running_base_or_start()?;
+    let suffix = if delete_file { "?delete_file=true" } else { "" };
+    let (status, body_text) = http_call(
+        &base,
+        &format!("/api/tasks/{task_id}{suffix}"),
+        "DELETE",
+        token.as_deref(),
+    )?;
+    if status == 200 {
+        if delete_file {
+            println!("removed {task_id} and its file");
+        } else {
+            println!("removed {task_id} from the list (file kept on disk)");
+        }
+        Ok(())
+    } else if status == 404 {
+        bail!("no such download: {task_id}")
+    } else {
+        bail!(
+            "server answered {status}: {}",
+            body_text.lines().next().unwrap_or("")
+        )
+    }
+}
+
 /// `hyprfetch add URL…` — queue downloads on the daemon (starting it when
-/// it isn't running). This is what the Quickshell bar widget calls; it is
+/// it isn't running). This is what the Quickshell widget calls; it is
 /// also handy from scripts and keybindings.
-pub fn add(urls: &[String], dir: Option<&std::path::Path>) -> Result<()> {
+///
+/// `dir` (-d) sends everything into one directory; `output` (-o) pins a
+/// single download to an exact path (the widget's confirm-path dialog).
+pub fn add(
+    urls: &[String],
+    dir: Option<&std::path::Path>,
+    output: Option<&std::path::Path>,
+) -> Result<()> {
     if urls.is_empty() {
         bail!("nothing to add — pass one or more http(s) URLs");
     }
@@ -254,6 +297,27 @@ pub fn add(urls: &[String], dir: Option<&std::path::Path>) -> Result<()> {
     let mut body = serde_json::json!({ "urls": urls });
     if let Some(d) = dir {
         body["save_dir"] = serde_json::json!(d.to_string_lossy());
+    }
+    if let Some(o) = output {
+        let o = if o.is_absolute() {
+            o.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .context("resolving --output against the current directory")?
+                .join(o)
+        };
+        let filename = o
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.is_empty() && n != "." && n != "..")
+            .context("--output must name a file, not end in / or .");
+        let save_dir = o
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .filter(|p| !p.is_empty())
+            .context("--output has no parent directory");
+        body["save_dir"] = serde_json::json!(save_dir?);
+        body["filename"] = serde_json::json!(filename?);
     }
     let (status, body_text) = post_json(&base, "/api/tasks", &body, token.as_deref())?;
     if status != 200 && status != 201 {

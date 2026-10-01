@@ -1,0 +1,5 @@
+module qs.modules.common.widgets
+StyledText 1.0 StyledText.qml
+RippleButton 1.0 RippleButton.qml
+MaterialSymbol 1.0 MaterialSymbol.qml
+StyledToolTip 1.0 StyledToolTip.qml

@@ -151,10 +151,13 @@
     try { widget = await getWidgetStatus() } catch (_) { /* widget card stays hidden */ }
   })
 
-  // ---- desktop widget (Quickshell bar, v0.5.0) ----
-  // One card to set up the illogical-impulse bar widget: install the QML
-  // files into ~/.config/quickshell/ii/modules/downloadManager and wire
-  // DownloadWidget into the bar layout — all under $HOME, no terminal.
+  // ---- desktop widget (Quickshell sidebar tab, v0.5.1) ----
+  // One card to set up the illogical-impulse sidebar widget: install the
+  // QML files into
+  // ~/.config/quickshell/ii/modules/ii/sidebarLeft/downloadManager, wire
+  // the "Downloads" tab into SidebarLeftContent.qml and set the ii policy
+  // — all under $HOME, no terminal. Also cleans up the old v0.5.0 bar
+  // widget automatically.
   let widget = null
   let widgetBusy = false
 
@@ -163,7 +166,7 @@
     try {
       widget = await installWidget()
       notify(widget.integrated
-        ? 'desktop widget installed and wired into your bar ✓ — reload the shell to see it'
+        ? 'desktop widget installed — the Downloads tab is in your sidebar ✓ — reload the shell to see it'
         : 'desktop widget installed — check the note in the card')
     } catch (e) {
       notify(`widget install failed: ${e.message}`)
@@ -352,19 +355,19 @@
     </div>
   </section>
 
-  <!-- Desktop widget (v0.5.0): set up the Quickshell bar widget in one click -->
+  <!-- Desktop widget (v0.5.1): set up the Quickshell sidebar tab in one click -->
   {#if widget}
     <section class="card border border-base-300 bg-base-200 shadow-sm lg:col-span-2">
       <div class="card-body gap-3 p-5">
         <h2 class="card-title text-base">
           Desktop widget
-          <span class="badge badge-sm badge-ghost">Hyprland bar · near-zero RAM</span>
+          <span class="badge badge-sm badge-ghost">Hyprland sidebar tab · light RAM</span>
         </h2>
         <p class="text-xs opacity-60">
-          A download icon for your <a class="link" href="https://ii.clsty.link/en/dev/project-contrib/" target="_blank" rel="noreferrer">illogical-impulse</a> bar:
-          hover for recent downloads, click to paste a URL, live progress while
-          anything downloads. It watches a tiny status file — no polling, no
-          extra processes (~0.5 MB at idle).
+          A full <a class="link" href="https://ii.clsty.link/en/dev/project-contrib/" target="_blank" rel="noreferrer">illogical-impulse</a> sidebar tab:
+          paste a URL, confirm the save path, watch live progress with speed
+          and ETA, open or remove finished downloads. Reads a tiny status file
+          once a second — no extra processes.
         </p>
 
         <div class="flex flex-wrap items-center gap-2 text-xs">
@@ -377,9 +380,12 @@
           <span class="badge {widget.hyprfetch_found ? 'badge-success' : 'badge-warning'} badge-outline">
             hyprfetch CLI {widget.hyprfetch_found ? 'found' : 'not on PATH'}
           </span>
+          {#if widget.legacy_bar_widget_found}
+            <span class="badge badge-warning badge-outline">old bar widget found — reinstall cleans it</span>
+          {/if}
           {#if widget.installed}
             <span class="badge {widget.integrated ? 'badge-success' : 'badge-warning'} badge-outline">
-              {widget.integrated ? 'wired into bar ✓' : 'files only — not wired'}
+              {widget.integrated ? 'Downloads tab wired ✓' : 'files only — not wired'}
             </span>
             <span class="badge badge-ghost badge-outline">v{widget.version ?? '?'}</span>
           {/if}
@@ -393,7 +399,7 @@
 
         <div class="flex flex-wrap items-center gap-2">
           {#if widget.installed && widget.up_to_date && widget.integrated}
-            <span class="text-xs opacity-60">installed at <code class="font-mono">{widget.qs_root}/modules/downloadManager</code></span>
+            <span class="text-xs opacity-60">installed at <code class="font-mono">{widget.widget_dir}</code></span>
           {:else}
             <button class="btn btn-primary btn-sm" disabled={widgetBusy} on:click={doWidgetInstall}>
               {widgetBusy ? 'Installing…'

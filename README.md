@@ -157,27 +157,27 @@ hyprfetch serve --exit-when-idle 30   # sleep mode: exit after 30 idle minutes
 Daemon state lives under `~/.local/state/hyprfetch/` (logs rotate at 5 MiB,
 3 files kept). `daemon start` returns only after `/healthz` answers.
 
-## Bar widget (Quickshell, illogical-impulse)
+## Sidebar widget (Quickshell, illogical-impulse)
 
-A single unified download-manager widget for the end4 bar — a state machine
-(idle → recent → input → downloading → completed toast → idle) with
-near-zero RAM: at idle only the icon + one file watcher exist (~0.5 MB),
-every popup is a `LazyLoader` that is destroyed when it closes, and updates
-arrive by watching a status file the daemon mirrors — never by polling, and
-no extra processes.
+HyprFetch as a **"Downloads" tab in the end4 left sidebar**: paste a URL,
+confirm the exact save path, watch live progress with speed and ETA, then
+open or remove finished downloads. It reads a tiny status file the daemon
+mirrors (once per second, one `cat` — no extra processes) and starts
+downloads with the `hyprfetch` CLI.
 
 ```bash
 curl -fsSL https://istias.tech/hyprfetch/updates/widget-install.sh | sh
 ```
 
-Then add one line — `DownloadWidget {}` — into the bar layout in
-`~/.config/quickshell/ii/modules/bar/Bar.qml` and reload the shell
-(`qs -c illogical-impulse kill && qs -c illogical-impulse &`). Hover shows
-recent downloads, `+` opens a URL field, live progress/speed/ETA appear
-while anything is downloading, a toast confirms completion. From a checkout
-or a release tarball, `widget/install.sh` does the same thing. See
-[`widget/README.md`](widget/README.md) for the file layout and the exact
-status-file contract.
+The installer drops the QML into
+`~/.config/quickshell/ii/modules/ii/sidebarLeft/downloadManager/`, wires the
+tab into `SidebarLeftContent.qml` (five surgical, idempotent edits with a
+`.bak-hyprfetch` backup), sets the ii `downloadManager` policy and restarts
+Quickshell — no manual editing. It also removes the old v0.5.0 bar widget if
+that was installed. From a checkout or a release tarball, `widget/install.sh`
+does the same thing; the WebUI (Settings → Desktop widget) does it in one
+click. See [`widget/README.md`](widget/README.md) for the file layout and
+the exact status-file contract.
 
 ## Self-update
 

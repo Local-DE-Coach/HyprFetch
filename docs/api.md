@@ -370,35 +370,42 @@ manager).
 `POST /api/update/restart` → just the drain → re-exec → auto-resume part,
 without an update.
 
-## Desktop widget (v0.5.0)
+## Desktop widget (v0.5.1)
 
-The Quickshell bar widget (illogical-impulse) is manageable from the WebUI
-(Settings → Desktop widget). Everything lives under `$HOME` — the endpoints
-never touch privileged paths.
+The Quickshell sidebar widget (illogical-impulse "Downloads" tab) is
+manageable from the WebUI (Settings → Desktop widget). Everything lives
+under `$HOME` — the endpoints never touch privileged paths.
 
 `GET /api/widget/status` →
 `{ qs_root, qs_found, quickshell_found, hyprfetch_found, installed,
-integrated, bar_file, version, up_to_date, reload_hint }` — `qs_root` is
+integrated, policy_set, sidebar_file, widget_dir, legacy_bar_widget_found,
+version, up_to_date, reload_hint }` — `qs_root` is
 `~/.config/quickshell/ii` (override via `HYPRFETCH_QS_ROOT`), `installed`
-means `modules/downloadManager/DownloadWidget.qml` exists, `integrated`
-means the bar QML references `DownloadWidget`.
+means `modules/ii/sidebarLeft/downloadManager/DownloadManager.qml` exists,
+`integrated` means `SidebarLeftContent.qml` references the widget and
+`policy_set` means `policies.downloadManager` is enabled in ii's
+config.json.
 
 `POST /api/widget/install` → downloads `widget.tar.gz` from the update
 channel (same channel as the app updater — no GitHub), extracts the
-`downloadManager/` tree (regular files only, traversal refused), wires the
-bar QML with a marker-based edit (import + `DownloadWidget {}` after the
-`layoutDirection: Qt.RightToLeft` anchor; `.bak-hyprfetch` backup kept;
-unknown layouts are left untouched and reported in `note`) and records the
-state in `~/.local/share/download-manager/widget.json`. Returns the status
-body plus `note` when the bar could not be auto-edited.
+`downloadManager/` tree (regular files only, traversal refused), removes
+any legacy v0.5.0 bar widget (module dir + marked bar edit), wires the
+"Downloads" tab into `SidebarLeftContent.qml` with five marker-based edits
+(import, policy flag, tab entry, page instance, component;
+`.bak-hyprfetch` backup kept; unknown layouts are left untouched and
+reported in `note`), sets `policies.downloadManager: 1` in
+`~/.config/illogical-impulse/config.json` and records the state in
+`~/.local/share/download-manager/widget.json`. Returns the status body
+plus `note` when the sidebar could not be auto-edited.
 
-`POST /api/widget/uninstall` → removes the module dir, strips the marker
-block + import from the bar QML (restoring it byte-identically) and deletes
-the state file. Returns the status body plus `bar_reverted`.
+`POST /api/widget/uninstall` → removes the module dir, strips the five
+added lines from the sidebar QML (restoring it byte-identically), cleans
+any legacy bar widget and deletes the state file. Returns the status body
+plus `sidebar_reverted`.
 
-The POSIX installer (`curl …/widget-install.sh | sh`) performs the same two
-edits — the battery proves installer and API produce byte-identical bar
-files.
+The POSIX installer (`curl …/widget-install.sh | sh`) performs the same
+edits — the smoke test proves installer and API produce identical sidebar
+files, and that uninstalling restores the original byte-exactly.
 
 ## WebSocket
 

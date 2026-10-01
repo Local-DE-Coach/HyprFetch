@@ -1,6 +1,2 @@
 module Quickshell
-PopupWindow 1.0 PopupWindow.qml
-PopupAnchor 1.0 PopupAnchor.qml
-PopupRect 1.0 PopupRect.qml
-LazyLoader 1.0 LazyLoader.qml
 singleton Quickshell 1.0 QuickshellSingleton.qml

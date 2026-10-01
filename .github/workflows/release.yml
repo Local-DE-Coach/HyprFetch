@@ -209,10 +209,10 @@ jobs:
           sha256sum "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
           ls -la "$ARCHIVE.tar.gz" "$ARCHIVE.tar.gz.sha256"
 
-      # Quickshell bar widget — a source-only archive (QML + installer).
+      # Quickshell sidebar widget — a source-only archive (QML + installer).
       # Built ONCE (on the native target) so the release has a stable asset
       # the Docs mirror re-publishes as the version-less widget.tar.gz.
-      - name: Package widget (Quickshell bar)
+      - name: Package widget (Quickshell sidebar tab)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           VERSION="${{ needs.prepare.outputs.tag }}"
@@ -222,9 +222,11 @@ jobs:
           # `sh -n` is the real gate; `bash -n` is kept as a bonus.
           sh -n widget/install.sh
           bash -n widget/install.sh
-          test -f widget/downloadManager/DownloadWidget.qml
-          test -f widget/downloadManager/components/RecentPopup.qml
-          test -f widget/downloadManager/utils/DownloadProcess.qml
+          test -f widget/downloadManager/DownloadManager.qml
+          test -f widget/downloadManager/components/DownloadHeader.qml
+          test -f widget/downloadManager/components/DownloadList.qml
+          test -f widget/downloadManager/components/DownloadItem.qml
+          test -f widget/downloadManager/components/DownloadInputBar.qml
           tar czf "hyprfetch-widget-${VERSION}.tar.gz" -C widget install.sh README.md downloadManager
           sha256sum "hyprfetch-widget-${VERSION}.tar.gz" > "hyprfetch-widget-${VERSION}.tar.gz.sha256"
           ls -la "hyprfetch-widget-${VERSION}.tar.gz"*
@@ -413,7 +415,7 @@ jobs:
           | `hyprfetch_{version}-1_amd64.deb` | Debian / Ubuntu |
           | `hyprfetch-{version}-1.x86_64.rpm` | Fedora / RHEL |
           | `PKGBUILD` | Arch Linux (makepkg -si) |
-          | `hyprfetch-widget-{version}.tar.gz` | Quickshell bar widget (any distro) |
+          | `hyprfetch-widget-{version}.tar.gz` | Quickshell sidebar widget (any distro) |
 
           ## 🔐 Verify
 
