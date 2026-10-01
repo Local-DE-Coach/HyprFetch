@@ -8,6 +8,19 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-10-01 (hotfix: the trailing comma that broke the tab)
+
+### Fixed — sidebar wiring produced a QML parse error
+- **`SidebarLeftContent.qml` wiring added the Downloads tab entry without a
+  comma after the previous (Anime) entry.** Upstream ii ends `tabButtonList`
+  without a trailing comma, and the installer inserted the new spread entry
+  right after it — `[] ...(root.…` is a QML parse error that would break the
+  whole sidebar on reload. Both the POSIX installer and the WebUI installer
+  now append the missing comma to the previously-last entry (the
+  contentChildren list already had one). The QML gate and the smoke test
+  assert the comma explicitly, and uninstall still restores the original
+  file byte-exactly from the `.bak-hyprfetch` backup.
+
 ## [0.5.1] — 2026-10-01 (the widget you tested, now the "Downloads" sidebar tab)
 
 ### Changed — the widget moved from the bar into the ii sidebar

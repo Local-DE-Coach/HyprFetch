@@ -107,35 +107,54 @@ add_policy_prop() {
 }
 
 # Insert the tab entry just before the `]` that closes tabButtonList
-# (indented like the entry above it).
+# (indented like the entry above it). The last existing entry may lack a
+# trailing comma (upstream ii ends the list without one) — add it, or the
+# spread syntax becomes a QML parse error.
 add_tab_entry() {
   awk -v ins="$TAB_ENTRY" '
+    function flush() { if (have) { print pending; have = 0 } }
     {
       if (inlist && !done && $0 ~ /^[ \t]*\][ \t]*$/) {
-        match(prev, /^[ \t]*/)
-        print substr(prev, RSTART, RLENGTH) ins
-        done = 1
+        if (have) {
+          if (pending !~ /,[ \t]*$/) print pending ","; else print pending
+          match(pending, /^[ \t]*/)
+          print substr(pending, RSTART, RLENGTH) ins
+          have = 0
+        }
+        print $0
+        done = 1; inlist = 0
+        next
       }
-      print $0
-      prev = $0
-      if ($0 ~ /^[ \t]*property var tabButtonList: \[/) inlist = 1
+      flush()
+      pending = $0; have = 1
+      if ($0 ~ /property var tabButtonList: \[/) inlist = 1
     }
+    END { flush() }
   ' "$1"
 }
 
-# Insert the page instance just before the `]` that closes contentChildren.
+# Insert the page instance just before the `]` that closes contentChildren
+# (same trailing-comma safety as add_tab_entry).
 add_children_entry() {
   awk -v ins="$CHILDREN_ENTRY" '
+    function flush() { if (have) { print pending; have = 0 } }
     {
       if (inlist && !done && $0 ~ /^[ \t]*\][ \t]*$/) {
-        match(prev, /^[ \t]*/)
-        print substr(prev, RSTART, RLENGTH) ins
-        done = 1
+        if (have) {
+          if (pending !~ /,[ \t]*$/) print pending ","; else print pending
+          match(pending, /^[ \t]*/)
+          print substr(pending, RSTART, RLENGTH) ins
+          have = 0
+        }
+        print $0
+        done = 1; inlist = 0
+        next
       }
-      print $0
-      prev = $0
+      flush()
+      pending = $0; have = 1
       if ($0 ~ /contentChildren: \[/) inlist = 1
     }
+    END { flush() }
   ' "$1"
 }
 
@@ -305,10 +324,15 @@ if [ "$MODE" = "uninstall" ]; then
     REMOVED=1
   fi
   if [ -f "$SIDEBAR_FILE" ] && grep -q "downloadManager" "$SIDEBAR_FILE" 2>/dev/null; then
-    [ -f "$SIDEBAR_FILE$BACKUP_SUFFIX" ] || cp "$SIDEBAR_FILE" "$SIDEBAR_FILE$BACKUP_SUFFIX"
-    TMP="$SIDEBAR_FILE.hyprfetch-tmp"
-    remove_sidebar_edits "$SIDEBAR_FILE" > "$TMP"
-    mv "$TMP" "$SIDEBAR_FILE"
+    # Prefer the pristine backup: byte-exact restore (also undoes the
+    # comma the installer added to the last existing tab entry).
+    if [ -f "$SIDEBAR_FILE$BACKUP_SUFFIX" ]; then
+      cp "$SIDEBAR_FILE$BACKUP_SUFFIX" "$SIDEBAR_FILE"
+    else
+      TMP="$SIDEBAR_FILE.hyprfetch-tmp"
+      remove_sidebar_edits "$SIDEBAR_FILE" > "$TMP"
+      mv "$TMP" "$SIDEBAR_FILE"
+    fi
     say "Downloads tab removed from $SIDEBAR_FILE."
     REMOVED=1
   fi

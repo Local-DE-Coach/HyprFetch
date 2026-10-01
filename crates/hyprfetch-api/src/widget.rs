@@ -201,7 +201,17 @@ pub fn integrate_sidebar_source(src: &str) -> SidebarEdit {
         }
 
         // 3. Tab entry — just before the `]` that closes `tabButtonList`.
+        //    The last existing entry may lack a trailing comma (upstream ii
+        //    ends the list without one) — add it, or the spread syntax
+        //    becomes a QML parse error.
         if !tabs_added && trimmed == "]" && out.contains("property var tabButtonList: [") {
+            let prev = &lines[i - 1];
+            if !prev.trim_end().ends_with(',') {
+                let new_len = out.len() - prev.len() - 1; // drop prev + its newline
+                out.truncate(new_len);
+                out.push_str(prev);
+                out.push_str(",\n");
+            }
             let prev_indent = last_entry_indent(&out);
             out.push_str(&prev_indent);
             out.push_str(TAB_ENTRY);
@@ -212,7 +222,15 @@ pub fn integrate_sidebar_source(src: &str) -> SidebarEdit {
         }
 
         // 4. Page instance — just before the `]` that closes contentChildren.
+        //    Same trailing-comma safety as the tab list above.
         if !children_added && trimmed == "]" && out.contains("contentChildren: [") {
+            let prev = &lines[i - 1];
+            if !prev.trim_end().ends_with(',') {
+                let new_len = out.len() - prev.len() - 1;
+                out.truncate(new_len);
+                out.push_str(prev);
+                out.push_str(",\n");
+            }
             let prev_indent = last_entry_indent(&out);
             out.push_str(&prev_indent);
             out.push_str(CHILDREN_ENTRY);
@@ -680,21 +698,28 @@ pub fn uninstall() -> Result<serde_json::Value, String> {
     }
     let mut reverted = false;
     let sidebar = sidebar_content_file(&root);
-    if let Ok(src) = std::fs::read_to_string(&sidebar) {
-        if src.contains(COMPONENT_LINE)
-            || src.contains(POLICY_PROP_LINE)
-            || src.contains(SIDEBAR_IMPORT_LINE)
-        {
-            let backup = sidebar.with_file_name(format!(
-                "{}{BACKUP_SUFFIX}",
-                sidebar
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("SidebarLeftContent.qml")
-            ));
-            if !backup.exists() {
-                let _ = std::fs::copy(&sidebar, &backup);
-            }
+    let sidebar_touched = std::fs::read_to_string(&sidebar)
+        .map(|src| {
+            src.contains(COMPONENT_LINE)
+                || src.contains(POLICY_PROP_LINE)
+                || src.contains(SIDEBAR_IMPORT_LINE)
+        })
+        .unwrap_or(false);
+    if sidebar_touched {
+        let backup = sidebar.with_file_name(format!(
+            "{}{BACKUP_SUFFIX}",
+            sidebar
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("SidebarLeftContent.qml")
+        ));
+        // Prefer the pristine backup: byte-exact restore (also undoes the
+        // trailing comma the installer added to the last existing entry).
+        if backup.exists() {
+            std::fs::copy(&backup, &sidebar).map_err(|e| format!("restore sidebar backup: {e}"))?;
+            reverted = true;
+        } else if let Ok(src) = std::fs::read_to_string(&sidebar) {
+            // Fallback: line-removal (leaves a legal trailing comma at worst).
             let cleaned = remove_sidebar_edit(&src);
             std::fs::write(&sidebar, cleaned).map_err(|e| format!("restore sidebar file: {e}"))?;
             reverted = true;
@@ -906,6 +931,16 @@ Item {
             .position(|l| l.contains("property var tabButtonList: ["))
             .unwrap();
         let tab_entry = out.lines().position(|l| l.contains(TAB_ENTRY)).unwrap();
+        // The previously-last entry gained its trailing comma (upstream ii
+        // omits it — without the comma the spread syntax is a parse error).
+        assert!(
+            out.lines()
+                .nth(tab_entry - 1)
+                .unwrap()
+                .trim_end()
+                .ends_with(','),
+            "entry before the inserted one must end with a comma"
+        );
         let tabs_close = tabs_open
             + 1
             + out
@@ -960,12 +995,17 @@ Item {
     }
 
     #[test]
-    fn remove_restores_exactly() {
+    fn remove_restores_semantically() {
         let SidebarEdit::Edited(edited) = integrate_sidebar_source(SIDEBAR) else {
             panic!("expected Edited");
         };
         let cleaned = remove_sidebar_edit(&edited);
-        assert_eq!(cleaned, SIDEBAR);
+        // Line-removal cannot undo the trailing comma the installer added to
+        // the previously-last entry — that is why uninstall prefers the
+        // .bak backup (which IS byte-exact). QML-wise a trailing comma in a
+        // JS array literal is legal, so this is still a valid restore.
+        let expected = SIDEBAR.replacen(": [])\n", ": []),\n", 1);
+        assert_eq!(cleaned, expected);
     }
 
     #[test]
@@ -980,10 +1020,11 @@ Item {
             panic!("expected Edited");
         };
         let cleaned = remove_sidebar_edit(&edited);
+        let expected = no_nl.replacen(": [])\n", ": []),\n", 1);
         assert_eq!(
             cleaned.trim_end_matches('\n'),
-            no_nl,
-            "edit must be fully removable modulo the trailing newline"
+            expected,
+            "edit must be fully removable modulo the trailing newline + our comma"
         );
     }
 

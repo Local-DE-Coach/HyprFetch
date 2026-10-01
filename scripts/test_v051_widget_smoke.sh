@@ -76,6 +76,22 @@ grep -q '...(root.downloadManagerEnabled ? \[downloadManager.createObject()\]' "
 grep -q "Component { id: downloadManager; DownloadManager {} }" "$SIDEBAR/SidebarLeftContent.qml" || fail "component missing"
 pass "all 5 sidebar edits present"
 
+# QML syntax: the entry before the inserted tab MUST end with a comma now
+# (upstream ii omits it — without the added comma the spread syntax is a
+# parse error).
+python3 - "$SIDEBAR/SidebarLeftContent.qml" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+for i, l in enumerate(lines):
+    if '...(root.downloadManagerEnabled ? [{"icon": "download"' in l:
+        prev = lines[i - 1].rstrip()
+        assert prev.endswith(','), f"line before Downloads tab entry lacks comma: {prev!r}"
+        break
+else:
+    raise SystemExit("Downloads tab entry not found")
+PY
+pass "trailing comma added to the previous tab entry"
+
 # braces still balanced in the edited QML
 python3 - "$SIDEBAR/SidebarLeftContent.qml" <<'PY'
 import sys
