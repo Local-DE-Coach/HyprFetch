@@ -59,6 +59,19 @@ pub const YTDLP_FALLBACK: &str =
 /// take a few seconds; 45s covers slow machines without hanging the API.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Floor for the managed yt-dlp binary. YouTube changes its player constantly
+/// and old extractors silently degrade to a handful of formats with missing
+/// sizes (the "only 360p" bug class). Versions compare lexicographically —
+/// yt-dlp's `YYYY.MM.DD[.hhmmss]` format sorts correctly as a string, so this
+/// stays dependency-free. Bump when cutting a HyprFetch release.
+const YTDLP_MIN_VERSION: &str = "2026.01.01";
+
+/// Parallel fragment downloads for DASH/HLS media. Every video-site stream
+/// (YouTube included) is a bag of ~1–2 s fragments; downloading them one by
+/// one is the "other apps are 10× faster" bug. 8 is the sweet spot IDM/FDM
+/// also land on and is gentle enough for routers.
+const CONCURRENT_FRAGMENTS: u32 = 8;
+
 /// Where the managed binary lives.
 pub fn managed_bin_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
@@ -153,11 +166,45 @@ async fn download_binary(url: &str, dest: &Path) -> Result<(), String> {
 }
 
 /// Ensure a working yt-dlp exists: return the located path, or install.
+/// A managed binary that predates [`YTDLP_MIN_VERSION`] is refreshed from the
+/// channel once per daemon run — stale extractors are the "YouTube shows only
+/// one quality / no sizes" bug and users have no reason to ever notice.
 pub async fn ensure_ytdlp() -> Result<PathBuf, MediaError> {
+    static REFRESHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if let Some(p) = find_ytdlp() {
+        let is_managed = p == managed_bin_path();
+        let first_call = REFRESHED.set(()).is_ok();
+        if is_managed && first_call {
+            let stale = version_of(&p)
+                .await
+                .ok()
+                .and_then(|v| version_prefix(&v).map(|s| s.to_string()))
+                .is_some_and(|s| s.as_str() < YTDLP_MIN_VERSION);
+            if stale {
+                warn!(
+                    floor = YTDLP_MIN_VERSION,
+                    "managed yt-dlp is stale — refreshing from the channel"
+                );
+                if install_ytdlp().await.is_ok() {
+                    return Ok(managed_bin_path());
+                }
+                // Refresh failed — the stale binary still works; keep using it.
+            }
+        }
         return Ok(p);
     }
     install_ytdlp().await
+}
+
+/// First `YYYY.MM.DD` of a yt-dlp version string (nightly builds carry extra
+/// components); `None` when the version does not start with a date at all.
+fn version_prefix(v: &str) -> Option<&str> {
+    let s = v.trim();
+    if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'.') {
+        Some(&s[..10])
+    } else {
+        None
+    }
 }
 
 /// Locate `ffmpeg` on `$PATH` (yt-dlp shells out to it for merges and
@@ -178,6 +225,115 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
 pub fn has_ffmpeg() -> bool {
     static FFMPEG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FFMPEG.get_or_init(|| find_ffmpeg().is_some())
+}
+
+// ---------------------------------------------------------------------------
+// JS runtime (deno) — the YouTube speed/format unlock
+// ---------------------------------------------------------------------------
+// Modern yt-dlp needs a JavaScript runtime to solve YouTube's n-challenge and
+// consent rounds. Without one it degrades exactly the way users report:
+// few formats (sometimes only 360p), missing file sizes, and downloads
+// throttled to a crawl. A managed deno next to the managed yt-dlp fixes all
+// three; yt-dlp discovers it through the child process's PATH (see
+// [`spawn_env`]) — no flags, so older yt-dlp builds keep working untouched.
+
+/// Primary mirror of the official deno static Linux build.
+pub const DENO_MIRROR: &str = "https://istias.tech/hyprfetch/updates/bin/deno/deno-linux-x86_64";
+
+/// Fallback (GitHub, latest stable) — only used when the mirror fails.
+pub const DENO_FALLBACK: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip";
+
+/// Locate `deno` on `$PATH`, then the managed copy.
+pub fn find_deno() -> Option<PathBuf> {
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("deno");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let managed = managed_bin_dir().join("deno");
+    if managed.is_file() {
+        return Some(managed);
+    }
+    None
+}
+
+/// Ensure a JS runtime exists for yt-dlp: use whatever is on PATH or already
+/// managed; otherwise try to install the managed copy. Best-effort — a failed
+/// install degrades to the old (slower, fewer formats) behaviour, never to a
+/// broken download.
+pub async fn ensure_deno() -> Option<PathBuf> {
+    if let Some(p) = find_deno() {
+        return Some(p);
+    }
+    match install_deno().await {
+        Ok(p) => Some(p),
+        Err(e) => {
+            warn!("deno auto-install failed (media downloads stay functional but slower): {e}");
+            None
+        }
+    }
+}
+
+/// Install the official deno static build into the managed bin dir.
+/// The mirror serves the raw binary (no unzip needed); the GitHub fallback
+/// ships a zip, extracted with whatever the host provides.
+pub async fn install_deno() -> Result<PathBuf, MediaError> {
+    let dest = managed_bin_dir().join("deno");
+    std::fs::create_dir_all(managed_bin_dir())?;
+
+    // 1. Self-hosted mirror: raw executable, same flow as yt-dlp.
+    match download_binary(DENO_MIRROR, &dest).await {
+        Ok(()) => {
+            if let Ok(v) = version_of(&dest).await {
+                info!(path = %dest.display(), version = %v, "deno installed from mirror");
+                return Ok(dest);
+            }
+            let _ = std::fs::remove_file(&dest);
+        }
+        Err(e) => warn!("deno mirror download failed: {e}"),
+    }
+
+    // 2. GitHub fallback: zip archive → extract the `deno` binary.
+    let zip = managed_bin_dir().join("deno.zip");
+    download_binary(DENO_FALLBACK, &zip)
+        .await
+        .map_err(|e| MediaError::InstallFailed(format!("deno fallback download: {e}")))?;
+    let extract = tokio::process::Command::new("python3")
+        .args(["-m", "zipfile", "-e"])
+        .arg(&zip)
+        .arg(managed_bin_dir())
+        .output()
+        .await
+        .map_err(MediaError::Io)?;
+    let _ = std::fs::remove_file(&zip);
+    if !extract.status.success() || !dest.is_file() {
+        return Err(MediaError::InstallFailed(
+            "deno fallback zip extraction failed".into(),
+        ));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+    version_of(&dest).await?;
+    info!(path = %dest.display(), "deno installed from GitHub fallback");
+    Ok(dest)
+}
+
+/// Child-process environment for every yt-dlp invocation: the managed bin
+/// dir is prepended to PATH so (a) a managed deno is discovered by yt-dlp's
+/// JS-runtime lookup and (b) future managed tools need no extra plumbing.
+fn spawn_env(cmd: &mut tokio::process::Command) {
+    let managed = managed_bin_dir();
+    let existing = std::env::var("PATH").unwrap_or_default();
+    let path = if existing.is_empty() {
+        managed.to_string_lossy().into_owned()
+    } else {
+        format!("{}:{existing}", managed.display())
+    };
+    cmd.env("PATH", path);
 }
 
 /// Run `yt-dlp --version` and return the reported version string.
@@ -214,6 +370,11 @@ pub struct QualityOption {
     pub container: String,
     /// Best-effort total size (video + audio), when either reports one.
     pub size_bytes: Option<u64>,
+    /// `true` when [`QualityOption::size_bytes`] is a bitrate×duration
+    /// estimate (YouTube often omits exact sizes). The UI renders it with a
+    /// `~` so users never compare an estimate against a byte count.
+    #[serde(default)]
+    pub size_est: bool,
     /// Friendly note (`4K`, `Full HD`, `HD`, `60fps`, `HV30` …).
     pub note: Option<String>,
     /// True for the audio-only option.
@@ -327,24 +488,24 @@ pub async fn probe_url(
     url: &str,
     extra_args: &[String],
 ) -> Result<serde_json::Value, MediaError> {
-    let out = tokio::time::timeout(
-        PROBE_TIMEOUT,
-        tokio::process::Command::new(binary)
-            .args([
-                "-J",
-                "--no-playlist",
-                "--no-warnings",
-                "--skip-download",
-                "--socket-timeout",
-                "15",
-            ])
-            .args(extra_args)
-            .arg(url)
-            .output(),
-    )
-    .await
-    .map_err(|_| MediaError::Probe("probe timed out after 45s".into()))?
-    .map_err(MediaError::Io)?;
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.args([
+        "-J",
+        "--no-playlist",
+        "--no-warnings",
+        "--skip-download",
+        "--socket-timeout",
+        "15",
+    ])
+    .args(extra_args)
+    .arg(url)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    spawn_env(&mut cmd);
+    let out = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| MediaError::Probe("probe timed out after 45s".into()))?
+        .map_err(MediaError::Io)?;
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -410,6 +571,20 @@ fn ext_of(f: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// Estimated byte size from the format's average bitrate and the media
+/// duration — the honest answer for the YouTube formats that ship no
+/// `filesize` at all (before: the UI just showed nothing, which users read
+/// as "the extension can't get the correct size").
+fn estimated_size(f: &serde_json::Value, duration: Option<f64>) -> Option<u64> {
+    let tbr = fmt_num(f, "tbr")?; // kbit/s
+    let dur = duration?; // seconds
+    if tbr <= 0.0 || dur <= 0.0 {
+        return None;
+    }
+    let bytes = (tbr * 1000.0 / 8.0 * dur) as u64;
+    (bytes > 10_000).then_some(bytes)
+}
+
 /// Score a video format for the "one entry per height" ladder.
 /// MP4/H.264 first (plays everywhere — the IDM/FDM default), then FPS,
 /// then bitrate. Ordered ints avoid f64-Ord issues.
@@ -470,6 +645,7 @@ pub fn quality_ladder_with(info: &serde_json::Value, has_ffmpeg: bool) -> Vec<Qu
         .get("formats")
         .and_then(|v| v.as_array())
         .unwrap_or(&empty);
+    let duration = info.get("duration").and_then(|v| v.as_f64());
 
     // ---- audio candidates (for merging sizes + the audio-only option) ----
     let mut best_audio_size: Option<u64> = None;
@@ -488,9 +664,15 @@ pub fn quality_ladder_with(info: &serde_json::Value, has_ffmpeg: bool) -> Vec<Qu
                 .get("format_id")
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            best_audio_size = fmt_size(f, &["filesize", "filesize_approx"]);
+            best_audio_size = fmt_size(f, &["filesize", "filesize_approx"])
+                .or_else(|| estimated_size(f, duration));
         }
     }
+    // Does the chosen audio format ship an EXACT size (vs our estimate)?
+    let best_audio_exact = formats.iter().any(|f| {
+        f.get("format_id").and_then(|v| v.as_str()) == best_audio_id.as_deref()
+            && fmt_size(f, &["filesize", "filesize_approx"]).is_some()
+    });
 
     // ---- group video formats by height ----
     let mut by_height: BTreeMap<u32, Vec<&serde_json::Value>> = BTreeMap::new();
@@ -538,7 +720,14 @@ pub fn quality_ladder_with(info: &serde_json::Value, has_ffmpeg: bool) -> Vec<Qu
             "mp4".to_string() // merged via --merge-output-format mp4
         };
 
-        let mut size = fmt_size(chosen, &["filesize", "filesize_approx"]);
+        let reported = fmt_size(chosen, &["filesize", "filesize_approx"]);
+        let (mut size, size_est) = match reported {
+            Some(s) => (Some(s), false),
+            None => match estimated_size(chosen, duration) {
+                Some(s) => (Some(s), true),
+                None => (None, false),
+            },
+        };
         if chosen_progressive.is_none() {
             // Merged download: video + audio sizes.
             if let (Some(v), Some(a)) = (size, best_audio_size) {
@@ -571,6 +760,7 @@ pub fn quality_ladder_with(info: &serde_json::Value, has_ffmpeg: bool) -> Vec<Qu
             height: Some(height),
             container,
             size_bytes: size,
+            size_est,
             note,
             audio_only: false,
         });
@@ -598,6 +788,7 @@ pub fn quality_ladder_with(info: &serde_json::Value, has_ffmpeg: bool) -> Vec<Qu
         height: None,
         container: audio_container.to_string(),
         size_bytes: best_audio_size,
+        size_est: best_audio_size.is_some() && !best_audio_exact,
         note: None,
         audio_only: true,
     });
@@ -621,10 +812,20 @@ pub fn download_args(
         "--newline".into(),
         "--socket-timeout".into(),
         "15".into(),
+        // DASH/HLS = thousands of small fragments; fetching them one at a
+        // time is why video downloads crawled before v0.6.4. Ignored by
+        // yt-dlp for non-fragmented formats.
+        "--concurrent-fragments".into(),
+        CONCURRENT_FRAGMENTS.to_string(),
         "-f".into(),
         selector.to_string(),
+        // `total_bytes` is absent for fragmented downloads — yt-dlp only
+        // provides `total_bytes_estimate` there, so BOTH are captured and
+        // the coordinator uses whichever is present (v0.6.4: "?" totals).
         "--progress-template".into(),
-        format!("download:{PROGRESS_PREFIX}%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.speed)s|%(progress.eta)s"),
+        format!(
+            "download:{PROGRESS_PREFIX}%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s"
+        ),
         "-o".into(),
         out_template.to_string(),
     ];
@@ -649,16 +850,20 @@ pub fn download_args(
 }
 
 /// Parse one progress line (after the prefix). Returns
-/// `(downloaded, total, speed_bps)` — `NA` fields become `None`.
-pub fn parse_progress_line(payload: &str) -> Option<(i64, Option<i64>, u64)> {
+/// `(downloaded, total, estimate, speed_bps)` — `NA` fields become `None`.
+/// Fragmented downloads only report the estimate; direct formats only the
+/// exact total. Callers fall back: `total.or(estimate)`.
+pub fn parse_progress_line(payload: &str) -> Option<(i64, Option<i64>, Option<i64>, u64)> {
     let mut it = payload.trim().split('|');
     let downloaded = it.next()?.trim();
     let total = it.next().unwrap_or("NA").trim();
+    let estimate = it.next().unwrap_or("NA").trim();
     let speed = it.next().unwrap_or("NA").trim();
     let downloaded: i64 = downloaded.parse().ok()?;
     let total: Option<i64> = total.parse().ok();
+    let estimate: Option<i64> = estimate.parse().ok();
     let speed: u64 = speed.parse::<f64>().map(|s| s as u64).unwrap_or(0);
-    Some((downloaded, total, speed))
+    Some((downloaded, total, estimate, speed))
 }
 
 /// Effective media-download rate limit from settings (mirrors engine QoS).
@@ -677,6 +882,45 @@ fn rate_limit_from_settings(db: &Arc<std::sync::Mutex<rusqlite::Connection>>) ->
 // ---------------------------------------------------------------------------
 // Media download coordinator (engine calls this for source = "media")
 // ---------------------------------------------------------------------------
+
+/// Output files currently owned by a live yt-dlp coordinator (in-process).
+/// Two yt-dlp processes writing the same output template race on the shared
+/// `.part` / `.part-FragN.part` files and die with the cryptic
+/// "Unable to rename file: [Errno 2]" — the task row users kept
+/// screenshotting (v0.6.4: the second attempt is refused with a clear
+/// message instead). The API layer rejects duplicates earlier; this is the
+/// backstop for CLI/queued races.
+static ACTIVE_OUTPUTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn active_outputs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    ACTIVE_OUTPUTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Held for the lifetime of a coordinator; releases the claim on drop so
+/// every early-return path (pause, cancel, error, success) unwinds cleanly.
+struct OutputClaim {
+    key: String,
+}
+
+impl Drop for OutputClaim {
+    fn drop(&mut self) {
+        active_outputs()
+            .lock()
+            .expect("output lock")
+            .remove(&self.key);
+    }
+}
+
+/// Try to claim `key`; `Err(())` when another coordinator owns it.
+fn claim_output(key: &str) -> Result<OutputClaim, ()> {
+    let mut set = active_outputs().lock().expect("output lock");
+    set.insert(key.to_string())
+        .then(|| OutputClaim {
+            key: key.to_string(),
+        })
+        .ok_or(())
+}
 
 /// Mirror of the HTTP task coordinator, but driving a yt-dlp subprocess.
 ///
@@ -717,6 +961,11 @@ pub(crate) async fn run_ytdlp_coordinator(
         /// Promised container ("mp4" / "mp3" / "m4a") — display + filename.
         #[serde(default)]
         container: String,
+        /// Expected total size from the probe ladder — seeds the progress
+        /// bar until yt-dlp reports one (fragmented downloads only emit an
+        /// estimate well into the download).
+        #[serde(default)]
+        size: Option<u64>,
     }
     let meta: Meta = match row
         .media_meta
@@ -780,6 +1029,29 @@ pub(crate) async fn run_ytdlp_coordinator(
         .to_string_lossy()
         .into_owned();
 
+    // Refuse to run two yt-dlp processes on the same output (see
+    // ACTIVE_OUTPUTS): they corrupt each other's fragment files.
+    let _claim = match claim_output(&out_template) {
+        Ok(c) => c,
+        Err(()) => {
+            let msg = format!(
+                "another download is already writing to \"{stem}\" in this folder — wait for it or cancel it, then retry"
+            );
+            TasksRepo::new(&db).touch(
+                &task_id,
+                TaskState::Error,
+                row.downloaded_bytes,
+                Some(&msg),
+            )?;
+            events.emit(EngineEvent::task_state(
+                &task_id,
+                TaskState::Error,
+                Some(&msg),
+            ));
+            return Ok(()); // claimed by someone else — not an engine fault
+        }
+    };
+
     let mut args = download_args(
         &row.url,
         &meta.selector,
@@ -789,15 +1061,22 @@ pub(crate) async fn run_ytdlp_coordinator(
     );
     args.extend(cookies_args_from_settings(&db));
 
+    // Seed the task row with the expected size so the UI shows a real
+    // total from the first second (fragmented downloads only report an
+    // estimate later on).
+    if let Some(s) = meta.size {
+        let _ = TasksRepo::new(&db).set_total(&task_id, Some(s as i64));
+    }
+
     info!(task = %task_id, binary = %binary.display(), "yt-dlp coordinator starting");
 
-    let mut child = match tokio::process::Command::new(&binary)
-        .args(&args)
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.args(&args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    spawn_env(&mut cmd);
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             let msg = format!("could not start yt-dlp: {e}");
@@ -840,8 +1119,10 @@ pub(crate) async fn run_ytdlp_coordinator(
         tail.into_iter().collect::<Vec<_>>().join(" | ")
     });
 
-    let mut downloaded: i64 = 0;
-    let mut total: Option<i64> = None;
+    let mut downloaded: i64 = 0; // cumulative across video+audio phases
+    let mut total: Option<i64> = meta.size.map(|s| s as i64); // seeded from the probe
+    let mut phase_base: i64 = 0; // bytes finished by previous formats
+    let mut phase_downloaded: i64 = 0; // bytes of the current format
     let mut last_emit = std::time::Instant::now();
     let mut speed_window_start = std::time::Instant::now();
     let mut speed_window_bytes = 0i64;
@@ -876,10 +1157,24 @@ pub(crate) async fn run_ytdlp_coordinator(
                     Ok(0) | Err(_) => break Ok(String::new()), // stream closed
                     Ok(_) => {
                         if let Some(payload) = line_buf.trim_end().strip_prefix(PROGRESS_PREFIX) {
-                            if let Some((d, t, s)) = parse_progress_line(payload) {
-                                downloaded = d;
-                                if t.is_some() {
-                                    total = t;
+                            if let Some((d, t, est, s)) = parse_progress_line(payload) {
+                                // yt-dlp restarts its byte counter for every
+                                // format (video, then audio, then merge). A
+                                // collapse of >1 MiB means the next phase
+                                // started — fold the finished phase into the
+                                // base so the task bar never runs backwards.
+                                if d + 1024 * 1024 < phase_downloaded {
+                                    phase_base += phase_downloaded;
+                                }
+                                phase_downloaded = d;
+                                downloaded = phase_base + d;
+                                if let Some(t) = t.or(est) {
+                                    let t = phase_base + t;
+                                    // Estimates wobble early on — only grow.
+                                    if t > total.unwrap_or(0) {
+                                        total = Some(t);
+                                        let _ = TasksRepo::new(&db).set_total(&task_id, total);
+                                    }
                                 }
                                 if s > 0 {
                                     last_speed = s;
@@ -941,6 +1236,9 @@ pub(crate) async fn run_ytdlp_coordinator(
             if fname != row.filename || p.to_string_lossy() != row.save_path {
                 let _ = TasksRepo::new(&db).rename(&task_id, &fname, &p.to_string_lossy());
             }
+        }
+        if let Some(sz) = final_size {
+            let _ = TasksRepo::new(&db).set_total(&task_id, Some(sz));
         }
         TasksRepo::new(&db).touch(
             &task_id,
@@ -1091,10 +1389,18 @@ mod tests {
     #[test]
     fn progress_line_parses_na_fields() {
         assert_eq!(
-            parse_progress_line("1234|5678|2048.5|12"),
-            Some((1234, Some(5678), 2048))
+            parse_progress_line("1234|5678|NA|2048.5|12"),
+            Some((1234, Some(5678), None, 2048))
         );
-        assert_eq!(parse_progress_line("100|NA|NA|NA"), Some((100, None, 0)));
+        // Fragmented downloads: no exact total, estimate present.
+        assert_eq!(
+            parse_progress_line("100|NA|9000|NA|NA"),
+            Some((100, None, Some(9000), 0))
+        );
+        assert_eq!(
+            parse_progress_line("100|NA|NA|NA|NA"),
+            Some((100, None, None, 0))
+        );
         assert_eq!(parse_progress_line("garbage"), None);
     }
 
@@ -1106,6 +1412,9 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--merge-output-format" && w[1] == "mp4"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--concurrent-fragments" && w[1] == "8"));
         assert!(args.last().unwrap() == "https://x/y");
 
         let audio = download_args(
@@ -1121,6 +1430,55 @@ mod tests {
         assert!(audio
             .windows(2)
             .any(|w| w[0] == "--limit-rate" && w[1] == "2048k"));
+    }
+
+    #[test]
+    fn estimated_size_from_bitrate_and_duration() {
+        // 4500 kbit/s × 10 s = 5.625 MB (the user's 10 s test video class).
+        let f = json!({ "tbr": 4500.0 });
+        assert_eq!(estimated_size(&f, Some(10.0)), Some(5_625_000));
+        assert_eq!(estimated_size(&json!({ "tbr": 0 }), Some(10.0)), None);
+        assert_eq!(estimated_size(&json!({ "tbr": 4500.0 }), None), None);
+    }
+
+    #[test]
+    fn ladder_estimates_sizes_when_filesize_missing() {
+        let mut info = yt_like().clone();
+        // Strip every filesize: the "YouTube shows no sizes" regression.
+        for f in info.get_mut("formats").unwrap().as_array_mut().unwrap() {
+            f.as_object_mut().unwrap().remove("filesize");
+        }
+        info.as_object_mut()
+            .unwrap()
+            .insert("duration".into(), json!(212.0));
+        let q = quality_ladder(&info);
+        let o1080 = q.iter().find(|o| o.height == Some(1080)).unwrap();
+        assert!(o1080.size_est, "1080p size should be marked estimated");
+        assert!(o1080.size_bytes.unwrap() > 100_000_000);
+        let audio = q.last().unwrap();
+        assert!(audio.size_est);
+        assert!(audio.size_bytes.unwrap() > 1_000_000);
+    }
+
+    #[test]
+    fn output_claim_blocks_second_owner_then_releases() {
+        let key = format!("/tmp/hf-test-claim-{}", std::process::id());
+        {
+            let c1 = claim_output(&key).expect("first claim must win");
+            assert!(claim_output(&key).is_err(), "second claim must be refused");
+            drop(c1);
+        }
+        let c2 = claim_output(&key).expect("claim after release must win");
+        drop(c2);
+        let _ = claim_output(&key).expect("claim after drop is reusable");
+    }
+
+    #[test]
+    fn version_prefix_parses_dates_only() {
+        assert_eq!(version_prefix("2026.08.19"), Some("2026.08.19"));
+        assert_eq!(version_prefix("2026.08.19.232815"), Some("2026.08.19"));
+        assert_eq!(version_prefix("abc"), None);
+        assert_eq!(version_prefix("2025"), None);
     }
 
     #[test]

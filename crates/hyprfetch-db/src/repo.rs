@@ -202,6 +202,20 @@ impl<'a> TasksRepo<'a> {
         Ok(())
     }
 
+    /// Persist the expected total size (media/yt-dlp tasks: the quality
+    /// ladder's size + yt-dlp's progress reports — HTTP tasks get theirs
+    /// through `update_cache_validators` instead).
+    pub fn set_total(&self, id: &str, total_bytes: Option<i64>) -> rusqlite::Result<()> {
+        let now = now_ms();
+        with_conn(self.db, |c| {
+            c.execute(
+                "UPDATE tasks SET total_bytes = ?1, updated_at = ?2 WHERE id = ?3",
+                params![total_bytes, now, id],
+            )
+        })?;
+        Ok(())
+    }
+
     /// Persist cache validators (etag / last_modified) and accept_ranges flag.
     pub fn update_cache_validators(
         &self,

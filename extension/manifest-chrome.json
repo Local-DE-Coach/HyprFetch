@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "HyprFetch Media Catcher",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Catch videos, audio, images and big files on any page and send them to the HyprFetch download manager — IDM-style buttons on videos, real quality lists (8K→480p), local-only.",
   "permissions": [
     "tabs",

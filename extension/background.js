@@ -16,7 +16,7 @@
 const api = globalThis.chrome ?? globalThis.browser;
 
 const DAEMON = 'http://127.0.0.1:7780';
-const EXT_VERSION = '0.6.3';
+const EXT_VERSION = '0.6.4';
 
 // ---- classification --------------------------------------------------------
 
@@ -225,6 +225,24 @@ if (api.tabs.onActivated) {
 
 // ---- popup + content-script bridge -----------------------------------------
 
+// Pages where a probe is worth it — identical to the popup's list.
+const VIDEO_PAGE_RE = /(?:youtube\.com\/(?:watch|shorts|embed|live)|youtu\.be\/|m\.youtube\.com\/watch|vimeo\.com\/\d+|dailymotion\.com\/(?:video|embed)|twitch\.tv\/videos\/|soundcloud\.com\/[^/]+\/[^/?]+|tiktok\.com\/@[^/]+\/video|instagram\.com\/(?:reel|p)\/|facebook\.com\/watch|\/watch\/|\/video\/[\w-]{6,})/i;
+
+// Prefetch probes make the quality list INSTANT: the moment a video page
+// finishes loading we ask the daemon to extract formats in the background
+// (the daemon caches the result for 15 min), so the popup / in-page panel
+// render from the cache instead of waiting seconds for yt-dlp.
+const prefetched = new Map(); // url → ts
+function prefetchProbe(url) {
+  if (!url || prefetched.has(url)) return;
+  const now = Date.now();
+  for (const [u, ts] of prefetched) {
+    if (now - ts > 5 * 60_000) prefetched.delete(u);
+  }
+  prefetched.set(url, now);
+  void daemonFetch('/api/media/probe', { url });
+}
+
 api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     if (msg?.type === 'getMedia') {
@@ -263,6 +281,13 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
   })();
   return true; // async sendResponse
+});
+
+// Fire the prefetch as soon as a video page settles (daemon-side cache does
+// the heavy lifting; repeated loads within the cooldown are free).
+api.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  const url = changeInfo?.url || (changeInfo?.status === 'complete' ? tab?.url : null) || '';
+  if (/^https?:/i.test(url) && VIDEO_PAGE_RE.test(url)) prefetchProbe(url);
 });
 
 // ---- context menu (right-click → Download with HyprFetch) -------------------

@@ -273,10 +273,12 @@ jobs:
           cp build/extension/hyprfetch-extension-*.zip build/extension/hyprfetch-extension-*.xpi ./
           ls -la hyprfetch-extension-*
 
-      # yt-dlp engine binary — mirrored through the self-hosted channel so
-      # the daemon's auto-install never touches GitHub (same policy as app
-      # updates). The CI runner fetches it once; users get istias.tech.
-      - name: Fetch yt-dlp binary (channel mirror)
+      # yt-dlp engine + deno JS runtime — mirrored through the self-hosted
+      # channel so the daemon's auto-install never touches GitHub (same
+      # policy as app updates). The CI runner fetches each once; users get
+      # istias.tech. deno is what modern yt-dlp needs for YouTube's FULL
+      # format list (144p→4K) and unthrottled transfer speeds.
+      - name: Fetch yt-dlp + deno binaries (channel mirror)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           curl -fL --retry 3 --connect-timeout 20 \
@@ -284,7 +286,14 @@ jobs:
           sha256sum yt-dlp-linux > yt-dlp-linux.sha256
           test "$(stat -c%s yt-dlp-linux)" -gt 1000000
           chmod 755 yt-dlp-linux
-          ls -la yt-dlp-linux*
+          curl -fL --retry 3 --connect-timeout 20 \
+            -o deno.zip "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip"
+          python3 -m zipfile -e deno.zip deno-extracted/
+          mv deno-extracted/deno deno-linux-x86_64
+          test "$(stat -c%s deno-linux-x86_64)" -gt 50000000
+          sha256sum deno-linux-x86_64 > deno-linux-x86_64.sha256
+          chmod 755 deno-linux-x86_64
+          ls -la yt-dlp-linux* deno-linux-x86_64*
 
       - uses: actions/upload-artifact@v7
         with:
@@ -298,6 +307,8 @@ jobs:
             hyprfetch-extension-*.xpi
             yt-dlp-linux
             yt-dlp-linux.sha256
+            deno-linux-x86_64
+            deno-linux-x86_64.sha256
           retention-days: 14
   release:
     name: Publish release
@@ -479,6 +490,8 @@ jobs:
             artifacts/hyprfetch-extension-*.xpi
             artifacts/yt-dlp-linux
             artifacts/yt-dlp-linux.sha256
+            artifacts/deno-linux-x86_64
+            artifacts/deno-linux-x86_64.sha256
             PKGBUILD
             README.md
 
@@ -603,12 +616,18 @@ jobs:
                 "cp '$DEPLOY_PATH/updates/extension/$(basename "$ZP")' '$DEPLOY_PATH/updates/extension/hyprfetch-extension-chrome.zip'"
             done
           fi
-          # 2c. yt-dlp engine mirror (the daemon's auto-install source) —
-          #     under updates/ like every other channel path.
+          # 2c. yt-dlp engine + deno JS runtime mirrors (the daemon's
+          #     auto-install sources) — under updates/ like every other
+          #     channel path.
           if [ -f artifacts/yt-dlp-linux ]; then
             $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/updates/bin/yt-dlp'"
             $SCP artifacts/yt-dlp-linux artifacts/yt-dlp-linux.sha256 \
                  "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/updates/bin/yt-dlp/"
+          fi
+          if [ -f artifacts/deno-linux-x86_64 ]; then
+            $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/updates/bin/deno'"
+            $SCP artifacts/deno-linux-x86_64 artifacts/deno-linux-x86_64.sha256 \
+                 "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/updates/bin/deno/"
           fi
           # 3. Atomic manifest swap: upload to a temp name, then mv(2).
           $SCP latest.json \

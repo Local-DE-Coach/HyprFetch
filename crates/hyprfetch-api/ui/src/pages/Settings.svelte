@@ -524,6 +524,9 @@
           <span class="badge badge-sm {ytdlp?.ffmpeg ? 'badge-success' : 'badge-warning'}">
             {ytdlp?.ffmpeg ? 'ffmpeg ✓ (all qualities)' : 'ffmpeg missing (basic qualities)'}
           </span>
+          <span class="badge badge-sm {ytdlp?.deno ? 'badge-success' : 'badge-warning'}">
+            {ytdlp?.deno ? 'JS runtime ✓ (full speed)' : 'JS runtime missing (slow on YouTube)'}
+          </span>
         {/if}
         <span class="grow" />
         <button class="btn btn-primary btn-sm" disabled={ytdlpBusy} on:click={doYtdlpInstall}>

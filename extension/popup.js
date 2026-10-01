@@ -184,7 +184,12 @@ async function probeTab(url) {
   for (const q of qualities) {
     const chip = document.createElement('button');
     chip.className = `qchip${q.audio_only ? ' audio' : ''}`;
-    const meta = [q.container?.toUpperCase(), fmtSize(q.size_bytes)].filter(Boolean).join(' · ');
+    const meta = [
+      q.container?.toUpperCase(),
+      q.size_bytes ? `${q.size_est ? '~ ' : ''}${fmtSize(q.size_bytes)}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
     chip.innerHTML = `<span class="ql">${q.label}</span><span class="qm">${meta}</span>`;
     chip.title = q.note ? `${q.label} — ${q.note}` : q.label;
     chip.addEventListener('click', async () => {

@@ -8,6 +8,51 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-10-01 (media engine: full speed, full ladder, no more failed downloads)
+
+### Fixed — the failed YouTube download (the `Unable to rename file` error)
+- **Two downloads writing the same file are refused, cleanly.** Starting a
+  second quality-picked download for the same video (double click, retry
+  while one is running) used to spawn two `yt-dlp` processes that corrupted
+  each other's fragment files — the task died with
+  `yt-dlp: ERROR: Unable to rename file: [Errno 2] … .part-Frag72.part`.
+  The API now returns a clear "already queued or running" error (HTTP 409)
+  and the engine itself refuses the second claim on the same output file as
+  a backstop.
+
+### Fixed — "0 B / ?" and missing file sizes
+- Progress totals now fall back to yt-dlp's `total_bytes_estimate` —
+  fragmented (DASH/HLS) downloads only provide the estimate, which is why
+  the total stayed "?" and the bar sat at 0.
+- The progress bar no longer runs backwards when yt-dlp switches from the
+  video stream to the audio stream (phases are accumulated).
+- The expected size from the quality list seeds the task row, so the total
+  is visible from the first second.
+- Quality chips show sizes even when YouTube ships none — estimated from
+  the format's bitrate × duration and marked with `~`.
+
+### Added — speed + full quality ladder (the "other apps are faster" fix)
+- **Parallel fragment downloads (`--concurrent-fragments 8`).** Video-site
+  streams are thousands of small fragments; they used to be fetched one by
+  one. Same speed class as IDM/FDM now.
+- **JS runtime (deno) auto-install.** Modern yt-dlp needs a JavaScript
+  runtime for YouTube — without one: few formats (sometimes only 360p),
+  missing sizes, and heavily throttled transfers. The daemon now
+  auto-installs deno from your own update channel (GitHub fallback) and
+  hands it to yt-dlp; Settings shows the status badge.
+- **Stale yt-dlp refresh.** A managed engine older than the release floor
+  is refreshed from the channel automatically (old extractors are the
+  classic "only one quality left" bug).
+
+### Changed — extension: quality list appears instantly
+- The extension prefetches the format probe the moment a video page loads,
+  so the popup / in-page quality panel render from the daemon's cache
+  (15 min TTL) instead of waiting seconds for extraction.
+- The daemon caches probes and deduplicates concurrent requests for the
+  same URL — opening popup and panel, then clicking a quality, triggers one
+  extraction total.
+- In-page ⬇ buttons react faster (mutation debounce 600 ms → 250 ms).
+
 ## [0.6.3] — 2026-10-01 (the extension goes full IDM)
 
 ### Added — extension: in-page media buttons + real quality lists

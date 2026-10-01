@@ -400,7 +400,11 @@ function renderProbe(data) {
   for (const q of qualities) {
     const btn = document.createElement('button');
     btn.className = `q${q.audio_only ? ' audio' : ''}`;
-    const meta = [q.container?.toUpperCase(), fmtSize(q.size_bytes), q.note]
+    const meta = [
+      q.container?.toUpperCase(),
+      q.size_bytes ? `${q.size_est ? '~ ' : ''}${fmtSize(q.size_bytes)}` : '',
+      q.note,
+    ]
       .filter(Boolean)
       .join(' · ');
     btn.innerHTML = `<span class="ql">${escapeHtml(q.label)}</span>
@@ -528,7 +532,7 @@ function scheduleScan() {
   scanTimer = setTimeout(() => {
     scanTimer = null;
     scan();
-  }, 600);
+  }, 250);
 }
 
 let lastUrl = location.href;
