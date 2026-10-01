@@ -454,3 +454,83 @@ All errors follow this shape:
 ```
 
 Standard codes: `invalid_url`, `ssrf_blocked`, `task_not_found`, `invalid_state_transition`, `rate_limited`, `disk_full`, `io_error`, `internal_error`.
+
+## Media engine (v0.6.1)
+
+Universal "download any media from any URL": stream pages (YouTube,
+SoundCloud, Vimeo, 1000+ sites) are extracted by yt-dlp (auto-installed
+from the update channel on first use); direct files keep the native
+segmented engine. Media tasks appear in `GET /api/tasks` with
+`source: "media"` and a parsed `media` object
+(`{selector, quality, container, audio_only, extractor, title}`).
+
+### Probe a URL
+
+`POST /api/media/probe` — `{ "url": "…" }`.
+
+Response is **kind-dispatched**:
+
+- `kind: "file"` → native engine; `file` holds the same shape as
+  `POST /api/inspect` (final URL, sniffed filename, size, content-type,
+  resolved save path). Extension-less image URLs (LinkedIn logos & co.)
+  land here.
+- `kind: "media"` → stream page; `media` holds
+  `{ title, extractor, duration, thumbnail, is_live, ffmpeg, qualities }`.
+  `qualities` is the de-duplicated ladder — **one entry per resolution**,
+  MP4-preferred (webm/mkv duplicates of the same height collapse away),
+  ordered best-first with `Audio only (MP3)` last
+  (`{ id, label, height, container, size_bytes, note, audio_only }`).
+  When `ffmpeg` is `false`, merge-dependent qualities are omitted and the
+  audio option is M4A (no postprocessing possible).
+- Probe errors: yt-dlp failures (bot-walls, auth) are `400` with the
+  yt-dlp message; yt-dlp missing AND auto-install failing is `503`.
+
+### Start a media download
+
+`POST /api/media/download` — `{ url, quality?, audio_only?, filename?,
+save_dir?, category? }`. `quality` is the `id` from the probe ladder
+(omit or `"best"` for the top). Returns `201` with the created `TaskDto`
+(`source: "media"`, `media.quality` set). Download runs through yt-dlp
+with the same pause/resume/cancel/retry protocol as HTTP tasks; progress,
+speed and the WebSocket stream behave identically.
+
+### yt-dlp engine status
+
+- `GET /api/media/ytdlp` → `{ installed, path, version, ffmpeg }`.
+- `POST /api/media/ytdlp/install` → (re-)install/update the binary from
+  the self-hosted channel (`istias.tech/hyprfetch/bin/yt-dlp/`), GitHub
+  only as fallback. Same response shape.
+
+Settings: `ytdlp_cookies_browser` (empty = none; `firefox`, `chromium`,
+`chrome`, `brave`, `edge`, `vivaldi`, `opera`, `safari`) — passes
+`--cookies-from-browser` for sites that demand a signed-in session.
+
+## Browser extension bridge (v0.6.1)
+
+The HyprFetch Media Catcher extension (Chrome + Firefox, shipped from
+`https://istias.tech/hyprfetch/extension/`) heartbeats and reports media
+to these loopback endpoints. They are CORS-enabled for extension origins.
+
+### Extension → daemon
+
+- `POST /api/extension/heartbeat` — `{ "version": "…" }` →
+  `{ ok, server_time }`. Call every ~30 s; fresh heartbeats mark the
+  extension "connected".
+- `POST /api/extension/media` — `{ "media": [{ url, media_type, size,
+  filename, page_url, page_title, ts }] }` → `{ ok, added }`. De-duplicated
+  by URL, capped at 300 items (newest first).
+- `POST /api/extension/download` — `{ url, filename?, page_url? }` →
+  `201` + `TaskDto` with `source: "extension"` (shows under the Tasks
+  page's ⇪ Extension chip).
+
+### WebUI ↔ daemon
+
+- `GET /api/extension/media` → `{ items: [...], count }`.
+- `DELETE /api/extension/media` → clear the captured list.
+- `GET /api/extension/status` → `{ connected, last_seen, version,
+  media_count }` (`connected` = heartbeat within 90 s).
+
+### Task source filter
+
+`GET /api/tasks?state=all&source=extension` — `source` accepts `app`,
+`extension` or `media` (anything else / omitted = no source filtering).

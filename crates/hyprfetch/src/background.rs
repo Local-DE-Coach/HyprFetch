@@ -280,6 +280,8 @@ pub fn add(
     urls: &[String],
     dir: Option<&std::path::Path>,
     output: Option<&std::path::Path>,
+    quality: Option<&str>,
+    audio: bool,
 ) -> Result<()> {
     if urls.is_empty() {
         bail!("nothing to add — pass one or more http(s) URLs");
@@ -293,6 +295,42 @@ pub fn add(
 
     // Start the daemon when it isn't running (same path as `open`).
     let (base, token) = running_base_or_start()?;
+
+    // Media-engine routing (v0.6.1): --quality / --audio send each URL
+    // through /api/media/download — yt-dlp picks the format, the daemon
+    // tracks it like any other task. One media request per URL.
+    if audio || quality.is_some() {
+        let mut queued = 0usize;
+        for u in urls {
+            let mut body = serde_json::json!({ "url": u, "audio_only": audio });
+            if let Some(q) = quality.filter(|_| !audio) {
+                body["quality"] = serde_json::json!(q);
+            }
+            if let Some(d) = dir {
+                body["save_dir"] = serde_json::json!(d.to_string_lossy());
+            }
+            let (status, body_text) =
+                post_json(&base, "/api/media/download", &body, token.as_deref())?;
+            if status != 200 && status != 201 {
+                bail!(
+                    "server answered {status}: {}",
+                    body_text.lines().next().unwrap_or("")
+                );
+            }
+            let parsed: serde_json::Value =
+                serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
+            let id = parsed.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+            let q = parsed
+                .get("media")
+                .and_then(|m| m.get("quality"))
+                .and_then(|q| q.as_str())
+                .unwrap_or("media");
+            println!("  → {q}  ({id})");
+            queued += 1;
+        }
+        println!("{queued} media download(s) queued — watch them in the widget or the web UI.");
+        return Ok(());
+    }
 
     let mut body = serde_json::json!({ "urls": urls });
     if let Some(d) = dir {

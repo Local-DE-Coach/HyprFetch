@@ -16,6 +16,7 @@ pub enum ApiErrorCode {
     TaskNotFound,
     InvalidStateTransition,
     InvalidRequest,
+    ServiceUnavailable,
     InternalError,
 }
 
@@ -27,6 +28,7 @@ impl ApiErrorCode {
             Self::TaskNotFound => "task_not_found",
             Self::InvalidStateTransition => "invalid_state_transition",
             Self::InvalidRequest => "invalid_request",
+            Self::ServiceUnavailable => "service_unavailable",
             Self::InternalError => "internal_error",
         }
     }
@@ -37,6 +39,7 @@ impl ApiErrorCode {
             Self::SsrfBlocked => StatusCode::FORBIDDEN,
             Self::TaskNotFound => StatusCode::NOT_FOUND,
             Self::InvalidStateTransition => StatusCode::CONFLICT,
+            Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -55,6 +58,8 @@ pub enum ApiError {
     InvalidStateTransition(String),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
     #[error("internal error: {0}")]
     InternalError(String),
 }
@@ -67,6 +72,7 @@ impl ApiError {
             Self::TaskNotFound(_) => ApiErrorCode::TaskNotFound,
             Self::InvalidStateTransition(_) => ApiErrorCode::InvalidStateTransition,
             Self::InvalidRequest(_) => ApiErrorCode::InvalidRequest,
+            Self::ServiceUnavailable(_) => ApiErrorCode::ServiceUnavailable,
             Self::InternalError(_) => ApiErrorCode::InternalError,
         }
     }

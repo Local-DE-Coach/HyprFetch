@@ -15,6 +15,8 @@ HyprFetch is a single Rust binary that serves a web UI on `127.0.0.1`. You open 
 
 ## Features
 
+- **Any media from any URL** — stream pages (YouTube, SoundCloud, Vimeo, 1000+ sites) via the yt-dlp engine (auto-installed from the update channel), every quality with **one entry per resolution** (MP4-first, no webm/mkv duplicates — IDM/FDM style); direct files keep the native segmented engine
+- **Browser extension (Chrome + Firefox)** — IDM-style media sniffer with a per-tab badge count and a Send-to-HyprFetch popup; packages come from the project's own server
 - **Resumable downloads** — survive restarts, crashes, and interruptions via SQLite-backed segment state
 - **Multi-connection segmented downloads** — split a file into N ranges, fetch in parallel, write via `pwrite` to one fd
 - **HTTP/1.1, HTTP/2, HTTP/3 (QUIC)** — protocol auto-negotiation

@@ -71,6 +71,9 @@ pub async fn healthz() -> Json<serde_json::Value> {
 #[derive(Debug, Deserialize, Default)]
 pub struct ListTasksQuery {
     pub state: Option<String>,
+    /// `?source=extension` — only tasks initiated by the given source
+    /// (`app` / `extension` / `media`). The Tasks page filter chips use it.
+    pub source: Option<String>,
 }
 
 /// Response shape for `GET /api/tasks`.
@@ -103,6 +106,11 @@ pub struct TaskDto {
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
+    /// Where this task came from: `app` / `extension` / `media`.
+    pub source: String,
+    /// Parsed media metadata for media-engine tasks (quality, container…).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<serde_json::Value>,
 }
 
 impl From<TaskRow> for TaskDto {
@@ -125,6 +133,8 @@ impl From<TaskRow> for TaskDto {
             created_at: r.created_at,
             updated_at: r.updated_at,
             completed_at: r.completed_at,
+            source: r.source,
+            media: r.media_meta.and_then(|m| serde_json::from_str(&m).ok()),
         }
     }
 }
@@ -134,12 +144,28 @@ pub async fn list_tasks(
     Query(q): Query<ListTasksQuery>,
 ) -> Result<Json<ListTasksResponse>, ApiError> {
     let filter = TaskListFilter::parse(q.state.as_deref());
+    let source = q
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "all");
     // For the filter we issue one query per desired state — keeps the code simple
-    // and avoids string-interpolated IN clauses.
+    // and avoids string-interpolated IN clauses. The source dimension composes
+    // with the state dimension via the repo's list_filtered.
     let mut tasks: Vec<TaskRow> = Vec::new();
-    for s in filter.states() {
-        let mut more = db(&state).list_by_state(Some(*s))?;
-        tasks.append(&mut more);
+    match source {
+        Some(src) => {
+            for s in filter.states() {
+                let mut more = db(&state).list_filtered(Some(*s), Some(src))?;
+                tasks.append(&mut more);
+            }
+        }
+        None => {
+            for s in filter.states() {
+                let mut more = db(&state).list_by_state(Some(*s))?;
+                tasks.append(&mut more);
+            }
+        }
     }
     tasks.sort_by_key(|t| std::cmp::Reverse(t.created_at));
     let dtos: Vec<TaskDto> = tasks.into_iter().map(TaskDto::from).collect();
@@ -327,6 +353,8 @@ pub async fn create_task(
             created_at: now,
             updated_at: now,
             completed_at: None,
+            source: "app".into(),
+            media_meta: None,
         };
 
         db(&state).insert(&row)?;
@@ -359,6 +387,127 @@ fn validate_url(url: &str) -> Result<(), ApiError> {
             "scheme must be http or https, got {other}"
         ))),
     }
+}
+
+/// Public wrapper for sibling modules (`media.rs`, `extension.rs`).
+pub(crate) fn validate_public_url(url: &str) -> Result<(), ApiError> {
+    validate_url(url)
+}
+
+/// Create a task with `source = "extension"` (browser-extension bridge).
+/// Same filename/dir defaults as `create_task`; no `segments` knob (the
+/// engine default of 8 is right for every media type the extension sees).
+pub(crate) async fn create_extension_task(
+    state: &AppState,
+    url: &str,
+    filename: Option<&str>,
+    page_url: Option<&str>,
+) -> Result<TaskDto, ApiError> {
+    let extra_headers = page_url
+        .filter(|p| !p.is_empty())
+        .map(|p| serde_json::json!({ "page_url": p }).to_string());
+    create_sourced_task(state, url, filename, "extension", extra_headers, 8).await
+}
+
+/// Create a task with `source = "media"` (yt-dlp quality-picked download).
+pub(crate) async fn create_media_task(
+    state: &AppState,
+    url: &str,
+    filename: &str,
+    save_path: &str,
+    media_meta: String,
+) -> Result<TaskDto, ApiError> {
+    create_sourced_task_full(
+        state,
+        url,
+        filename,
+        save_path,
+        "media",
+        None,
+        Some(media_meta),
+        1,
+    )
+    .await
+}
+
+/// Shared engine for `create_extension_task` / `create_media_task`:
+/// resolve dir + filename, insert the row, kick the pump, return the DTO.
+async fn create_sourced_task(
+    state: &AppState,
+    url: &str,
+    filename: Option<&str>,
+    source: &str,
+    extra_headers: Option<String>,
+    segments: i64,
+) -> Result<TaskDto, ApiError> {
+    let derived = filename
+        .map(str::to_string)
+        .unwrap_or_else(|| url_filename(url));
+    let settings_map: std::collections::BTreeMap<String, String> =
+        SettingsRepo::new(&state.db).all()?.into_iter().collect();
+    let final_name = sanitize_filename(&derived);
+    let save_dir = resolve_save_dir(None, None, &final_name, &settings_map)?;
+    if let Err(e) = std::fs::create_dir_all(&save_dir) {
+        tracing::warn!(dir = %save_dir, error = %e, "could not pre-create save dir");
+    }
+    let save_path = format!("{save_dir}/{final_name}");
+    create_sourced_task_full(
+        state,
+        url,
+        &final_name,
+        &save_path,
+        source,
+        extra_headers,
+        None,
+        segments,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_sourced_task_full(
+    state: &AppState,
+    url: &str,
+    filename: &str,
+    save_path: &str,
+    source: &str,
+    extra_headers: Option<String>,
+    media_meta: Option<String>,
+    segments: i64,
+) -> Result<TaskDto, ApiError> {
+    validate_url(url)?;
+    let now = now_ms();
+    let row = TaskRow {
+        id: new_task_id(),
+        url: url.to_string(),
+        filename: filename.to_string(),
+        save_path: save_path.to_string(),
+        total_bytes: None,
+        downloaded_bytes: 0,
+        state: TaskState::Queued,
+        etag: None,
+        last_modified: None,
+        accept_ranges: false,
+        segments_requested: segments,
+        qos_override: None,
+        extra_headers,
+        error_message: None,
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+        source: source.to_string(),
+        media_meta,
+    };
+    db(state).insert(&row)?;
+    EventsRepo::new(&state.db)
+        .append(
+            Some(&row.id),
+            "task.created",
+            &format!("{{\"source\":\"{source}\"}}"),
+        )
+        .ok();
+    state.engine.pump().await;
+    Ok(TaskDto::from(row))
 }
 
 // ---------------------------------------------------------------------------
@@ -414,15 +563,43 @@ pub async fn inspect_url(
             other => ApiError::InvalidRequest(format!("probe failed: {other}")),
         })?;
 
+    let response = inspect_response_from_probe_inner(
+        &state,
+        &req.url,
+        probe,
+        req.filename.as_deref(),
+        req.save_dir.as_deref(),
+        req.category.as_deref(),
+    )?;
+    Ok(Json(response))
+}
+
+/// Build an [`InspectResponse`] from a finished native probe + request
+/// options. Shared by `POST /api/inspect` and the unified media probe
+/// (`POST /api/media/probe`, `kind = "file"`).
+pub(crate) fn inspect_response_from_probe(
+    state: &AppState,
+    url: &str,
+    probe: hyprfetch_core::ProbeResult,
+) -> Result<InspectResponse, ApiError> {
+    inspect_response_from_probe_inner(state, url, probe, None, None, None)
+}
+
+fn inspect_response_from_probe_inner(
+    state: &AppState,
+    url: &str,
+    probe: hyprfetch_core::ProbeResult,
+    filename_override: Option<&str>,
+    save_dir_opt: Option<&str>,
+    category_opt: Option<&str>,
+) -> Result<InspectResponse, ApiError> {
     // File name: explicit request value > last segment of the FINAL url
     // (redirects resolved) > generic fallback — mirrors create_task. The
     // extension is corrected from the probe's Content-Type (v0.4.6), so the
     // confirm dialog shows `images.jpg`, not `images?q=tbn:ANd9…`.
-    let filename = req
-        .filename
-        .clone()
+    let filename = filename_override
         .filter(|s| !s.trim().is_empty())
-        .map(|s| sniff_filename(&s, probe.content_type.as_deref()))
+        .map(|s| sniff_filename(s, probe.content_type.as_deref()))
         .unwrap_or_else(|| {
             let raw = probe
                 .final_url
@@ -434,17 +611,12 @@ pub async fn inspect_url(
 
     let settings_map: std::collections::BTreeMap<String, String> =
         SettingsRepo::new(&state.db).all()?.into_iter().collect();
-    let save_dir = resolve_save_dir(
-        req.save_dir.as_deref(),
-        req.category.as_deref(),
-        &filename,
-        &settings_map,
-    )?;
+    let save_dir = resolve_save_dir(save_dir_opt, category_opt, &filename, &settings_map)?;
     let category = category_for_filename(&filename).to_string();
 
     let save_path = format!("{save_dir}/{filename}");
-    Ok(Json(InspectResponse {
-        url: req.url,
+    Ok(InspectResponse {
+        url: url.to_string(),
         final_url: probe.final_url.to_string(),
         filename,
         total_bytes: probe.content_length,
@@ -453,7 +625,7 @@ pub async fn inspect_url(
         save_dir,
         save_path,
         content_type: probe.content_type,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2454,6 +2626,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             completed_at: None,
+            source: "app".into(),
+            media_meta: None,
         };
         hyprfetch_db::TasksRepo::new(&state.db)
             .insert(&row)
@@ -2621,6 +2795,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             completed_at: None,
+            source: "app".into(),
+            media_meta: None,
         };
         TasksRepo::new(&db).insert(&row).unwrap();
         state.engine.start(&id).await.unwrap();

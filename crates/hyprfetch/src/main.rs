@@ -33,7 +33,8 @@ use logger::LogMode;
     name = "hyprfetch",
     version,
     about = "Minimal-RAM download manager with a browser UI",
-    after_help = "Run modes:\n  hyprfetch dev                 verbose dev console + auto-open UI\n  hyprfetch serve               prod server in the foreground\n  hyprfetch daemon start [--…]  run detached (logs via `hyprfetch logs -f`)\n  hyprfetch daemon stop|restart|status\n  hyprfetch open                start if needed + open the web UI\n  hyprfetch close               keep running in the background (low usage)\n  hyprfetch add <URL>…          add download(s) from the terminal / widgets\n  hyprfetch reveal <id>         open a download's folder in the file manager\n  hyprfetch remove <id> [--file]  remove a download from the list (widget's delete)\n  hyprfetch logs [-f] [-n 100]  tail daemon logs\n  hyprfetch update [--check]    in-app self-update"
+    after_help = "Run modes:\n  hyprfetch dev                 verbose dev console + auto-open UI\n  hyprfetch serve               prod server in the foreground\n  hyprfetch daemon start [--…]  run detached (logs via `hyprfetch logs -f`)\n  hyprfetch daemon stop|restart|status\n  hyprfetch open                start if needed + open the web UI\n  hyprfetch close               keep running in the background (low usage)\n  hyprfetch add <URL>…          add download(s) from the terminal / widgets
+                                 [--quality 1080p] [--audio] = media engine\n  hyprfetch reveal <id>         open a download's folder in the file manager\n  hyprfetch remove <id> [--file]  remove a download from the list (widget's delete)\n  hyprfetch logs [-f] [-n 100]  tail daemon logs\n  hyprfetch update [--check]    in-app self-update"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -92,6 +93,14 @@ enum Command {
         /// With multiple URLs the filename part is reused as a directory.
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        /// Media quality for stream URLs (YouTube & friends):
+        /// `best` (default) | `2160p` | `1080p` | `720p` | `480p` | `360p`…
+        /// Routes the add through the media engine (yt-dlp).
+        #[arg(long)]
+        quality: Option<String>,
+        /// Audio only (MP3) — implies the media engine.
+        #[arg(long)]
+        audio: bool,
     },
     /// Open a finished download's folder in the file manager.
     Reveal { task_id: String },
@@ -213,8 +222,20 @@ fn main() -> Result<()> {
         Command::Logs { follow, lines } => return daemon::logs(*follow, *lines),
         Command::Open => return background::open(),
         Command::Close => return background::close(),
-        Command::Add { urls, dir, output } => {
-            return background::add(urls, dir.as_deref(), output.as_deref());
+        Command::Add {
+            urls,
+            dir,
+            output,
+            quality,
+            audio,
+        } => {
+            return background::add(
+                urls,
+                dir.as_deref(),
+                output.as_deref(),
+                quality.as_deref(),
+                *audio,
+            );
         }
         Command::Reveal { task_id } => {
             return background::reveal(task_id);

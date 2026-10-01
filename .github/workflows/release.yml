@@ -260,6 +260,32 @@ jobs:
           rpm -qpi hyprfetch-*.rpm
           ls -la hyprfetch-*.rpm
 
+      # Browser extension (v0.6.1) — Chrome zip + Firefox xpi, packaged ONCE
+      # on the native target. Node syntax-gates the JS; the build script
+      # re-validates both manifests after packaging.
+      - name: Package browser extension
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          node --check extension/background.js
+          node --check extension/popup.js
+          python3 -c "import json;json.load(open('extension/manifest-chrome.json'));json.load(open('extension/manifest-firefox.json'))"
+          bash scripts/build_extension.sh
+          cp build/extension/hyprfetch-extension-*.zip build/extension/hyprfetch-extension-*.xpi ./
+          ls -la hyprfetch-extension-*
+
+      # yt-dlp engine binary — mirrored through the self-hosted channel so
+      # the daemon's auto-install never touches GitHub (same policy as app
+      # updates). The CI runner fetches it once; users get istias.tech.
+      - name: Fetch yt-dlp binary (channel mirror)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          curl -fL --retry 3 --connect-timeout 20 \
+            -o yt-dlp-linux "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+          sha256sum yt-dlp-linux > yt-dlp-linux.sha256
+          test "$(stat -c%s yt-dlp-linux)" -gt 1000000
+          chmod 755 yt-dlp-linux
+          ls -la yt-dlp-linux*
+
       - uses: actions/upload-artifact@v7
         with:
           name: hyprfetch-${{ matrix.target }}
@@ -268,6 +294,10 @@ jobs:
             hyprfetch-*.sha256
             hyprfetch_*.deb
             hyprfetch-*.rpm
+            hyprfetch-extension-*.zip
+            hyprfetch-extension-*.xpi
+            yt-dlp-linux
+            yt-dlp-linux.sha256
           retention-days: 14
   release:
     name: Publish release
@@ -445,6 +475,10 @@ jobs:
             artifacts/hyprfetch-*.sha256
             artifacts/hyprfetch_*.deb
             artifacts/hyprfetch-*.rpm
+            artifacts/hyprfetch-extension-*.zip
+            artifacts/hyprfetch-extension-*.xpi
+            artifacts/yt-dlp-linux
+            artifacts/yt-dlp-linux.sha256
             PKGBUILD
             README.md
 
@@ -552,6 +586,28 @@ jobs:
           $SCP artifacts/hyprfetch-"$VERSION"-*.tar.gz \
                artifacts/hyprfetch-"$VERSION"-*.tar.gz.sha256 \
                "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/updates/$VERSION/"
+          # 2b. Extension packages (WebUI Extension page links) — versioned
+          #     AND version-less copies so old UIs keep working.
+          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/extension'"
+          if ls artifacts/hyprfetch-extension-*.zip >/dev/null 2>&1; then
+            $SCP artifacts/hyprfetch-extension-*.zip \
+                 artifacts/hyprfetch-extension-*.xpi \
+                 "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/extension/"
+            for XPI in artifacts/hyprfetch-extension-*.xpi; do
+              $SSH "$DEPLOY_USER@$DEPLOY_HOST" \
+                "cp '$DEPLOY_PATH/extension/$(basename "$XPI")' '$DEPLOY_PATH/extension/hyprfetch-extension-firefox.xpi'"
+            done
+            for ZP in artifacts/hyprfetch-extension-*.zip; do
+              $SSH "$DEPLOY_USER@$DEPLOY_HOST" \
+                "cp '$DEPLOY_PATH/extension/$(basename "$ZP")' '$DEPLOY_PATH/extension/hyprfetch-extension-chrome.zip'"
+            done
+          fi
+          # 2c. yt-dlp engine mirror (the daemon's auto-install source).
+          if [ -f artifacts/yt-dlp-linux ]; then
+            $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/bin/yt-dlp'"
+            $SCP artifacts/yt-dlp-linux artifacts/yt-dlp-linux.sha256 \
+                 "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/bin/yt-dlp/"
+          fi
           # 3. Atomic manifest swap: upload to a temp name, then mv(2).
           $SCP latest.json \
                "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/updates/.latest.json.tmp.$$"

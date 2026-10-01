@@ -90,7 +90,7 @@ struct ActiveTask {
 
 /// Commands the engine can send to a running task coordinator.
 #[derive(Debug)]
-enum TaskCommand {
+pub(crate) enum TaskCommand {
     Pause,
     Cancel,
 }
@@ -501,15 +501,30 @@ async fn spawn_coordinator(
         );
     }
     tokio::spawn(async move {
-        let result = run_task_coordinator(
-            db.clone(),
-            http,
-            qos,
-            events.clone(),
-            task_id.clone(),
-            cmd_rx,
-        )
-        .await;
+        // Media tasks (source = "media") are driven by the yt-dlp media
+        // engine instead of the segmented HTTP downloader — same task row,
+        // same events, same pause/cancel protocol, different executor.
+        let is_media = TasksRepo::new(&db)
+            .get(&task_id)
+            .ok()
+            .flatten()
+            .map(|r| r.source == "media")
+            .unwrap_or(false);
+
+        let result = if is_media {
+            crate::media::run_ytdlp_coordinator(db.clone(), events.clone(), task_id.clone(), cmd_rx)
+                .await
+        } else {
+            run_task_coordinator(
+                db.clone(),
+                http,
+                qos,
+                events.clone(),
+                task_id.clone(),
+                cmd_rx,
+            )
+            .await
+        };
         // Reap unconditionally — the task is no longer running.
         tasks.write().await.remove(&task_id);
         if let Err(e) = result {
@@ -1131,6 +1146,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             completed_at: None,
+            source: "app".into(),
+            media_meta: None,
         };
         TasksRepo::new(db).insert(&row).unwrap();
         id
@@ -1271,6 +1288,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             completed_at: None,
+            source: "app".into(),
+            media_meta: None,
         };
         TasksRepo::new(db).insert(&row).unwrap();
 
@@ -1669,6 +1688,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             completed_at: None,
+            source: "app".into(),
+            media_meta: None,
         };
         TasksRepo::new(db).insert(&row).unwrap();
         id
@@ -1984,6 +2005,8 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             completed_at: None,
+            source: "app".into(),
+            media_meta: None,
         };
         TasksRepo::new(&engine.db).insert(&row).unwrap();
 
@@ -2073,6 +2096,8 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             completed_at: None,
+            source: "app".into(),
+            media_meta: None,
         };
         TasksRepo::new(&engine.db).insert(&row).unwrap();
 

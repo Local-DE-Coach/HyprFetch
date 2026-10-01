@@ -15,6 +15,7 @@
 
   import {
     getWidgetStatus, installWidget, uninstallWidget,
+    getYtdlpStatus, installYtdlp,
   } from '../api.js'
 
   // ---- save folders ----
@@ -149,7 +150,46 @@
   onMount(async () => {
     try { quietState = (await getServerInfo()).quiet ?? false } catch (_) { /* ignore */ }
     try { widget = await getWidgetStatus() } catch (_) { /* widget card stays hidden */ }
+    try { ytdlp = await getYtdlpStatus() } catch (_) { /* media card shows not installed */ }
   })
+
+  // ---- media engine (yt-dlp, v0.6.1) ----
+  // Powers "download any media from any URL" + YouTube quality picking.
+  // Auto-installs on first media download; this card shows the state and
+  // lets the user update it on demand (YouTube breaks extractors often).
+  let ytdlp = null
+  let ytdlpBusy = false
+
+  async function doYtdlpInstall() {
+    ytdlpBusy = true
+    try {
+      ytdlp = await installYtdlp()
+      notify(`yt-dlp ${ytdlp.version ?? ''} ready — media downloads unlocked ✓`)
+    } catch (e) {
+      notify(`yt-dlp install failed: ${e.message}`)
+    } finally {
+      ytdlpBusy = false
+    }
+  }
+
+  // Cookies-from-browser: fixes YouTube's "confirm you're not a bot" wall
+  // for signed-in browsers (same trick IDM uses with browser sessions).
+  let cookiesBrowser = ''
+  $: if ($settings?.ytdlp_cookies_browser !== undefined) {
+    cookiesBrowser = $settings.ytdlp_cookies_browser ?? ''
+  }
+  let savingCookies = false
+  async function saveCookies() {
+    savingCookies = true
+    try {
+      await saveSettings({ ytdlp_cookies_browser: cookiesBrowser.trim() })
+      notify('media engine cookies saved ✓')
+    } catch (e) {
+      notify(`save failed: ${e.message}`)
+    } finally {
+      savingCookies = false
+    }
+  }
 
   // ---- desktop widget (Quickshell sidebar tab, v0.5.1) ----
   // One card to set up the illogical-impulse sidebar widget: install the
@@ -460,6 +500,53 @@
         />
         Light mode {$themeMode === 'light' ? '(on — bright)' : '(off — dark)'}
       </label>
+    </div>
+  </section>
+
+  <!-- Media engine (yt-dlp) -->
+  <section class="card border border-base-300 bg-base-200 shadow-sm lg:col-span-2">
+    <div class="card-body gap-3 p-5">
+      <h2 class="card-title text-base">
+        Media engine
+        <span class="badge badge-sm {ytdlp?.installed ? 'badge-success' : 'badge-ghost'}">
+          {ytdlp?.installed ? `yt-dlp ${ytdlp.version ?? ''}` : 'not installed'}
+        </span>
+      </h2>
+      <p class="text-xs opacity-60">
+        Downloads <strong>any media from any link</strong> — videos, songs, images behind weird URLs — plus YouTube &amp;
+        1000+ sites in every quality (like IDM/FDM). The engine (<code class="font-mono">yt-dlp</code>) auto-installs
+        from your own update channel the first time you grab a video; no manual setup. Updating it now and then keeps
+        YouTube working.
+      </p>
+      <div class="flex flex-wrap items-center gap-2">
+        {#if ytdlp?.installed}
+          <span class="font-mono text-xs opacity-50">{ytdlp.path}</span>
+          <span class="badge badge-sm {ytdlp?.ffmpeg ? 'badge-success' : 'badge-warning'}">
+            {ytdlp?.ffmpeg ? 'ffmpeg ✓ (all qualities)' : 'ffmpeg missing (basic qualities)'}
+          </span>
+        {/if}
+        <span class="grow" />
+        <button class="btn btn-primary btn-sm" disabled={ytdlpBusy} on:click={doYtdlpInstall}>
+          {ytdlpBusy ? 'Working…' : ytdlp?.installed ? 'Update engine' : 'Install engine'}
+        </button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 border-t border-base-300 pt-3">
+        <span class="text-xs opacity-70">
+          YouTube says “confirm you're not a bot”? Use your browser's cookies
+          (works when you're signed in to YouTube):
+        </span>
+        <select class="select select-bordered select-sm" bind:value={cookiesBrowser}>
+          <option value="">No cookies</option>
+          <option value="firefox">Firefox</option>
+          <option value="chromium">Chromium</option>
+          <option value="chrome">Chrome</option>
+          <option value="brave">Brave</option>
+          <option value="edge">Edge</option>
+          <option value="vivaldi">Vivaldi</option>
+          <option value="opera">Opera</option>
+        </select>
+        <button class="btn btn-sm" disabled={savingCookies} on:click={saveCookies}>Save</button>
+      </div>
     </div>
   </section>
 

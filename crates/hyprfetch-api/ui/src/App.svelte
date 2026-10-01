@@ -12,11 +12,12 @@
     floatPanel, setFloatPanel, notify,
     settings, resourceUsage, refreshUsage, enterBackgroundMode,
   } from './lib/store.js'
-  import { inspectUrl } from './api.js'
+  import { inspectUrl, probeMedia, mediaDownload } from './api.js'
   import Dashboard from './pages/Dashboard.svelte'
   import Tasks from './pages/Tasks.svelte'
   import Settings from './pages/Settings.svelte'
   import Updates from './pages/Updates.svelte'
+  import Extension from './pages/Extension.svelte'
   import FloatBar from './lib/FloatBar.svelte'
 
   let ws
@@ -43,7 +44,8 @@
 
   // ---- Add modal state (two steps, IDM-style) ----
   // step 1: source (urls + destination + options)
-  // step 2: confirm (probed size + resolved save path per URL)
+  // step 2: confirm — quality picker for stream pages (YouTube & friends),
+  //          file-info cards for direct files
   let step = 1
   let urlText = ''
   let category = 'auto'
@@ -54,6 +56,10 @@
   let adding = false
   let inspecting = false
   let confirmed = []   // inspect results for the confirm step
+  // Media-picker state (single stream URL → quality list).
+  let mediaProbe = null       // { media: {...} } from /api/media/probe
+  let chosenQuality = 'best'
+  let audioOnly = false
 
   function resetAdd() {
     step = 1
@@ -65,6 +71,9 @@
     adding = false
     inspecting = false
     confirmed = []
+    mediaProbe = null
+    chosenQuality = 'best'
+    audioOnly = false
   }
 
   function urlsList() {
@@ -80,24 +89,62 @@
     }
     inspecting = true
     try {
-      // Probe each URL (final name, size, resolved save path). A failed
-      // probe never blocks the download — we fall back to what we know.
+      // Unified probe (v0.6.1): one call answers "direct file" (native
+      // engine — show the IDM-style confirm card) or "media page"
+      // (yt-dlp ladder — show the quality picker).
+      const probe = await probeMedia(urls[0]).catch((e) => ({ probe_error: e.message }))
+      if (probe?.kind === 'media' && urls.length === 1) {
+        mediaProbe = probe
+        const quals = probe.media.qualities ?? []
+        chosenQuality = quals.find((q) => !q.audio_only)?.id ?? 'best'
+        audioOnly = false
+        step = 2
+        return
+      }
+
+      // Direct files (or multi-URL batches): the classic flow.
       const results = await Promise.all(urls.slice(0, 20).map(async (url) => {
         try {
-          return await inspectUrl({
-            url,
-            category: category === 'auto' ? undefined : category,
-            saveDir: saveDir.trim() || undefined,
-            filename: filename.trim() || undefined,
-          })
+          const p = await probeMedia(url)
+          if (p.kind === 'file' && p.file) return p.file
+          // A stream page inside a batch — fall back to its basic info.
+          return { url, final_url: url, filename: p.media?.suggested_filename ?? url, total_bytes: null, accept_ranges: false, category: 'video', save_dir: '', save_path: '', content_type: 'video/stream' }
         } catch (e) {
-          return { url, probe_error: e.message }
+          // Legacy fallback: plain HTTP inspect (daemon older than 0.6 or probe hiccup).
+          try {
+            return await inspectUrl({ url, category: category === 'auto' ? undefined : category, saveDir: saveDir.trim() || undefined, filename: filename.trim() || undefined })
+          } catch (_) {
+            return { url, probe_error: e.message }
+          }
         }
       }))
       confirmed = results
       step = 2
     } finally {
       inspecting = false
+    }
+  }
+
+  async function submitMedia() {
+    addError = ''
+    adding = true
+    try {
+      const q = (mediaProbe?.media?.qualities ?? []).find((x) => x.id === chosenQuality)
+      await mediaDownload({
+        url: urlsList()[0],
+        quality: audioOnly ? undefined : chosenQuality,
+        audioOnly,
+        filename: filename.trim() || undefined,
+        saveDir: saveDir.trim() || undefined,
+        category: category === 'auto' ? undefined : category,
+      })
+      showAdd.set(false)
+      resetAdd()
+      notify(`download started ✓ ${q ? '· ' + q.label : ''}`)
+    } catch (e) {
+      addError = e.message
+    } finally {
+      adding = false
     }
   }
 
@@ -190,6 +237,8 @@
     <Dashboard />
   {:else if $page === 'tasks'}
     <Tasks />
+  {:else if $page === 'extension'}
+    <Extension />
   {:else if $page === 'settings'}
     <Settings />
   {:else if $page === 'updates'}
@@ -258,6 +307,59 @@
             </button>
           </div>
         </form>
+      {:else if mediaProbe}
+        <!-- STEP 2 (media): quality picker for stream pages -->
+        <div>
+          <h3 class="mb-1 text-lg font-semibold">Choose quality</h3>
+          <p class="mb-3 truncate text-xs opacity-60" title={mediaProbe.media.title ?? ''}>
+            {mediaProbe.media.title} · {mediaProbe.media.extractor}
+            {#if mediaProbe.media.duration != null}
+              · {Math.round(mediaProbe.media.duration / 60)} min
+            {/if}
+          </p>
+          <div class="grid gap-1.5">
+            {#each mediaProbe.media.qualities as q (q.id)}
+              <label
+                class="flex cursor-pointer items-center gap-3 rounded-box border px-3 py-2 text-sm
+                  {q.audio_only ? (audioOnly ? 'border-primary bg-primary/10' : 'border-base-300') : (!audioOnly && chosenQuality === q.id ? 'border-primary bg-primary/10' : 'border-base-300')}"
+              >
+                <input
+                  type="radio"
+                  class="radio radio-primary radio-sm"
+                  name="quality"
+                  checked={audioOnly ? q.audio_only : (!q.audio_only && chosenQuality === q.id)}
+                  on:change={() => { if (q.audio_only) { audioOnly = true } else { audioOnly = false; chosenQuality = q.id } }}
+                />
+                <span class="font-medium">{q.label}</span>
+                {#if q.note}<span class="badge badge-sm badge-ghost">{q.note}</span>{/if}
+                <span class="badge badge-sm badge-ghost uppercase">{q.container}</span>
+                <span class="grow" />
+                <span class="font-mono text-xs opacity-60">
+                  {q.size_bytes != null ? fmtBytes(q.size_bytes) : ''}
+                </span>
+              </label>
+            {/each}
+          </div>
+          {#if mediaProbe.media.ffmpeg === false}
+            <p class="mt-2 text-xs text-warning">
+              ffmpeg not found — DASH merges and MP3 extraction are hidden. Install <code class="font-mono">ffmpeg</code> (it's one package) and every quality appears.
+            </p>
+          {/if}
+          <p class="mt-2 text-xs opacity-50">
+            One entry per resolution — duplicate formats (webm/mkv of the same quality) are filtered out, MP4 preferred.
+          </p>
+          <label class="mt-3 grid gap-1.5 text-sm">
+            <span>Filename <span class="opacity-50">(optional)</span></span>
+            <input type="text" class="input input-bordered" bind:value={filename} placeholder={mediaProbe.media.suggested_filename} />
+          </label>
+          {#if addError}<p class="mt-2 text-sm text-error">{addError}</p>{/if}
+          <div class="modal-action">
+            <button type="button" class="btn btn-sm" on:click={() => (step = 1)} disabled={adding}>◂ Back</button>
+            <button type="button" class="btn btn-primary btn-sm" disabled={adding} on:click={submitMedia}>
+              {adding ? 'Starting…' : 'Start download ▶'}
+            </button>
+          </div>
+        </div>
       {:else}
         <!-- STEP 2: confirm before anything starts (like IDM's file-info dialog) -->
         <div>

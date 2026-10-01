@@ -139,6 +139,8 @@ async fn ws_streams_progress_state_and_global_speed() {
         created_at: now,
         updated_at: now,
         completed_at: None,
+        source: "app".into(),
+        media_meta: None,
     };
     TasksRepo::new(&db).insert(&row).unwrap();
     state.engine.start(&id).await.unwrap();

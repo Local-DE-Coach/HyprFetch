@@ -17,7 +17,17 @@
     { id: 'error', label: 'Errors' },
   ]
 
+  // Source chips (v0.6.1): where a download came from. "Extension" filters
+  // to exactly what the browser extension sent in — the IDM-style view.
+  const SOURCES = [
+    { id: 'all', label: 'Any source' },
+    { id: 'app', label: 'Manual' },
+    { id: 'extension', label: '⇪ Extension' },
+    { id: 'media', label: '▶ Media' },
+  ]
+
   let filter = 'all'
+  let source = 'all'
   let query = ''
 
   $: all = [...$active, ...$finished].sort(
@@ -26,6 +36,7 @@
   $: filtered = all.filter((t) => {
     if (filter === 'active' && !['queued', 'downloading', 'paused'].includes(t.state)) return false
     if (['downloading', 'complete', 'error'].includes(filter) && t.state !== filter) return false
+    if (source !== 'all' && (t.source || 'app') !== source) return false
     if (query) {
       const q = query.toLowerCase()
       if (!t.filename.toLowerCase().includes(q) && !t.url.toLowerCase().includes(q)) return false
@@ -39,6 +50,7 @@
     downloading: all.filter((t) => t.state === 'downloading').length,
     complete: all.filter((t) => t.state === 'complete').length,
     error: all.filter((t) => t.state === 'error').length,
+    extension: all.filter((t) => (t.source || 'app') === 'extension').length,
   }
 </script>
 
@@ -48,6 +60,15 @@
       <button class="tab {filter === f.id ? 'tab-active' : ''}" on:click={() => (filter = f.id)}>
         {f.label}
         <span class="ml-1 opacity-50">{counts[f.id]}</span>
+      </button>
+    {/each}
+  </div>
+  <!-- source chips (v0.6.1): All / Manual / Extension / Media -->
+  <div class="tabs tabs-boxed max-w-full overflow-x-auto bg-base-200">
+    {#each SOURCES as s (s.id)}
+      <button class="tab {source === s.id ? 'tab-active' : ''}" on:click={() => (source = s.id)}>
+        {s.label}
+        {#if s.id === 'extension'}<span class="ml-1 opacity-50">{counts.extension}</span>{/if}
       </button>
     {/each}
   </div>
@@ -78,6 +99,13 @@
           <FileActions task={t} show={t.state === 'complete'} />
 
           <span class="badge badge-sm badge-ghost max-sm:hidden">{categoryIcon(t.category)} {t.category}</span>
+          {#if (t.source || 'app') === 'extension'}
+            <span class="badge badge-sm badge-accent uppercase" title="sent in by the browser extension">⇪ ext</span>
+          {:else if (t.source || 'app') === 'media'}
+            <span class="badge badge-sm badge-secondary uppercase" title="media-engine download (yt-dlp)">
+              ▶ {t.media?.quality ?? 'media'}
+            </span>
+          {/if}
           <span class="badge badge-sm {badgeClass(t.state)} uppercase">{stateLabel(t.state)}</span>
           <span class="grow" />
 

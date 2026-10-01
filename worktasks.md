@@ -618,3 +618,31 @@ reopen.
 | 28.8 | Quiet/background mode: engine.set_quiet (aggregator 1s→10s, fixed schedule), /api/power/quiet|wake, server_info.quiet, UI ⏾ button + Settings card; CLI `hyprfetch close` / `hyprfetch open` (start-if-needed + browser) | ✅ | events.rs, engine.rs, routes.rs, background.rs + tests |
 | 28.9 | cargo test 175 green, clippy zero warnings, UI eslint clean, bundle rebuilt (index-DmW6oC3w.js) | ✅ | session log |
 | 28.10 | Bump 0.4.6 + CHANGELOG [0.4.6] + docs/api.md (sniffing, open-folder, usage, power, settings keys) + release via tag-per-release | ✅ | session log |
+
+## 31 · v0.6.1 — media engine (any URL, any format) + browser extension (owner brief, 2026-10-01)
+
+**Owner brief:** the app must download **any media from any URL** (repro:
+extension-less LinkedIn logo URL failed) and **YouTube in every quality
+like the other apps**; ship a **browser extension** for Chromium + Firefox
+(hosted on the server, exposed in a new WebUI page, media seen via the
+extension listed there AND filterable in the main task list, toolbar badge
+per tab like IDM); multi-quality with **no duplicate formats** (one format
+per quality, MP4-first like IDM/FDM). Version = v0.6.1 (updates already
+work; this release is about the download itself).
+
+| # | Task | Status | Evidence |
+|---|---|---|---|
+| 31.1 | Research pass (IDM/FDM architecture: extension sniffs → badge → popup → local daemon; yt-dlp as extraction engine) | ✅ | worklog-v0.6.1.md §Research |
+| 31.2 | DB migration `003_source_and_media.sql` (`tasks.source`, `tasks.media_meta`, index) + `TasksRepo::list_filtered(state, source)` | ✅ | migration applied live in E2E; db tests green |
+| 31.3 | `core/media.rs`: yt-dlp locate + auto-install (channel mirror first, GitHub fallback, size+`--version` smoke test), `-J` probe (45 s timeout), progress-line parser, argv builder, rate-limit from QoS settings | ✅ | live auto-install in E2E (v2026.08.19 installed); 9 unit tests |
+| 31.4 | `quality_ladder`: ONE option per height, MP4>H.264>fps>tbr scoring, DASH `A+B` selectors + `--merge-output-format mp4`, merged sizes, 60fps/4K/HD notes, audio-only (MP3 with ffmpeg / M4A without); **no-ffmpeg degradation** (`find_ffmpeg` + cached `has_ffmpeg`) | ✅ | 13 media unit tests incl. no-ffmpeg ladder |
+| 31.5 | Engine branch: `spawn_coordinator` routes `source=="media"` to `run_ytdlp_coordinator` (same TaskCommand pause/cancel protocol, same progress/state events, output-file fixup via `find_output_file` + rename); early-fail paths set the ROW to error (stranded-row bug caught in E2E and fixed) | ✅ | E2E: soundcloud task → complete, file on disk |
+| 31.6 | API `POST /api/media/probe` (unified file/media dispatch), `POST /api/media/download`, `GET /api/media/ytdlp`, `POST /api/media/ytdlp/install`; `ytdlp_cookies_browser` setting (`--cookies-from-browser`, known-browser allowlist); `ApiError::ServiceUnavailable` (503) | ✅ | E2E: LinkedIn→file, soundcloud→media, direct mp4→file; live daemon |
+| 31.7 | Extension bridge: `ExtensionState` (heartbeat 90 s TTL, media ring-buffer 300 dedup by URL), `POST /api/extension/{heartbeat,media,download}`, `GET/DELETE /api/extension/media`, `GET /api/extension/status`, scoped CORS shim | ✅ | E2E: heartbeat→status connected, dedupe, CORS preflight 200 + allow-origin *, download→source=extension |
+| 31.8 | Browser extension `extension/`: MV3 chrome (service worker) + firefox (event page, gecko id) manifests, `background.js` webRequest sniffer (classify, per-tab map, badge count, debounced batch report, 30 s heartbeat, navigation clears tab), popup (connection dot, media list, Send to HyprFetch), Pillow icons, `build_extension.sh` (zip+xpi + post-build validation) | ✅ | node --check, manifest JSON parse, zip validation; packages built |
+| 31.9 | WebUI: Extension page (status card, Firefox/Chromium install cards → istias.tech, captured media list + Download/Clear), Add-dialog quality picker (media probe → radio ladder with sizes), Tasks source chips (All/Manual/⇪Ext/▶Media) + row badges, Settings Media engine card (version/ffmpeg badge, Install/Update, cookies select), api.js additions | ✅ | npm run build + eslint green; UI committed built |
+| 31.10 | CLI: `hyprfetch add <url> --quality 1080p` / `--audio` routes to `/api/media/download` | ✅ | cargo check; flags parsed, media routing |
+| 31.11 | Release workflow: extension zip/xpi packaged (node syntax gate) + yt-dlp-linux mirror fetched as artifacts; release assets extended; deploy step uploads `extension/` (versioned + version-less) and `bin/yt-dlp/` to istias.tech | ✅ | release.yml; yt-dlp asset-name fix (yt-dlp_linux) verified live |
+| 31.12 | Real E2E (fresh daemon, sandbox): 19/19 PASS — extension bridge, source filter, LinkedIn URL probe, direct-mp4 dispatch, yt-dlp auto-install, **real SoundCloud quality-picked download → 6.7 MB MP3 on disk**, YouTube error surfaces cleanly (datacenter bot-wall; residential + cookies documented), widget status.json schema (now with `source`) | ✅ | /home/z/my-project/scripts/e2e_v061.sh |
+| 31.13 | cargo test 217 green (9 new media + fixture updates), fmt + clippy `-D warnings` clean, UI build + eslint clean | ✅ | session log |
+| 31.14 | Bump 0.6.1 + CHANGELOG [0.6.1] + docs/api.md media+extension sections + dedicated `worklog-v0.6.1.md`; release cut + channel verify (latest.json, extension files, yt-dlp mirror) | ✅ | this session's close-out |

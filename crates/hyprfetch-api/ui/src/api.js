@@ -219,3 +219,66 @@ export function connectEvents(onEvent) {
   }
   return ws
 }
+
+// ---- media engine (v0.6.1) — any URL, any format, YouTube qualities -------
+
+// Unified probe: direct files come back as { kind:'file', file:{...} },
+// stream pages as { kind:'media', media:{ qualities:[...], title, ... } }.
+export async function probeMedia(url) {
+  return handle(await fetch('/api/media/probe', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ url }),
+  }))
+}
+
+// Start a media download with a picked quality (probe → quality id → here).
+export async function mediaDownload({ url, quality, audioOnly, filename, saveDir, category }) {
+  return handle(await fetch('/api/media/download', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      url,
+      quality: quality || undefined,
+      audio_only: audioOnly || undefined,
+      filename: filename || undefined,
+      save_dir: saveDir || undefined,
+      category: category || undefined,
+    }),
+  }))
+}
+
+// yt-dlp engine status: { installed, path, version }.
+export async function getYtdlpStatus() {
+  return handle(await fetch('/api/media/ytdlp'))
+}
+
+// Install / update the yt-dlp binary (self-hosted mirror first).
+export async function installYtdlp() {
+  return handle(await fetch('/api/media/ytdlp/install', { method: 'POST' }))
+}
+
+// ---- browser extension bridge (v0.6.1) ------------------------------------
+
+// { connected, last_seen, version, media_count }.
+export async function extensionStatus() {
+  return handle(await fetch('/api/extension/status'))
+}
+
+// { items: [{url, media_type, size, filename, page_url, page_title, ts}] }.
+export async function extensionMedia() {
+  return handle(await fetch('/api/extension/media'))
+}
+
+export async function extensionClearMedia() {
+  return handle(await fetch('/api/extension/media', { method: 'DELETE' }))
+}
+
+// Push a captured URL into the download queue (source = "extension").
+export async function extensionDownload(url, filename) {
+  return handle(await fetch('/api/extension/download', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ url, filename: filename || undefined }),
+  }))
+}

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>HyprFetch</title>
+  </head>
+  <body>
+    <header class="head">
+      <div class="brand">
+        <img src="icons/icon32.png" alt="" width="20" height="20" />
+        <span>HyprFetch</span>
+      </div>
+      <span id="conn" class="dot off" title="daemon status"></span>
+    </header>
+
+    <div id="page" class="page-title"></div>
+
+    <main id="list" class="list">
+      <div class="empty" id="empty">
+        No media spotted on this page yet.<br />
+        <small>Open a page with videos, audio or big files — caught media shows up here and on the toolbar badge.</small>
+      </div>
+    </main>
+
+    <footer class="foot">
+      <button id="openApp" class="btn primary">Open HyprFetch</button>
+    </footer>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

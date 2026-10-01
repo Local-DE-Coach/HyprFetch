@@ -9,6 +9,7 @@ pub mod categories;
 pub mod engine;
 pub mod events;
 pub mod http_client;
+pub mod media;
 pub mod planner;
 pub mod qos;
 pub mod segment;

@@ -32,6 +32,43 @@ which commit**.
 
 ## Sessions
 
+### [2026-10-01] v0.6.1 — media engine (any URL, any format, YouTube qualities) + Media Catcher browser extension — Super Z sandbox
+- **Commit(s):** (this commit) — feature train per `worklog-v0.6.1.md` (dedicated version worklog).
+- **Did (owner brief: download any media from any URL + YouTube all qualities + browser extension like IDM):**
+  - Researched IDM/FDM capture architecture (extension sniffs webRequest, badge per tab,
+    popup hands picks to the local daemon) — adopted wholesale; yt-dlp adopted as the
+    extraction engine (the de-facto standard, same role as IDM's proprietary engines).
+  - `hyprfetch-core/src/media.rs` (new): yt-dlp locate/auto-install (istias.tech mirror
+    first — users never touch GitHub), `-J` probe, **quality ladder with one option per
+    resolution** (mp4/h264/fps/tbr scoring kills webm-mkv duplicates; DASH merges to MP4;
+    audio-only MP3 / M4A without ffmpeg), progress parser, argv builder, no-ffmpeg
+    degradation, cookies-from-browser setting (allowlisted browsers).
+  - Engine: `spawn_coordinator` branches `source=="media"` to `run_ytdlp_coordinator`
+    (same pause/cancel/progress protocol); stranded-row bug (early fail without state
+    change) caught live in E2E and fixed.
+  - DB migration 003 (`tasks.source`, `tasks.media_meta`); `TaskDto.source/media`;
+    `GET /api/tasks?source=`; widget `status.json` entries gained `source`.
+  - API: `/api/media/{probe,download,ytdlp,ytdlp/install}` + extension bridge
+    `/api/extension/{heartbeat,media,download,status}` with scoped CORS;
+    `ApiError::ServiceUnavailable` (503).
+  - Browser extension `extension/`: MV3 Chrome + Firefox manifests, webRequest sniffer
+    with per-tab badge counts (IDM-style), popup with Send-to-HyprFetch, 30 s heartbeat;
+    `scripts/build_extension.sh` packages zip + xpi with validation; Pillow icons.
+  - WebUI: **Extension page** (status, install cards from istias.tech, captured media
+    list), Add-dialog **quality picker** (unified probe → radio ladder with sizes),
+    Tasks **source chips** (All/Manual/Extension/Media) + row badges, Settings **Media
+    engine card** (version/ffmpeg badge, install/update, cookies select).
+  - CLI: `hyprfetch add --quality 1080p` / `--audio`.
+  - release.yml: extension zip/xpi + yt-dlp-linux mirrored to the channel
+    (`extension/`, `bin/yt-dlp/`); fixed yt-dlp asset rename (yt-dlp_linux).
+- **Tests:** cargo test **217 green** (13 new media tests), fmt+clippy clean, UI build
+  + eslint clean; **live E2E 19/19** (`scripts/e2e_v061.sh`): extension bridge round-trip,
+  source filter, LinkedIn URL probe (the owner's repro), direct-MP4 native dispatch,
+  yt-dlp auto-install, **real SoundCloud quality-picked download → 6.7 MB MP3 on disk**,
+  YouTube error surfaced cleanly (datacenter bot-wall; residential + cookies documented).
+- **Stage summary:** v0.6.1 = the download-experience release; channel mirror extended
+  with extension packages and the yt-dlp engine binary.
+
 ### [2026-09-29] v0.3.1 RE-CUT — multi-page UI, category folders, zero-config clone updates, 43/43 + 1 GiB E2E — Super Z sandbox
 - **Commit(s):** (this commit) — re-tag `v0.3.1` after CI build; supersedes the earlier `v0.3.1` cut.
 - **Did (owner feedback applied — "aply it, test before commit"):**

@@ -8,6 +8,83 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-01 (media engine: any URL, any format + browser extension)
+
+### Added — universal media downloads (the headline feature)
+- **Download any media from any URL.** Stream pages (YouTube, Vimeo,
+  Twitter/X, TikTok, SoundCloud, 1000+ more) are extracted by
+  [yt-dlp](https://github.com/yt-dlp/yt-dlp) — the industry-standard engine
+  every serious download manager partners with — driven as a managed
+  subprocess (`crates/hyprfetch-core/src/media.rs`). Extension-less direct
+  URLs (the LinkedIn logo class: no `.jpg` in the path, query-string name)
+  keep riding the native segmented engine, with Content-Type sniffing —
+  the media engine only engages when the URL is not a plain file.
+- **Every quality, one entry per resolution.** The probe distills yt-dlp's
+  raw format soup into an IDM/FDM-style ladder: `2160p (4K) → 1440p →
+  1080p (Full HD) → 720p (HD) → … → Audio only (MP3)`. Duplicate containers
+  of the same quality (webm **and** mkv **and** mp4) collapse into a single
+  MP4-preferred option (`quality_ladder`, unit-tested); DASH video+audio
+  pairs merge to MP4 via `--merge-output-format mp4`. Sizes, 60fps notes
+  and 4K/HD labels included.
+- **yt-dlp provisioning is automatic.** First media download: the daemon
+  locates `yt-dlp` on `$PATH` or installs the official static Linux build
+  into `~/.local/share/hyprfetch/bin/` — fetched from the self-hosted
+  channel (`istias.tech/hyprfetch/bin/yt-dlp/`) with GitHub only as a
+  build-time mirror, so end users never touch GitHub. Settings → Media
+  engine shows the version and has an Update button (YouTube breaks
+  extractors; keeping the engine fresh is a one click).
+- **Media tasks are first-class citizens.** Progress, speed, pause, resume,
+  cancel, retry, the WebSocket stream, the Quickshell widget `status.json`
+  (now with a `source` field) and the CLI all speak the same task protocol.
+  `hyprfetch add <url> --quality 1080p` / `--audio` routes straight into
+  the media engine from the terminal.
+
+### Added — HyprFetch Media Catcher (browser extension, Chrome + Firefox)
+- **IDM-style media sniffing** in a Manifest V3 extension (`extension/`):
+  passive `webRequest` classification by Content-Type + size + URL pattern,
+  per-tab media map, and a **toolbar badge that counts media found on the
+  current tab** — the same instant-feedback IDM gives on Windows.
+- **Popup** lists what the tab caught (video / audio / image / file, size,
+  filename) with one-click **Send to HyprFetch**; the daemon does the
+  downloading, the extension downloads nothing and talks only to
+  `127.0.0.1:7780`.
+- **Connection awareness**: the extension heartbeats the daemon every 30 s;
+  the WebUI shows live connected/not-connected state.
+- **Shipped from your own server**: `hyprfetch-extension-<v>-firefox.xpi`
+  and `-chrome.zip` are release assets AND channel files
+  (`istias.tech/hyprfetch/extension/`) — the new **Extension page** in the
+  WebUI links them with per-browser install steps.
+
+### Added — WebUI: Extension page, quality picker, source filters
+- **New "Extension" page**: connection status card, Firefox/Chromium
+  install cards (download from the channel, not GitHub), and the live list
+  of media seen via the extension with one-click Download and Clear.
+- **The Add dialog grew a quality picker**: probing now goes through
+  `POST /api/media/probe` — direct files keep the IDM-style confirm card,
+  stream pages show the full quality ladder (radio list with sizes and
+  containers) before anything starts.
+- **Tasks page source chips**: All / Manual / **⇪ Extension** / ▶ Media —
+  "show me what came in via the browser" is one click. Task cards carry
+  the source badge (`⇪ ext`, `▶ 1080p`).
+
+### API (v0.6.1)
+- New: `POST /api/media/probe`, `POST /api/media/download`,
+  `GET/POST /api/media/ytdlp(/install)`,
+  `POST /api/extension/heartbeat`, `GET/POST/DELETE /api/extension/media`,
+  `POST /api/extension/download` (CORS-enabled for extension origins),
+  `GET /api/extension/status`.
+- Changed: `GET /api/tasks?source=…` filter; `TaskDto` gains `source` and
+  `media`; DB migration `003_source_and_media.sql` adds `tasks.source` +
+  `tasks.media_meta`.
+
+### Tests
+- 8 new unit tests for the media engine (quality-ladder dedupe contract,
+  MP4 preference, audio-only selection, progress-line parsing, argv shape,
+  title→filename sanitization); widget-status schema tests cover `source`;
+  extension packages are validated in CI (manifest parse, JS syntax gate,
+  post-build zip assertions).
+
+
 ## [0.5.2] — 2026-10-01 (hotfix: the trailing comma that broke the tab)
 
 ### Fixed — sidebar wiring produced a QML parse error

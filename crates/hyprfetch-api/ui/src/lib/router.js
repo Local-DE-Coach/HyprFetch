@@ -17,6 +17,7 @@ import { readable } from 'svelte/store'
 export const PAGES = [
   { id: 'dashboard', label: 'Dashboard', icon: '⌂', title: 'Overview' },
   { id: 'tasks', label: 'Tasks', icon: '☰', title: 'All downloads' },
+  { id: 'extension', label: 'Extension', icon: '◈', title: 'Browser extension & captured media' },
   { id: 'settings', label: 'Settings', icon: '⚙', title: 'Save folders & options' },
   { id: 'updates', label: 'Updates', icon: '↑', title: 'Version & updates' },
 ]

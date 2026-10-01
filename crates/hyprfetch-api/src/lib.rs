@@ -6,6 +6,8 @@
 
 mod auth;
 mod error;
+mod extension;
+mod media;
 mod routes;
 mod ui;
 mod usage;
@@ -81,6 +83,8 @@ pub struct AppState {
     pub staged_update: Arc<tokio::sync::Mutex<Option<StagedUpdate>>>,
     /// Status of the one-click update setup run.
     pub authorize_state: Arc<tokio::sync::Mutex<AuthorizeState>>,
+    /// Browser-extension bridge state (heartbeats + captured media).
+    pub extension: Arc<extension::ExtensionState>,
     /// Notified once when the process should exit gracefully (restart / idle).
     pub shutdown: Arc<Notify>,
     /// When this server process came up (for `/api/server` uptime).
@@ -104,6 +108,7 @@ impl AppState {
             update_cache: Arc::new(tokio::sync::Mutex::new(None)),
             staged_update: Arc::new(tokio::sync::Mutex::new(None)),
             authorize_state: Arc::new(tokio::sync::Mutex::new(AuthorizeState::default())),
+            extension: Arc::new(extension::ExtensionState::new()),
             shutdown: Arc::new(Notify::new()),
             started_at: Instant::now(),
             usage: Arc::new(UsageTracker::default()),
@@ -259,6 +264,34 @@ pub fn router_with_token(state: AppState, token: impl Into<Option<String>>) -> R
         )
         .route("/api/power/quiet", axum::routing::post(routes::power_quiet))
         .route("/api/power/wake", axum::routing::post(routes::power_wake))
+        // Media engine (v0.6.1) — universal URL → media download.
+        .route("/api/media/probe", axum::routing::post(media::media_probe))
+        .route(
+            "/api/media/download",
+            axum::routing::post(media::media_download),
+        )
+        .route("/api/media/ytdlp", axum::routing::get(media::ytdlp_status))
+        .route(
+            "/api/media/ytdlp/install",
+            axum::routing::post(media::ytdlp_install),
+        )
+        // Browser-extension bridge (v0.6.1) — scoped router gets the CORS
+        // shim so chrome-extension:// / moz-extension:// origins can call it.
+        .nest(
+            "/api/extension",
+            Router::new()
+                .route("/heartbeat", axum::routing::post(extension::heartbeat))
+                .route(
+                    "/media",
+                    axum::routing::get(extension::list_media)
+                        .post(extension::report_media)
+                        .delete(extension::clear_media),
+                )
+                .route("/download", axum::routing::post(extension::download))
+                .route("/status", axum::routing::get(extension::status))
+                .layer(axum::middleware::from_fn(extension::cors))
+                .with_state(state.clone()),
+        )
         .with_state(state.clone());
 
     if let Some(token) = token {

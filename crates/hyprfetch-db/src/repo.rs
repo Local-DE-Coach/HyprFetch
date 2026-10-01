@@ -41,6 +41,10 @@ pub struct TaskRow {
     pub created_at: Ts,
     pub updated_at: Ts,
     pub completed_at: Option<Ts>,
+    /// Where this task came from: "app" (default), "extension" or "media".
+    pub source: String,
+    /// Media-engine metadata (JSON blob) — only for `source = "media"` tasks.
+    pub media_meta: Option<String>,
 }
 
 /// One row of the `segments` table.
@@ -86,8 +90,9 @@ impl<'a> TasksRepo<'a> {
                     total_bytes, downloaded_bytes, state,
                     etag, last_modified, accept_ranges,
                     segments_requested, qos_override, extra_headers,
-                    error_message, created_at, updated_at, completed_at
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                    error_message, created_at, updated_at, completed_at,
+                    source, media_meta
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 params![
                     row.id,
                     row.url,
@@ -106,6 +111,8 @@ impl<'a> TasksRepo<'a> {
                     row.created_at,
                     row.updated_at,
                     row.completed_at,
+                    row.source,
+                    row.media_meta,
                 ],
             )
         })?;
@@ -140,6 +147,36 @@ impl<'a> TasksRepo<'a> {
                 stmt.query_map([], row_to_task)?
                     .collect::<rusqlite::Result<Vec<_>>>()?
             };
+            Ok(rows)
+        })
+    }
+
+    /// List tasks by state AND source. `None` matches any value of that
+    /// dimension (so `list_filtered(None, Some("extension"))` returns every
+    /// extension-initiated task regardless of state — the WebUI filter chips).
+    pub fn list_filtered(
+        &self,
+        state: Option<TaskState>,
+        source: Option<&str>,
+    ) -> rusqlite::Result<Vec<TaskRow>> {
+        with_conn(self.db, |c| {
+            let mut sql = String::from("SELECT * FROM tasks WHERE 1=1");
+            if state.is_some() {
+                sql.push_str(" AND state = ?1");
+            }
+            if source.is_some() {
+                sql.push_str(" AND source = ?2");
+            }
+            sql.push_str(" ORDER BY created_at DESC");
+            let mut stmt = c.prepare(&sql)?;
+            let state_param = state.as_ref().map(|s| s.as_str().to_string());
+            let source_param = source.map(str::to_string);
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(state_param.iter().chain(source_param.iter())),
+                    row_to_task,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         })
     }
@@ -443,6 +480,10 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
         completed_at: r.get("completed_at")?,
+        source: r
+            .get::<_, Option<String>>("source")?
+            .unwrap_or_else(|| "app".into()),
+        media_meta: r.get("media_meta")?,
     })
 }
 
@@ -507,6 +548,8 @@ mod tests {
             created_at: 1_700_000_000_000,
             updated_at: 1_700_000_000_000,
             completed_at: None,
+            source: "app".into(),
+            media_meta: None,
         }
     }
 
