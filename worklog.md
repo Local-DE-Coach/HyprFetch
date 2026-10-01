@@ -868,3 +868,52 @@ build + boot check, `sh -n`/`bash -n`, rewritten `qml_syntax_gate.py`
 (real QQmlEngine parse + instantiate of all 5 files, Appearance-role
 manifest), smoke test (install/idempotency/bootstrap-file://-stdin/
 byte-exact uninstall), E2E against the live channel.
+
+## 2026-10-01 — v0.6.2: channel fixes (in-app extension install), auto-capture downloads, page hardening
+
+**User reports driving this release.** (1) Pressing "Install extension" in the
+WebUI created a task that died with `probe failed: server returned 404 Not
+Found for https://istias.tech/hyprfetch/extension/…` — the v0.6.1 *tag* was cut
+from fce295a, before the efc740d URL fix landed on main, so the shipped binary
+still carried the pre-fix channel path while the server only serves
+`/updates/*`. (2) istias.tech/hyprfetch/updates intermittently stuck on
+"Update channel not responding" although the manifest answers fine (curl 200,
+`hyprfetch update` works). (3) Feature ask: the extension must take over
+browser downloads automatically (IDM-style), not just sniff media.
+
+**In-app extension install (Extension.svelte).** The Firefox/Chromium cards now
+queue the package as an in-app task via `POST /api/extension/download` with the
+correct versioned `/updates/extension/` URL — the download runs through the
+engine, shows on Tasks, and the file lands in the download folder; a plain
+browser-download link stays as fallback. Verified against the live channel:
+task `complete`, sha256 of the downloaded .xpi byte-identical to the server
+copy.
+
+**Extension auto-capture (background.js).** `downloads.onCreated` now intercepts
+every browser download: the URL goes to the daemon FIRST; only after the daemon
+accepts are the browser's copy cancelled + erased from the shelf (fetch-then-
+cancel — a dead daemon can never cost the user a download). Guards: http(s)
+only, daemon traffic skipped, ad/telemetry hosts skipped, 60 s per-URL cooldown
+kills the cancel/retry ping-pong, callback+promise compat for Firefox/Chrome.
+New `downloads` permission in both manifests, `Auto-capture downloads` toggle
+in the popup (storage.local, default ON), EXT_VERSION 0.6.2.
+
+**Updates page hardening (Docs web).** One cache-busted fetch was the single
+point of failure. `web/src/lib/hyprfetch-manifest.ts` (shared by overview/
+updates/extension pages) now tries four URL variants inside ONE attempt:
+same-origin `?t=` → same-origin plain → absolute istias.tech `?t=` → absolute
+plain — surviving query-string-hostile middle layers (WAF/proxy cache-poisoned
+`?t=` keys) and cross-origin serving. Local + production E2E: with EVERY `?t=`
+request aborted the page still reaches v0.6.1 through the plain/absolute
+variants.
+
+**Test-suite honesty.** e2e_update_channel.sh had 3 stale assertions expecting
+the pre-0.4.9 sudo-swap contract ("privileged swap via sudo failed" / refusal
+hint). The shipped updater migrates system-location installs to ~/.local/bin
+with no escalation — tests updated to assert the real contract. 45/45 PASS.
+
+**Gates run.** cargo fmt/clippy/test (217) green; UI lint + build green;
+extension packages rebuilt + zip/xpi validation green; node --check on
+background.js/popup.js; docs build + eslint green; updater E2E 45/45; real
+`hyprfetch update --check` against istias.tech green (0.6.2 > 0.6.1 → up to
+date).

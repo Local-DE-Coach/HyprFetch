@@ -1,16 +1,23 @@
 {
   "manifest_version": 3,
   "name": "HyprFetch Media Catcher",
-  "version": "0.6.1",
-  "description": "Catch videos, audio, images and big files on any page and send them to the HyprFetch download manager — IDM-style, local-only.",
-  "permissions": ["tabs", "storage", "webRequest"],
+  "version": "0.6.2",
+  "description": "Catch videos, audio, images and big files on any page and send them to the HyprFetch download manager \u2014 IDM-style, local-only.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "webRequest",
+    "downloads"
+  ],
   "host_permissions": [
     "http://127.0.0.1:7780/*",
     "http://localhost:7780/*",
     "<all_urls>"
   ],
   "background": {
-    "scripts": ["background.js"]
+    "scripts": [
+      "background.js"
+    ]
   },
   "browser_specific_settings": {
     "gecko": {

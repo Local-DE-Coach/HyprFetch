@@ -1,11 +1,14 @@
 <script>
-  // Extension — the browser-extension control page (v0.6.1).
+  // Extension — the browser-extension control page (v0.6.2).
   //
   // 1. Connection card: is the extension heartbeating the daemon right now?
   // 2. Install cards: Firefox (.xpi) + Chromium (.zip) packages, downloaded
-  //    from the self-hosted channel (istias.tech) — never from GitHub.
+  //    as IN-APP TASKS from the self-hosted channel (istias.tech) — pressing
+  //    the button queues the package in the daemon (visible on Tasks), with
+  //    a plain browser-download link kept as fallback. Never from GitHub.
   // 3. Captured media: everything the extension spotted while you browsed,
-  //    one click to push into the download queue.
+  //    one click to push into the download queue. Since 0.6.2 the extension
+  //    ALSO auto-captures every browser download (toggle in its popup).
   import { onMount, onDestroy } from 'svelte'
   import { extensionStatus, extensionMedia, extensionClearMedia, extensionDownload } from '../api.js'
   import { fmtBytes } from '../lib/format.js'
@@ -17,9 +20,10 @@
   let items = []
   let loading = true
   let busyUrl = ''
+  let busyPkg = ''
   let timer
 
-  const extVersion = $serverInfo.version || '0.6.1'
+  const extVersion = $serverInfo.version || '0.6.2'
 
   async function refresh() {
     try {
@@ -55,6 +59,24 @@
       notify(e.message)
     } finally {
       busyUrl = ''
+    }
+  }
+
+  // Queue an extension package (xpi/zip) as an in-app task so it downloads
+  // through the engine into your download folder — visible on the Tasks page.
+  async function installPkg(browser) {
+    const isFf = browser === 'firefox'
+    const file = `hyprfetch-extension-${extVersion}-${isFf ? 'firefox.xpi' : 'chrome.zip'}`
+    const url = `${CHANNEL}/extension/${file}`
+    busyPkg = browser
+    try {
+      await extensionDownload(url, file)
+      notify(`${file} queued — check the Tasks page; the file lands in your download folder ✓`)
+      await refresh()
+    } catch (e) {
+      notify(e.message)
+    } finally {
+      busyPkg = ''
     }
   }
 
@@ -105,9 +127,9 @@
         {/if}
       </div>
       <p class="text-xs opacity-60">
-        Like IDM on Windows: a small badge on the toolbar icon counts the media found on the current tab. Click the icon to see
-        videos, audio and big files, then send any of them straight into HyprFetch. Everything stays on your machine —
-        the extension talks only to <code class="font-mono">127.0.0.1</code>.
+        Like IDM on Windows: a badge on the toolbar icon counts the media found on the current tab, and every download the
+        browser starts is handed to HyprFetch automatically (toggle it off in the extension popup). Everything stays on your
+        machine — the extension talks only to <code class="font-mono">127.0.0.1</code>.
       </p>
     </div>
   </div>
@@ -118,24 +140,34 @@
       <div class="card-body gap-2 p-4">
         <h3 class="font-semibold">Firefox</h3>
         <p class="text-xs opacity-60">
-          Download the <code class="font-mono">.xpi</code>, then: <span class="font-mono">about:addons</span> → gear icon →
-          <em>Install Add-on From File…</em>
+          After the download: <span class="font-mono">about:addons</span> → gear icon → <em>Install Add-on From File…</em> →
+          pick the <code class="font-mono">.xpi</code> from your download folder.
         </p>
-        <a class="btn btn-primary btn-sm" href="{CHANNEL}/extension/hyprfetch-extension-{extVersion}-firefox.xpi" download>
-          ↓ Firefox (.xpi)
-        </a>
+        <div class="flex flex-wrap items-center gap-2">
+          <button class="btn btn-primary btn-sm" disabled={busyPkg === 'firefox'} on:click={() => installPkg('firefox')}>
+            {busyPkg === 'firefox' ? 'queueing…' : '↓ Install Firefox (.xpi)'}
+          </button>
+          <a class="link text-xs opacity-60" href="{CHANNEL}/extension/hyprfetch-extension-{extVersion}-firefox.xpi">
+            browser download
+          </a>
+        </div>
       </div>
     </div>
     <div class="card border border-base-300 bg-base-200 shadow-sm">
       <div class="card-body gap-2 p-4">
         <h3 class="font-semibold">Chromium</h3>
         <p class="text-xs opacity-60">
-          {chromeBrowsers}. Unzip, then: <span class="font-mono">chrome://extensions</span> →
+          {chromeBrowsers}. After the download: unzip, then <span class="font-mono">chrome://extensions</span> →
           enable <em>Developer mode</em> → <em>Load unpacked</em> → pick the folder.
         </p>
-        <a class="btn btn-primary btn-sm" href="{CHANNEL}/extension/hyprfetch-extension-{extVersion}-chrome.zip" download>
-          ↓ Chromium (.zip)
-        </a>
+        <div class="flex flex-wrap items-center gap-2">
+          <button class="btn btn-primary btn-sm" disabled={busyPkg === 'chrome'} on:click={() => installPkg('chrome')}>
+            {busyPkg === 'chrome' ? 'queueing…' : '↓ Install Chromium (.zip)'}
+          </button>
+          <a class="link text-xs opacity-60" href="{CHANNEL}/extension/hyprfetch-extension-{extVersion}-chrome.zip">
+            browser download
+          </a>
+        </div>
       </div>
     </div>
   </div>

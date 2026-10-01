@@ -16,7 +16,7 @@
 const api = globalThis.chrome ?? globalThis.browser;
 
 const DAEMON = 'http://127.0.0.1:7780';
-const EXT_VERSION = '0.6.1';
+const EXT_VERSION = '0.6.2';
 
 // ---- classification --------------------------------------------------------
 
@@ -257,3 +257,114 @@ if (api.action?.setBadgeBackgroundColor) {
 
 heartbeat();
 setInterval(heartbeat, 30_000);
+
+// ---- auto-capture: browser downloads → HyprFetch (IDM-style takeover) ------
+//
+// Every download the BROWSER starts is intercepted here:
+//   1. The URL is handed to the daemon first (POST /api/extension/download) —
+//      the daemon, not the browser, becomes the downloader.
+//   2. Only after the daemon ACCEPTS the task is the browser's own download
+//      cancelled and erased from the shelf, so nothing is fetched twice and
+//      the file lands in HyprFetch's folder, not the browser's.
+//   3. If the daemon is unreachable the browser download proceeds untouched
+//      — taking over must never cost the user a download.
+//
+// Skipped on purpose: non-http(s) URLs (blob:/data:/file: can't be re-fetched
+// by the daemon), traffic to the daemon itself (the WebUI's own downloads),
+// ad/telemetry hosts, and a per-URL cooldown that stops the cancel/retry
+// ping-pong (Chrome re-fires onCreated when a cancelled item is retried).
+// Toggle lives in the popup (chrome.storage.local 'autoCapture', default ON).
+
+let autoCapture = true;
+
+function storageGetLocal(def) {
+  return new Promise((resolve) => {
+    try {
+      const r = api.storage.local.get(def, (v) => resolve(v ?? def));
+      if (r && typeof r.then === 'function') r.then((v) => resolve(v ?? def), () => resolve(def));
+    } catch (_) {
+      resolve(def);
+    }
+  });
+}
+
+storageGetLocal({ autoCapture: true }).then((v) => {
+  autoCapture = v.autoCapture !== false;
+});
+
+if (api.storage.onChanged) {
+  api.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.autoCapture) {
+      autoCapture = changes.autoCapture.newValue !== false;
+    }
+  });
+}
+
+const capturedCooldown = new Map(); // url → ts of last takeover
+function recentlyTaken(url) {
+  const now = Date.now();
+  for (const [u, ts] of capturedCooldown) {
+    if (now - ts > 60_000) capturedCooldown.delete(u);
+  }
+  return capturedCooldown.has(url);
+}
+
+function baseName(p) {
+  if (!p) return null;
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return i >= 0 ? p.slice(i + 1) : p;
+}
+
+/** Callback-style + promise-style compat for downloads.* calls. */
+function pcall(fn, ...args) {
+  return new Promise((resolve) => {
+    try {
+      const r = fn(...args, () => resolve(true));
+      if (r && typeof r.then === 'function') {
+        r.then(() => resolve(true), () => resolve(false));
+      }
+    } catch (_) {
+      resolve(false);
+    }
+  });
+}
+
+async function flashBadge(text) {
+  try {
+    api.action.setBadgeText({ text });
+    setTimeout(() => {
+      try {
+        api.action.setBadgeText({ text: '' });
+      } catch (_) { /* noop */ }
+    }, 3500);
+  } catch (_) { /* noop */ }
+}
+
+if (api.downloads?.onCreated) {
+  api.downloads.onCreated.addListener((item) => {
+    void takeOverDownload(item);
+  });
+}
+
+async function takeOverDownload(item) {
+  if (!autoCapture) return;
+  const url = item.url || '';
+  if (!/^https?:/i.test(url)) return; // blob:/data:/file: — daemon can't re-fetch
+  if (url.startsWith(DAEMON)) return; // our own WebUI / daemon traffic
+  if (IGNORE_URL.test(url)) return; // ads / telemetry junk
+  if (recentlyTaken(url)) return; // cancel→retry loop guard
+
+  capturedCooldown.set(url, Date.now());
+
+  const res = await daemonFetch('/api/extension/download', {
+    url,
+    filename: baseName(item.filename),
+    page_url: item.referrer || tabInfo.get(item.tabId ?? -1)?.url || null,
+  });
+  if (!res) return; // daemon offline → browser download continues untouched
+
+  // Daemon accepted: stop + hide the browser's copy (HyprFetch owns it now).
+  await pcall(api.downloads.cancel.bind(api.downloads), item.id);
+  await pcall(api.downloads.erase.bind(api.downloads), { id: item.id });
+  await flashBadge('↓');
+}

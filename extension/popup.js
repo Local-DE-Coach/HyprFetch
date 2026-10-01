@@ -124,4 +124,20 @@ document.getElementById('openApp').addEventListener('click', () => {
   api.tabs.create({ url: DAEMON_URL });
 });
 
+// ---- auto-capture toggle ----------------------------------------------------
+
+const autoEl = document.getElementById('autoCapture');
+
+autoEl.addEventListener('change', () => {
+  api.storage.local.set({ autoCapture: autoEl.checked });
+  toast(autoEl.checked ? 'Auto-capture ON — downloads go to HyprFetch' : 'Auto-capture OFF — browser handles downloads', true);
+});
+
+new Promise((resolve) => {
+  const r = api.storage.local.get({ autoCapture: true }, (v) => resolve(v ?? { autoCapture: true }));
+  if (r && typeof r.then === 'function') r.then(resolve, () => resolve({ autoCapture: true }));
+}).then((v) => {
+  autoEl.checked = v.autoCapture !== false;
+});
+
 init();

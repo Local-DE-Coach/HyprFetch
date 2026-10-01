@@ -646,3 +646,22 @@ work; this release is about the download itself).
 | 31.12 | Real E2E (fresh daemon, sandbox): 19/19 PASS — extension bridge, source filter, LinkedIn URL probe, direct-mp4 dispatch, yt-dlp auto-install, **real SoundCloud quality-picked download → 6.7 MB MP3 on disk**, YouTube error surfaces cleanly (datacenter bot-wall; residential + cookies documented), widget status.json schema (now with `source`) | ✅ | /home/z/my-project/scripts/e2e_v061.sh |
 | 31.13 | cargo test 217 green (9 new media + fixture updates), fmt + clippy `-D warnings` clean, UI build + eslint clean | ✅ | session log |
 | 31.14 | Bump 0.6.1 + CHANGELOG [0.6.1] + docs/api.md media+extension sections + dedicated `worklog-v0.6.1.md`; release cut + channel verify (latest.json, extension files, yt-dlp mirror) | ✅ | this session's close-out |
+
+## 32 · v0.6.2 — channel fixes + extension auto-capture (owner brief, 2026-10-01)
+
+**Owner brief:** the updates page on the server must show the latest version
+(the app itself updated fine — "only the UI of page has problem"); pressing
+"Install extension" (Firefox/Chrome) in the app must download the package
+inside the app as a new task; the extension must send every browser download
+to the manager automatically instead of the browser downloading.
+
+| # | Task | Status | Evidence / notes |
+|---|---|---|---|
+| 32.1 | Root-cause the 404 install task: v0.6.1 tag predates the efc740d URL fix (old `/hyprfetch/extension/…` path baked into the shipped UI; server serves only `/updates/*`) | ✅ | user screenshot (probe failed 404) + release/tag history |
+| 32.2 | Extension.svelte install cards → in-app tasks via `POST /api/extension/download`, versioned `/updates/extension/` URLs, browser-download fallback link, post-queue hint | ✅ | live E2E: task complete, sha256 identical to server copy |
+| 32.3 | Auto-capture in background.js: `downloads.onCreated` → daemon-first (`/api/extension/download`) → cancel + erase browser copy on acceptance; http(s)-only, daemon/ad/telemetry skips, 60 s per-URL cooldown, Chrome/Firefox compat shims | ✅ | node --check; fetch-then-cancel design keeps daemon-down safe |
+| 32.4 | `downloads` permission in both manifests; popup Auto-capture toggle (storage.local, default ON) + CSS; EXT_VERSION 0.6.2 | ✅ | packages rebuilt (13.2 KB zip / 13.3 KB xpi), zip+xpi validation green |
+| 32.5 | Docs site manifest hardening: shared `web/src/lib/hyprfetch-manifest.ts`, 4-variant fetch chain per attempt (same-origin ?t= → plain → absolute ?t= → absolute plain) on overview/updates/extension pages | ✅ | prod E2E: page recovers with all `?t=` requests blocked |
+| 32.6 | e2e_update_channel.sh de-staled: 3 assertions updated to the v0.4.9+ migration contract (system location → ~/.local/bin, no escalation) | ✅ | 45/45 PASS |
+| 32.7 | Gates: cargo fmt/clippy/test 217 green, UI lint+build green, docs build+eslint green, real `update --check` vs istias.tech green | ✅ | session log |
+| 32.8 | Release v0.6.2: tag, CI build, channel deploy, server verify (manifest, extension packages 0.6.2, page shows 0.6.2) | ✅ | close-out of this session |

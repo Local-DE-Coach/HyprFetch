@@ -213,10 +213,11 @@ else
 fi
 
 echo
-echo "=== 9. system-owned location + real sudo (no tty) → clean error, binary intact ==="
-# Simulates a pacman/makepkg install: /usr/bin/hyprfetch is root-owned and a
-# user process cannot write there. A chmod-555 dir produces the exact same
-# EPERM for the swap probe without needing real root here.
+echo "=== 9. system-owned location → migrates to the user dir, binary intact ==="
+# v0.4.9+ contract: a system location (simulated with a chmod-555 dir, the
+# same EPERM a root-owned /usr/bin produces) does NOT fight for sudo — the
+# updater migrates the install to ~/.local/bin (passwordless) and leaves the
+# system copy exactly as it was.
 LOCKED="$WORK/locked"
 mkdir -p "$LOCKED"
 cp "$BIN" "$LOCKED/hyprfetch"
@@ -233,8 +234,8 @@ if echo "$OUT" | grep -qi "permission denied\|os error 13"; then
 else
   check "no raw 'permission denied' error" 0
 fi
-echo "$OUT" | grep -q "privileged swap via sudo failed"
-check "reports the failed privileged swap clearly" $?
+echo "$OUT" | grep -q "moved to"
+check "reports the migration to the user dir clearly" $?
 cmp -s "$LOCKED/hyprfetch" "$BIN"
 check "binary was left untouched" $?
 [ ! -e "$LOCKED/hyprfetch.old" ] && [ ! -e "$LOCKED/hyprfetch.new" ]
@@ -262,10 +263,10 @@ else
 fi
 
 echo
-echo "=== 10. web UI /api/update/apply on a system install → escalate or hint ==="
-# v0.4.5 behavior: the daemon tries passwordless `sudo -n`, then `pkexec`.
-# - passwordless sudo available (CI runners): apply SUCCEEDS via escalation
-# - neither usable (plain user box): refusal with an actionable hint
+echo "=== 10. web UI /api/update/apply on a system install → migrate to user dir ==="
+# v0.4.9+ contract: the apply endpoint migrates a system-location install to
+# the user's ~/.local/bin and succeeds WITHOUT any escalation — sudo/pkexec
+# are only for the (now unreachable) in-place swap case.
 write_manifest "9.9.9" "$CHANNEL/9.9.9/hyprfetch-9.9.9-linux-x64.tar.gz" "$SHA"
 mkdir -p "$WORK/serve2"
 HYPRFETCH_UPDATE_CHANNEL="$CHANNEL" "$LOCKED/hyprfetch" serve --db-path "$WORK/serve2/hyprfetch.db" --bind 127.0.0.1:7791 > "$WORK/serve2.log" 2>&1 &
@@ -281,25 +282,14 @@ curl -sf http://127.0.0.1:7791/api/update/check > /dev/null
 check "update check answers" $?
 HTTP_CODE=$(curl -s -o /tmp/apply_out.json -w '%{http_code}' -X POST http://127.0.0.1:7791/api/update/apply)
 echo "http $HTTP_CODE: $(head -c 300 /tmp/apply_out.json 2>/dev/null)"
-if sudo -n true 2>/dev/null; then
-  echo "[env] passwordless sudo present — expecting a SUCCESSFUL escalated apply"
-  [ "$HTTP_CODE" = "200" ]
-  check "apply succeeds via passwordless sudo" $?
-  jq -e '.installed == "9.9.9" and .escalated == true' /tmp/apply_out.json > /dev/null
-  check "reports installed 9.9.9 + escalated" $?
-  jq -e 'has("stale_copies")' /tmp/apply_out.json > /dev/null
-  check "apply response carries stale_copies" $?
-  grep -q "marker-available" "$LOCKED/hyprfetch"
-  check "binary content was swapped (system dir!)" $?
-  [ -f "$LOCKED/hyprfetch.old" ]
-  check "previous binary kept as .old" $?
-else
-  echo "[env] no passwordless sudo — expecting the actionable refusal"
-  grep -qi "system location\|sudo hyprfetch update" /tmp/apply_out.json
-  check "refuses with an actionable sudo hint" $?
-  cmp -s "$LOCKED/hyprfetch" "$BIN"
-  check "binary was left untouched" $?
-fi
+[ "$HTTP_CODE" = "200" ]
+check "apply answers 200" $?
+jq -e '.installed == "9.9.9" and .escalated == false and .migrated == true' /tmp/apply_out.json > /dev/null
+check "apply migrates to the user dir (no sudo involved)" $?
+jq -e 'has("stale_copies")' /tmp/apply_out.json > /dev/null
+check "apply response carries stale_copies" $?
+cmp -s "$LOCKED/hyprfetch" "$BIN"
+check "system-dir binary was left untouched" $?
 kill "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null; SERVE_PID=""
 chmod 755 "$LOCKED"
 
@@ -314,11 +304,10 @@ else
 fi
 
 echo
-echo "=== 12. web UI apply attempts `sudo -n` escalation (shim) + rollback ==="
+echo "=== 12. web UI apply prefers migration over escalation (sudo shim present) ==="
 # Shim sudo: `sudo -n true` → ok (probe passes); `sudo -n <cmd>` → runs it as
-# the current user. In a locked dir the privileged script then FAILS (the
-# shim cannot grant root) — proving the API walked the sudo -n path and the
-# script rolled back without touching the binary.
+# the current user. Even with a working sudo probe the v0.4.9+ contract is
+# migration-first: a system location moves to ~/.local/bin, no escalation.
 SHIM="$WORK/shim"
 mkdir -p "$SHIM"
 printf '#!/bin/sh\nif [ "$1" = "-n" ]; then shift; exec "$@"; fi\nexit 9\n' > "$SHIM/sudo"
@@ -339,8 +328,8 @@ check "server came up (shimmed sudo)" $UP
 curl -sf http://127.0.0.1:7792/api/update/check > /dev/null
 HTTP_CODE=$(curl -s -o /tmp/apply2.json -w '%{http_code}' -X POST http://127.0.0.1:7792/api/update/apply)
 echo "http $HTTP_CODE: $(head -c 300 /tmp/apply2.json 2>/dev/null)"
-grep -q "privileged swap via sudo failed" /tmp/apply2.json
-check "escalation was ATTEMPTED via sudo (not refused)" $?
+jq -e '.installed == "9.9.9" and .escalated == false and .migrated == true' /tmp/apply2.json > /dev/null
+check "migration took priority over the sudo shim (no escalation)" $?
 cmp -s "$LOCKED2/hyprfetch" "$BIN"
 check "rollback left the binary untouched" $?
 [ ! -e "$LOCKED2/hyprfetch.old" ] && [ ! -e "$LOCKED2/hyprfetch.new" ]

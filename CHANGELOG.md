@@ -8,6 +8,34 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-10-01 (channel fixes + extension auto-capture)
+
+### Fixed — update channel / WebUI
+- **Extension install cards now queue the package as an in-app task** with the
+  correct `/updates/extension/` channel URL. The v0.6.1 build shipped with the
+  pre-fix path (`/hyprfetch/extension/…`, which the server 404s) — pressing
+  "Install" created a task that died on a probe error. The button now creates a
+  task the Tasks page tracks end-to-end (file lands in the download folder);
+  a plain browser-download link stays as fallback.
+- WebUI version constant follows the 0.6.2 release.
+
+### Added — extension: auto-capture browser downloads (IDM-style takeover)
+- The extension now watches `downloads.onCreated`: every download the BROWSER
+  starts is handed to the daemon first (`POST /api/extension/download`); only
+  after the daemon accepts is the browser's copy cancelled and erased from the
+  shelf, so HyprFetch — not the browser — does the download.
+- Safe by design: daemon-unreachable → browser download proceeds untouched;
+  non-http(s) URLs (blob:/data:/file:) and daemon traffic are skipped; ads /
+  telemetry hosts are skipped; a per-URL cooldown stops cancel/retry loops.
+- New **Auto-capture downloads** toggle in the extension popup
+  (`chrome.storage.local`, default ON). Requires the new `downloads` permission.
+
+### Changed
+- `hyprfetch-extension-*` packages rebuilt at 0.6.2 (manifest version +
+  permission bump); channel copies under
+  `https://istias.tech/hyprfetch/updates/extension/` are refreshed by CI on
+  release.
+
 ## [0.6.1] — 2026-10-01 (media engine: any URL, any format + browser extension)
 
 ### Added — universal media downloads (the headline feature)
