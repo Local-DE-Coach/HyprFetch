@@ -11,7 +11,7 @@
   import { fmtBytes } from '../lib/format.js'
   import { notify, serverInfo } from '../lib/store.js'
 
-  const CHANNEL = 'https://istias.tech/hyprfetch'
+  const CHANNEL = 'https://istias.tech/hyprfetch/updates'
 
   let status = null
   let items = []

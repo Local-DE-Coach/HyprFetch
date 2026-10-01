@@ -29,7 +29,7 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
 - **yt-dlp provisioning is automatic.** First media download: the daemon
   locates `yt-dlp` on `$PATH` or installs the official static Linux build
   into `~/.local/share/hyprfetch/bin/` — fetched from the self-hosted
-  channel (`istias.tech/hyprfetch/bin/yt-dlp/`) with GitHub only as a
+  channel (`istias.tech/hyprfetch/updates/bin/yt-dlp/`) with GitHub only as a
   build-time mirror, so end users never touch GitHub. Settings → Media
   engine shows the version and has an Update button (YouTube breaks
   extractors; keeping the engine fresh is a one click).
@@ -52,7 +52,7 @@ While pre-1.0, breaking API changes are allowed in MINOR bumps.
   the WebUI shows live connected/not-connected state.
 - **Shipped from your own server**: `hyprfetch-extension-<v>-firefox.xpi`
   and `-chrome.zip` are release assets AND channel files
-  (`istias.tech/hyprfetch/extension/`) — the new **Extension page** in the
+  (`istias.tech/hyprfetch/updates/extension/`) — the new **Extension page** in the
   WebUI links them with per-browser install steps.
 
 ### Added — WebUI: Extension page, quality picker, source filters

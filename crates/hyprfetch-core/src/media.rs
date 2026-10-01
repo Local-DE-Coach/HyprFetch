@@ -48,7 +48,7 @@ pub const PROGRESS_PREFIX: &str = "@@HFPROGRESS@@";
 
 /// Primary mirror of the official `yt-dlp-linux` build — the self-hosted
 /// update channel. End users must never depend on GitHub reachability.
-pub const YTDLP_MIRROR: &str = "https://istias.tech/hyprfetch/bin/yt-dlp/yt-dlp-linux";
+pub const YTDLP_MIRROR: &str = "https://istias.tech/hyprfetch/updates/bin/yt-dlp/yt-dlp-linux";
 
 /// Fallback mirror (only tried when the primary mirror fails — dev boxes,
 /// broken DNS, channel migration).

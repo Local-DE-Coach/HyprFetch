@@ -498,7 +498,7 @@ speed and the WebSocket stream behave identically.
 
 - `GET /api/media/ytdlp` → `{ installed, path, version, ffmpeg }`.
 - `POST /api/media/ytdlp/install` → (re-)install/update the binary from
-  the self-hosted channel (`istias.tech/hyprfetch/bin/yt-dlp/`), GitHub
+  the self-hosted channel (`istias.tech/hyprfetch/updates/bin/yt-dlp/`), GitHub
   only as fallback. Same response shape.
 
 Settings: `ytdlp_cookies_browser` (empty = none; `firefox`, `chromium`,
@@ -508,7 +508,7 @@ Settings: `ytdlp_cookies_browser` (empty = none; `firefox`, `chromium`,
 ## Browser extension bridge (v0.6.1)
 
 The HyprFetch Media Catcher extension (Chrome + Firefox, shipped from
-`https://istias.tech/hyprfetch/extension/`) heartbeats and reports media
+`https://istias.tech/hyprfetch/updates/extension/`) heartbeats and reports media
 to these loopback endpoints. They are CORS-enabled for extension origins.
 
 ### Extension → daemon
