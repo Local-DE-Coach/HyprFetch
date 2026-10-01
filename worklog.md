@@ -786,3 +786,48 @@ Stage Summary:
   will see the update via `hyprfetch update --check`.
 - Note for next sandbox: version bump MUST touch Cargo.toml AND the 4
   workspace entries in Cargo.lock (CI builds with --locked).
+
+---
+
+## 2026-10-01 — v0.5.2: the user-tested sidebar widget ships (widget/ install.sh v4 + in-app)
+
+**Context.** The user built and tested their own widget locally (a full
+"Downloads" tab inside the ii left sidebar, replacing the v0.5.0 bar icon)
+and asked for it to replace the shipped one, with a `.sh` installer to set
+it up and repo files arranged for fast edits.
+
+**What was adopted vs fixed** (design kept 1:1, real bugs corrected):
+- `widget/downloadManager/` = DownloadManager.qml + components/
+  {DownloadHeader,DownloadList,DownloadItem,DownloadInputBar}.qml.
+- `RippleButton text:` → ii's real API (`buttonText` / contentItem) — ii has
+  no `text` property.
+- `import "./downloadManager/components"` → `import "components"` (the file
+  sits INSIDE downloadManager/), plus `import "./downloadManager"` added to
+  SidebarLeftContent.qml (ii ships no qmldir anywhere — verified).
+- Window-overlay popup → QQC2 `Popup` on `Overlay.overlay` (the
+  `parent: root.Window.window` trick is an invalid Item assignment).
+- firefox/dolphin hardcoded → `xdg-open`; `add -o <path>` (exact path) added
+  to the CLI (splits to save_dir + filename on the API).
+- `hyprfetch remove <id> [--file]` added (the widget's delete button called a
+  command that did not exist); status.json entries gained `path`.
+
+**Installers.** `widget/install.sh` v4 (POSIX, `curl | sh`, dash-tested):
+removes the legacy v0.5.0 bar widget (dir + marked bar edit), installs to
+`modules/ii/sidebarLeft/downloadManager/`, wires the tab into
+SidebarLeftContent.qml with 5 idempotent edits (+ the trailing comma
+upstream ii omits — see below), sets ii's policy, restarts qs.
+`widget.rs` rewritten for the sidebar (same edits in Rust, unit-tested),
+status carries widget_dir/policy_set/legacy_bar_widget_found; uninstall
+prefers the `.bak-hyprfetch` byte-exact restore.
+
+**The v0.5.1 → v0.5.2 hotfix.** The first release wired the tab WITHOUT
+adding the trailing comma after the Anime entry (upstream ends the list
+without one) — a QML parse error that would break the whole sidebar. Caught
+during the live-server E2E rerun; fixed in both implementations, asserted in
+the smoke test + QML gate, shipped as v0.5.2 per the no-re-release policy.
+
+**Gates run.** cargo fmt/clippy -D warnings/test (all suites), npm lint +
+build + boot check, `sh -n`/`bash -n`, rewritten `qml_syntax_gate.py`
+(real QQmlEngine parse + instantiate of all 5 files, Appearance-role
+manifest), smoke test (install/idempotency/bootstrap-file://-stdin/
+byte-exact uninstall), E2E against the live channel.
